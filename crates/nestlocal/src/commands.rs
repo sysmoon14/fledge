@@ -19,6 +19,12 @@ const SETPOINT: (f64, f64) = (4.5, 35.0);
 /// Assistant's number entities offer.
 pub const ECO_LOW: (f64, f64) = (4.5, 21.0);
 pub const ECO_HIGH: (f64, f64) = (24.0, 32.0);
+/// How long a hot water boost runs when the command gives no minutes, as
+/// the unit's own boost menu starts at.
+const HOT_WATER_BOOST_DEFAULT_MIN: i64 = 60;
+/// The longest boost the command takes, minutes: nlclient cancels a
+/// hot_water_boost_time_to_end further ahead than its own two hour boost.
+const HOT_WATER_BOOST_MAX_MIN: i64 = 120;
 
 /// What a command does: change a bucket, or nothing more (the outdoor
 /// weather, which is no bucket).
@@ -178,6 +184,27 @@ impl Bridge {
                 device(fields!{name => on_off(arg)?})
             }
 
+            "hot_water_boost" => {
+                // ON boosts for the default; minutes boost for that long; OFF ends it.
+                let minutes = match on_off(arg) {
+                    Ok(true) => HOT_WATER_BOOST_DEFAULT_MIN,
+                    Ok(false) => 0,
+                    Err(_) => match arg.parse::<i64>() {
+                        Ok(m) if (0..=HOT_WATER_BOOST_MAX_MIN).contains(&m) => m,
+                        _ => return Err(format!("expected ON, OFF or minutes, 0-{HOT_WATER_BOOST_MAX_MIN}")),
+                    },
+                };
+                let end = if minutes == 0 { 0 } else { now + minutes * 60 };
+                device(fields!{"hot_water_boost_time_to_end" => num(end as f64)})
+            }
+
+            // The unit's own two: its hot water schedule, or none. There is
+            // no always-on mode; boost is the way to heat outside a schedule.
+            "hot_water_mode" => match arg {
+                "schedule" | "off" => device(fields!{"hot_water_mode" => arg}),
+                _ => Err("expected schedule or off".into()),
+            },
+
             "away_temperature_low" => device(fields!{name => num(temperature(arg, ECO_LOW)?)}),
             "away_temperature_high" => device(fields!{name => num(temperature(arg, ECO_HIGH)?)}),
 
@@ -304,6 +331,9 @@ mod tests {
             ("fan_mode", "auto", "device", json!({"fan_timer_timeout": 0.0})),
             ("learning_mode", "OFF", "device", json!({"learning_mode": false})),
             ("raw/device", r#"{"x":1}"#, "device", json!({"x": 1.0})),
+            ("hot_water_boost", "OFF", "device", json!({"hot_water_boost_time_to_end": 0.0})),
+            ("hot_water_boost", "0", "device", json!({"hot_water_boost_time_to_end": 0.0})),
+            ("hot_water_mode", "off", "device", json!({"hot_water_mode": "off"})),
         ] {
             let (got_bucket, got) = b.fields(name, arg).unwrap().unwrap();
             assert_eq!((got_bucket.as_str(), Value::Object(got)), (bucket, canonical(want)), "{name} {arg}");
@@ -311,7 +341,12 @@ mod tests {
         let (_, f) = b.fields("fan_mode", "on").unwrap().unwrap();
         let ahead = f["fan_timer_timeout"].as_f64().unwrap() - chrono::Utc::now().timestamp() as f64;
         assert!((1795.0..=1801.0).contains(&ahead), "fan on: timeout {ahead} s from now, want the unit's 1800");
-        for (name, arg) in [("mode", "auto"), ("target", "99"), ("preset", "away"), ("nope", ""),
+        let boost = |arg: &str| b.fields("hot_water_boost", arg).unwrap().unwrap().1["hot_water_boost_time_to_end"]
+            .as_f64().unwrap() - chrono::Utc::now().timestamp() as f64;
+        assert!((3595.0..=3601.0).contains(&boost("ON")), "boost on: {} s from now, want an hour", boost("ON"));
+        assert!((7195.0..=7201.0).contains(&boost("120")), "boost 120: {} s from now", boost("120"));
+        for (name, arg) in [("hot_water_mode", "on"), ("hot_water_boost", "121"), ("hot_water_boost", "-1"), ("hot_water_boost", "1.5"),
+                            ("mode", "auto"), ("target", "99"), ("preset", "away"), ("nope", ""),
                             ("outdoor_temperature", "unavailable"), ("outdoor_humidity", "101")] {
             assert!(b.fields(name, arg).is_err(), "{name} {arg} accepted");
         }

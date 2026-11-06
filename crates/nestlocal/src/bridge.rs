@@ -368,7 +368,8 @@ impl Bridge {
         if truthy(dev.get("has_air_filter")) {
             binary("filter_replacement_needed", "Filter replacement", "problem", Fields::new());
         }
-        if truthy(dev.get("has_hot_water_control")) {
+        let has_hot_water = truthy(dev.get("has_hot_water_control"));
+        if has_hot_water {
             binary("hot_water_active", "Hot water", "heat", Fields::new());
         }
         if truthy(dev.get("has_humidifier")) {
@@ -428,6 +429,22 @@ impl Bridge {
                 "unit_of_measurement" => "min",
                 "entity_category" => "config",
                 "icon" => "mdi:fan-clock",
+            });
+        }
+        if has_hot_water {
+            // The relay's own state is hot_water_active; this is the boost alone.
+            add("switch", "hot_water_boost", "Hot water boost", fields!{
+                "value_template" => on_off("hot_water_boost"),
+                "command_topic" => format!("{set}hot_water_boost"),
+                "icon" => "mdi:water-boiler",
+            });
+            add("sensor", "hot_water_boost_end", "Hot water boost end",
+                fields!{"value_template" => tmpl("hot_water_boost_end"), "device_class" => "timestamp"});
+            add("select", "hot_water_mode", "Hot water mode", fields!{
+                "value_template" => tmpl("hot_water_mode"),
+                "command_topic" => format!("{set}hot_water_mode"),
+                "options" => vec!["schedule", "off"],
+                "icon" => "mdi:water-boiler",
             });
         }
         add("select", "temperature_scale", "Temperature scale", fields!{
@@ -557,6 +574,17 @@ pub fn state(dev: &Fields, sh: &Fields) -> Fields {
         s.insert(k.into(), truthy(dev.get(k)).into());
     }
     s.insert("occupancy".into(), (!truthy(sh.get("auto_away"))).into());
+    match number(dev.get("hot_water_boost_time_to_end")) {
+        Some(t) if t > now => {
+            s.insert("hot_water_boost".into(), true.into());
+            s.insert("hot_water_boost_end".into(), rfc3339(t));
+        }
+        _ => {
+            s.insert("hot_water_boost".into(), false.into());
+            s.insert("hot_water_boost_end".into(), Value::Null);
+        }
+    }
+    s.insert("hot_water_mode".into(), dev.get("hot_water_mode").cloned().unwrap_or(Value::Null));
     match number(dev.get("time_to_target")) {
         Some(t) if t > now => s.insert("time_to_target".into(), rfc3339(t)),
         _ => s.insert("time_to_target".into(), Value::Null),
@@ -650,6 +678,27 @@ pub mod tests {
         assert!(configs.contains_key("homeassistant/binary_sensor/nestlocal_s/heating/config"));
         assert!(!configs.contains_key("homeassistant/binary_sensor/nestlocal_s/cooling/config"));
         assert!(configs.contains_key("homeassistant/select/nestlocal_s/fan_timer_duration/config"));
+        assert!(!configs.contains_key("homeassistant/switch/nestlocal_s/hot_water_boost/config"), "boost without hot water");
+    }
+
+    #[test]
+    fn hot_water_boost_follows_its_end_time() {
+        let future = chrono::Utc::now().timestamp() + 600;
+        let s = state(&obj(json!({"hot_water_boost_time_to_end": future, "hot_water_mode": "off"})), &Fields::new());
+        assert_eq!((&s["hot_water_boost"], &s["hot_water_boost_end"], &s["hot_water_mode"]),
+                   (&json!(true), &rfc3339(future as f64), &json!("off")));
+        let past = chrono::Utc::now().timestamp() - 1;
+        let s = state(&obj(json!({"hot_water_boost_time_to_end": past})), &Fields::new());
+        assert_eq!((&s["hot_water_boost"], &s["hot_water_boost_end"]), (&json!(false), &Value::Null));
+        let b = test_bridge();
+        b.announce(&obj(json!({"has_hot_water_control": true})), &obj(json!({"can_heat": true})));
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let sw: Value = serde_json::from_str(&configs["homeassistant/switch/nestlocal_s/hot_water_boost/config"]).unwrap();
+        assert_eq!(sw["command_topic"], json!("nestlocal/S/set/hot_water_boost"));
+        let mode: Value = serde_json::from_str(&configs["homeassistant/select/nestlocal_s/hot_water_mode/config"]).unwrap();
+        for option in mode["options"].as_array().unwrap() {
+            assert!(b.fields("hot_water_mode", option.as_str().unwrap()).is_ok(), "{option}");
+        }
     }
 
     #[test]
@@ -711,6 +760,7 @@ pub mod tests {
                         "fan_mode" => "auto",
                         "fan_timer_duration" => "30",
                         "temperature_scale" => "F",
+                        "hot_water_mode" => "off",
                         "target_humidity" => "40",
                         "clear_schedule" => "PRESS",
                         n if n.ends_with("_enabled") => "ON",
