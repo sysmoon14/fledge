@@ -9,6 +9,7 @@
 //!                                      (retained, will)
 //!   <prefix>/<serial>/state            the computed state (retained)
 //!   <prefix>/<serial>/raw/<bucket>     each bucket, whole (retained)
+//!   <prefix>/<serial>/heating_times    the heating schedule, by day (retained)
 //!   <prefix>/<serial>/set/<command>    Home Assistant's commands
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
@@ -243,6 +244,10 @@ impl Bridge {
             shown.insert("temperature_source".into(), self.temperature_source().map_or(Value::Null, Value::from));
         }
         self.publish(&format!("{}/state", self.base), true, Value::Object(shown).to_string().as_bytes());
+        if let Some(s) = buckets.get("schedule") {
+            let simple = crate::schedule::simple(s, &sprint(dev.get("temperature_scale")));
+            self.publish(&format!("{}/heating_times", self.base), true, simple.to_string().as_bytes());
+        }
     }
 
     /// Publishes Home Assistant discovery, for what this unit's equipment
@@ -475,6 +480,16 @@ impl Bridge {
                 "icon" => "mdi:fan-clock",
             });
         }
+        // The heating schedule: how many setpoints the week has, with the days
+        // as attributes; set/heating_times writes it.
+        let times = format!("{}/heating_times", self.base);
+        add("sensor", "heating_times", "Heating times", fields!{
+            "state_topic" => times.clone(),
+            "value_template" => "{{ value_json.days.values() | map('length') | sum }}",
+            "json_attributes_topic" => times,
+            "json_attributes_template" => "{{ value_json.days | tojson }}",
+            "icon" => "mdi:radiator",
+        });
         add("select", "temperature_scale", "Temperature scale", fields!{
             "value_template" => tmpl("temperature_scale"),
             "command_topic" => format!("{set}temperature_scale"),
@@ -805,6 +820,10 @@ pub mod tests {
         b.announce(&dev, &sh);
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let s = state(&dev, &sh);
+        let schedule_keys = match crate::schedule::simple(&Fields::new(), "C") {
+            Value::Object(o) => o,
+            _ => unreachable!(),
+        };
         let mut ids = std::collections::BTreeSet::new();
         for (topic, config) in &configs {
             let c: Value = serde_json::from_str(config).unwrap();
@@ -817,15 +836,21 @@ pub mod tests {
             assert!(topic.ends_with(&format!("/nestlocal_s/{key}/config")), "{topic}");
             assert_eq!(c["availability_topic"], json!("nestlocal/S/availability"), "{topic}");
             assert_eq!(c["device"]["identifiers"], json!(["nestlocal_s"]), "{topic}");
+            // The heating times read their own topic, the rest the state's.
+            let (want, keys) = if c["state_topic"] == json!("nestlocal/S/heating_times") {
+                ("nestlocal/S/heating_times", schedule_keys.clone())
+            } else {
+                ("nestlocal/S/state", s.clone())
+            };
             for (k, v) in c.as_object().unwrap() {
                 let Some(v) = v.as_str() else { continue };
-                // Every key a template reads, the state has.
+                // Every key a template reads, its topic has.
                 for (i, _) in v.match_indices("value_json.") {
                     let field: String = v[i + 11..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-                    assert!(s.contains_key(&field), "{topic}: {k} reads {field}, which the state lacks");
+                    assert!(keys.contains_key(&field), "{topic}: {k} reads {field}, which its topic lacks");
                 }
-                if k.ends_with("state_topic") {
-                    assert_eq!(v, "nestlocal/S/state", "{topic}: {k}");
+                if k.ends_with("_topic") && !k.ends_with("command_topic") && k != "availability_topic" {
+                    assert_eq!(v, want, "{topic}: {k}");
                 }
                 // Every command topic names a command (for a payload the
                 // entity would send).
