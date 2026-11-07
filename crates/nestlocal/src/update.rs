@@ -669,6 +669,11 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("update.failed")).unwrap(), "v0.3.2-ben.3\n");
         // Committed (no PENDING): starts are not counted.
         start();
+        // stop kills what pidof still finds; here nothing is left.
+        exe(&dir.join("bin/pidof"), "#!/bin/sh\nexit 1\n");
+        let path = format!("{d}/bin:{}", std::env::var("PATH").unwrap_or_default());
+        let out = std::process::Command::new("sh").arg(dir.join("init")).arg("stop").env("PATH", path).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert!(std::fs::read_to_string(dir.join("nestlocal")).unwrap().contains("old"));
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -54,6 +54,13 @@ start)
     ;;
 stop)
     start-stop-daemon -K -q -p ${PIDFILE} -x ${DAEMON}
+    # One the pidfile lost (a start over a still running nestlocal writes
+    # its own pid) would hold the ports, and every start after fail.
+    for i in 1 2 3 4 5; do
+        pids=$(pidof nestlocal) || break
+        kill $pids 2> /dev/null
+        sleep 1
+    done
     rm -f ${PIDFILE}
     [ ! -x /etc/init.d/nestlocal-thread ] || /etc/init.d/nestlocal-thread stop
     ;;
