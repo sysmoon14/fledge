@@ -5,7 +5,8 @@
 #     utils/push-over-ssh.sh [--nestlocal] [--screen] [--build] [--dry-run] [--log FILE]
 #                            [--wake mqtt://[USER@]BROKER[:PORT]] [--wake-topic TOPIC] root@HOST
 #
-#   --nestlocal  push build/nestlocal-armv7 to /nestlabs/sbin/nestlocal
+#   --nestlocal  push build/nestlocal-armv7 to /nestlabs/sbin/nestlocal, and
+#                crates/nestlocal/rootfs/nestlocal.init to /etc/init.d/nestlocal
 #   --screen     patch the unit's own stock nlclient (/etc/unfr0zen/nlclient.original,
 #                fetched once into .work/push/) with this checkout's screen, and push
 #                it with its undo journal
@@ -239,12 +240,23 @@ if [ $dry = 1 ]; then
 fi
 
 if [ $nestlocal = 1 ]; then
+    # The init script rolls back an update nestlocal installed (update.rs);
+    # the app installs it only when it patches the unit.
+    init=crates/nestlocal/rootfs/nestlocal.init
+    init_hash=$(hash "$init")
+    if [ "$(remote_hash /etc/init.d/nestlocal)" != "$init_hash" ]; then
+        say "nestlocal.init: copying"
+        stage "$init" /etc/init.d/nestlocal "$init_hash" 755
+        on "mv -f /etc/init.d/nestlocal.unfr0zen-new /etc/init.d/nestlocal && sync"
+    fi
     if [ "$(remote_hash /nestlabs/sbin/nestlocal)" = "$nestlocal_hash" ]; then
         say "nestlocal: the unit already runs this build"
     else
         say "nestlocal: copying"
         stage build/nestlocal-armv7 /nestlabs/sbin/nestlocal "$nestlocal_hash" 755
         swap /nestlabs/sbin/nestlocal
+        # This build replaces any update still pending; it is not rolled back.
+        on "rm -f /etc/nestlocal/update.pending && sync"
         say "nestlocal: restarting"
         old=$(pid_of nestlocal)
         on 'monit restart nestlocal'

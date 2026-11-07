@@ -207,7 +207,7 @@ async fn run(config: flags::Config) {
         let (broker, tls) = mqtttls::broker(&config.mqtt, config.mqtt_tls, &config.mqtt_ca).unwrap_or_else(|e| fatal!("{e}"));
         // Before connecting: the first announcement includes the update entity.
         if !config.update_repo.is_empty() {
-            bridge.offer_updates(&config.update_repo);
+            bridge.offer_updates(&config.update_repo, config.update_key);
         }
         bridge.run(&broker, &config.mqtt_user, &password, tls);
         motion::start(bridge.clone());

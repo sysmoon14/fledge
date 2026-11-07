@@ -67,6 +67,20 @@ impl Bridge {
             }
             return;
         }
+        if name == "update" {
+            match String::from_utf8_lossy(payload).trim() {
+                "install" => match self.updates() {
+                    Some(updates) if updates.key.is_some() => {
+                        if let Some(bridge) = self.me() {
+                            bridge.install_update();
+                        }
+                    }
+                    _ => logf!("mqtt: update: install needs -update-repo and -update-key"),
+                },
+                other => logf!("mqtt: update {other:?}: expected install"),
+            }
+            return;
+        }
         if name == "check_update" {
             match self.updates() {
                 Some(updates) => updates.check.notify_one(),

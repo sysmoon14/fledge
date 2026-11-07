@@ -3376,6 +3376,7 @@ dependencies = [
  "md-5",
  "png 0.17.16",
  "rand 0.10.3",
+ "ring",
  "rs-matter",
  "rustls",
  "rustls-native-certs",

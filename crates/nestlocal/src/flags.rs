@@ -44,6 +44,7 @@ const FLAGS: &[(&str, Kind, &str, &str)] = &[
     ("state", Kind::Text, "/media/data/nestlocal.json", "bucket store"),
     ("syslog", Kind::Bool, "false", "log to syslog instead of stderr"),
     ("topic", Kind::Text, "nestlocal", "MQTT topic prefix"),
+    ("update-key", Kind::Text, "", "Ed25519 public key (base64) a release of -update-repo must be signed with to install from Home Assistant (update.rs), empty for none"),
     ("update-repo", Kind::Text, "", "GitHub owner/name whose latest release Home Assistant's update entity offers (update.rs), empty for none"),
     ("wake-iface", Kind::Text, "wlan0", "WiFi interface the broker's packets wake the sleeping unit on (wake.rs); empty for none, which also lets the unit sleep with -matter"),
     ("v", Kind::Bool, "false", "log every request and answer"),
@@ -80,6 +81,7 @@ pub struct Config {
     pub state: String,
     pub syslog: bool,
     pub topic: String,
+    pub update_key: Option<[u8; 32]>,
     pub update_repo: String,
     pub verbose: bool,
     pub wake_iface: String,
@@ -207,6 +209,13 @@ pub fn parse(args: &[String]) -> Result<Config, Option<String>> {
     if !update_repo.is_empty() && !crate::update::valid_repo(&update_repo) {
         return Err(Some(format!("invalid value {update_repo:?} for flag -update-repo: expected owner/name")));
     }
+    let update_key = match get("update-key").as_str() {
+        "" => None,
+        text => Some(crate::update::parse_key(text).map_err(|e| Some(format!("invalid value {text:?} for flag -update-key: {e}")))?),
+    };
+    if update_key.is_some() && update_repo.is_empty() {
+        return Err(Some("-update-key needs -update-repo".into()));
+    }
     let matter_discriminator = get("matter-discriminator").parse::<u16>().ok().filter(|d| *d < 4096)
         .ok_or_else(|| Some(format!("invalid value {:?} for flag -matter-discriminator", get("matter-discriminator"))))?;
     Ok(Config {
@@ -240,6 +249,7 @@ pub fn parse(args: &[String]) -> Result<Config, Option<String>> {
         state: get("state"),
         syslog: flag("syslog"),
         topic: get("topic"),
+        update_key,
         update_repo,
         verbose: flag("v"),
         wake_iface: get("wake-iface"),

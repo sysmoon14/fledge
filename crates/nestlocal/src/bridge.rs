@@ -58,13 +58,15 @@ pub struct Bridge {
     pub lights: crate::lights::Lights,
     /// The releases the update entity offers, with -update-repo (update.rs).
     updates: OnceLock<crate::update::Updates>,
+    /// This bridge, for what a command starts that outlives it.
+    me: std::sync::Weak<Bridge>,
 }
 
 impl Bridge {
     pub fn new(prefix: &str, discovery: &str, serial: &str, store: Arc<Store>, outdoor: Arc<Outdoor>,
                live: Option<Arc<Liveness>>, wwn_boiler: bool) -> Arc<Bridge> {
         let (time_ok, time_ok_rx) = mpsc::channel(1);
-        Arc::new(Bridge {
+        Arc::new_cyclic(|me| Bridge {
             serial: serial.into(),
             base: format!("{prefix}/{serial}"),
             discovery: discovery.into(),
@@ -81,6 +83,7 @@ impl Bridge {
             sensors: std::sync::atomic::AtomicBool::new(false),
             lights: Default::default(),
             updates: OnceLock::new(),
+            me: me.clone(),
         })
     }
 
@@ -103,10 +106,81 @@ impl Bridge {
     }
 
     /// Offers `repo`'s latest release on an update entity, checked daily and
-    /// when Home Assistant presses its check button (update.rs).
-    pub fn offer_updates(self: &Arc<Self>, repo: &str) {
-        if self.updates.set(crate::update::Updates::new(repo)).is_ok() {
+    /// when Home Assistant presses its check button, and installs it with
+    /// `key` (update.rs).
+    pub fn offer_updates(self: &Arc<Self>, repo: &str, key: Option<[u8; 32]>) {
+        if self.updates.set(crate::update::Updates::new(repo, key)).is_ok() {
             tokio::spawn(self.clone().check_updates());
+        }
+    }
+
+    /// Home Assistant pressed Install: download, check and install the
+    /// latest release, then restart into it under monit.
+    pub fn install_update(self: &Arc<Self>) {
+        use crate::update::Progress;
+        let Some(updates) = self.updates.get() else {
+            return logf!("update: install: no -update-repo");
+        };
+        if matches!(*updates.progress.lock().unwrap(), Progress::Downloading(_) | Progress::Restarting) {
+            return logf!("update: install: already installing");
+        }
+        *updates.progress.lock().unwrap() = Progress::Downloading(0);
+        self.publish_update();
+        let bridge = self.clone();
+        tokio::spawn(async move {
+            let Some(updates) = bridge.updates.get() else { return };
+            // Asleep, the unit would drop the download.
+            let _ = crate::wake::stay_awake(crate::wake::MAX_STAY_AWAKE);
+            let shown = bridge.clone();
+            let result = updates.install(&crate::update::Paths::unit(), move |percent| {
+                if let Some(u) = shown.updates.get() {
+                    *u.progress.lock().unwrap() = Progress::Downloading(percent);
+                }
+                shown.publish_update();
+            }).await;
+            match result {
+                Ok(version) => {
+                    logf!("update: installed {version}; restarting into it");
+                    *updates.progress.lock().unwrap() = Progress::Restarting;
+                    bridge.publish_update();
+                    // monit stops this process; the shell outlives it.
+                    let restart = std::process::Command::new("sh").args(["-c", "sleep 2; monit restart nestlocal"]).spawn();
+                    if let Err(e) = restart {
+                        logf!("update: monit restart: {e}; restarting by exiting");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    logf!("update: install: {e}");
+                    *updates.progress.lock().unwrap() = Progress::Failed(e);
+                    let _ = crate::wake::stay_awake(0);
+                    bridge.publish_update();
+                }
+            }
+        });
+    }
+
+    /// An install left this build pending: once nlclient is talking to it,
+    /// clear it, so nestlocal.init stops counting towards a rollback. One
+    /// that is not healthy within PENDING_HEALTHY exits to be started again.
+    async fn commit_update(self: Arc<Self>, version: String) {
+        const PENDING_HEALTHY: Duration = Duration::from_secs(600);
+        let _ = crate::wake::stay_awake(crate::wake::MAX_STAY_AWAKE);
+        let started = SystemTime::now();
+        loop {
+            if self.live.as_ref().is_none_or(|l| l.alive()) {
+                crate::update::commit();
+                let _ = crate::wake::stay_awake(0);
+                logf!("update: {version} is running and nlclient talks to it; committed");
+                self.publish_update();
+                return;
+            }
+            if started.elapsed().unwrap_or_default() > PENDING_HEALTHY {
+                logf!("update: {version} pending, but nlclient has not called in; exiting to be started again");
+                std::process::exit(1);
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 
@@ -130,13 +204,18 @@ impl Bridge {
         }
     }
 
+    pub fn me(&self) -> Option<Arc<Self>> {
+        self.me.upgrade()
+    }
+
     pub fn updates(&self) -> Option<&crate::update::Updates> {
         self.updates.get()
     }
 
     fn publish_update(&self) {
         if let Some(updates) = self.updates.get() {
-            let state = crate::update::state(updates.latest.lock().unwrap().as_ref());
+            let state = crate::update::state(updates.latest.lock().unwrap().as_ref(),
+                                             &updates.progress.lock().unwrap(), crate::update::failed().as_deref());
             self.publish(&format!("{}/update", self.base), true, state.to_string().as_bytes());
         }
     }
@@ -175,6 +254,9 @@ impl Bridge {
         }
         tokio::spawn(self.clone().keep_time());
         tokio::spawn(self.clone().serve_lights());
+        if let Some(version) = crate::update::pending() {
+            tokio::spawn(self.clone().commit_update(version));
+        }
         tokio::spawn(connection.run(self.clone()));
     }
 
@@ -613,13 +695,18 @@ impl Bridge {
                 "icon" => "mdi:water-boiler-auto",
             });
         }
-        // This build and the latest release of -update-repo; the entity
-        // only tells of it: there is no install (update.rs).
-        if self.updates.get().is_some() {
-            add("update", "nestlocal", "nestlocal", fields!{
+        // This build and the latest release of -update-repo (update.rs).
+        if let Some(updates) = self.updates.get() {
+            let mut update = fields!{
                 "state_topic" => format!("{}/update", self.base),
                 "entity_category" => "config",
-            });
+            };
+            // With -update-key Home Assistant offers Install.
+            if updates.key.is_some() {
+                update.insert("command_topic".into(), format!("{set}update").into());
+                update.insert("payload_install".into(), "install".into());
+            }
+            add("update", "nestlocal", "nestlocal", update);
             add("button", "check_update", "Check for nestlocal update", fields!{
                 "command_topic" => format!("{set}check_update"),
                 "entity_category" => "config",
@@ -902,15 +989,23 @@ pub mod tests {
         assert!(!configs.keys().any(|t| t.contains("update")));
 
         let b = test_bridge();
-        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/unfr0zen")).is_ok());
+        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/unfr0zen", None)).is_ok());
         b.announce(&dev, &sh);
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let update: Value = serde_json::from_str(&configs["homeassistant/update/nestlocal_s/nestlocal/config"]).unwrap();
         assert_eq!(update["state_topic"], json!("nestlocal/S/update"));
-        // Nothing installs yet: no command topic, so Home Assistant shows no install.
+        // Without -update-key nothing installs: no command topic, no Install.
         assert!(update.get("command_topic").is_none());
         let check: Value = serde_json::from_str(&configs["homeassistant/button/nestlocal_s/check_update/config"]).unwrap();
         assert_eq!(check["command_topic"], json!("nestlocal/S/set/check_update"));
+
+        let b = test_bridge();
+        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/unfr0zen", Some([7; 32]))).is_ok());
+        b.announce(&dev, &sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let update: Value = serde_json::from_str(&configs["homeassistant/update/nestlocal_s/nestlocal/config"]).unwrap();
+        assert_eq!(update["command_topic"], json!("nestlocal/S/set/update"));
+        assert_eq!(update["payload_install"], json!("install"));
     }
 
     #[test]

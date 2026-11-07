@@ -11,9 +11,28 @@ DAEMON=/nestlabs/sbin/nestlocal
 PIDFILE=/var/run/nestlocal.pid
 OPTIONS=/etc/nestlocal/options
 [ -f "$OPTIONS" ] || OPTIONS=/media/system-config/nestlocal.options
+# An update nestlocal installed (crates/nestlocal/src/update.rs): starts are
+# counted here until the new build, healthy, removes PENDING; after three the
+# previous build is put back and the version recorded in FAILED.
+PENDING=/etc/nestlocal/update.pending
+FAILED=/etc/nestlocal/update.failed
 
 case "${1}" in
 start)
+    if [ -f "$PENDING" ]; then
+        starts=$(sed -n 1p "$PENDING")
+        version=$(sed -n 2p "$PENDING")
+        case $starts in ''|*[!0-9]*) starts=0 ;; esac
+        starts=$((starts + 1))
+        if [ "$starts" -gt 3 ] && [ -x "${DAEMON}.prev" ]; then
+            echo "nestlocal: ${version} did not start three times; putting the previous build back" >&2
+            echo "$version" > "$FAILED"
+            mv -f "${DAEMON}.prev" "${DAEMON}" && rm -f "$PENDING"
+        else
+            printf '%s\n%s\n' "$starts" "$version" > "$PENDING.new" && mv -f "$PENDING.new" "$PENDING"
+        fi
+        sync
+    fi
     # A radio that will not flash or attach must not take MQTT and Wi-Fi Matter down with it.
     if grep -q -- '-matter-thread' "$OPTIONS"; then
         /etc/init.d/nestlocal-thread start || echo "nestlocal: Thread transport unavailable; serving without it" >&2
