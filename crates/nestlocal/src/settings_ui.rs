@@ -52,6 +52,7 @@ pub fn init(matter: bool, zigbee: bool, doom: bool) -> std::io::Result<()> {
     let features = (matter as u8) | ((zigbee as u8) << 1) | ((doom as u8) << 2);
     publish("features", &[b'0' + features])?;
     publish_activity_icons()?;
+    publish_light_ring()?;
     for name in ["display.request", "display.taken", "lights.request", "lights.taken", "matter.request", "matter-reset.request", "zigbee.request", "doom.request", "matter.code", "matter.png"] {
         let _ = std::fs::remove_file(Path::new(DIR).join(name));
     }
@@ -74,6 +75,81 @@ fn scaled(length: usize) -> usize {
 
 // Eight small frames rendered through nlclient's native PNG API. Keeping the
 // animation in the view avoids coupling UI refresh to radio/commissioning waits.
+/// Ticks of a light's brightness ring, one per 2%, and the arc they span:
+/// a dimmer knob's 300°, open at the bottom, lit clockwise from its left end.
+pub const RING_TICKS: usize = 50;
+const RING_ARC: f64 = 300.0;
+
+/// The light page's brightness ring: each tick lit (light-ring-NN-on.png)
+/// and unlit (-off), and light-ring.layout, "<count>\n" then "<x> <y>\n" per
+/// tick, the top left of its image relative to the display's centre.
+fn publish_light_ring() -> std::io::Result<()> {
+    let (layout, images) = light_ring(crate::device::current().display)?;
+    for (name, png) in images {
+        publish(&name, &png)?;
+    }
+    publish("light-ring.layout", layout.as_bytes())
+}
+
+/// PNG images by file name.
+type Images = Vec<(String, Vec<u8>)>;
+
+/// The ring for a display this many pixels across: its layout, and each
+/// tick's images.
+fn light_ring(display: usize) -> std::io::Result<(String, Images)> {
+    let display = display as f64;
+    let mut images = Vec::new();
+    // At the gen 3's 480 pixels: 22-pixel ticks, 4 wide, inside the bezel.
+    let (outer, inner, width) = (display * 226.0 / 480.0, display * 204.0 / 480.0, display * 4.0 / 480.0);
+    let size = ((outer - inner) + width * 2.0).ceil() as usize + 2;
+    let mut layout = format!("{RING_TICKS}\n");
+    for tick in 0..RING_TICKS {
+        // Clockwise from the top; the arc starts at its lower left.
+        let degrees = -RING_ARC / 2.0 + RING_ARC * tick as f64 / (RING_TICKS - 1) as f64;
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let middle = (outer + inner) / 2.0;
+        let (mx, my) = (sin * middle, -cos * middle);
+        let left = (mx - size as f64 / 2.0).round();
+        let top = (my - size as f64 / 2.0).round();
+        layout += &format!("{} {}\n", left as i32, top as i32);
+        // The tick's two ends, in its image's pixels.
+        let (ax, ay) = (sin * inner - left, -cos * inner - top);
+        let (bx, by) = (sin * outer - left, -cos * outer - top);
+        for (lit, colour) in [(true, [255u8, 180, 60]), (false, [80u8, 80, 80])] {
+            let mut rgba = vec![0u8; size * size * 4];
+            for y in 0..size { for x in 0..size {
+                let distance = segment_distance((x as f64 + 0.5, y as f64 + 0.5), (ax, ay), (bx, by));
+                let coverage = (width / 2.0 + 0.5 - distance).clamp(0.0, 1.0);
+                if coverage > 0.0 {
+                    let at = (y * size + x) * 4;
+                    rgba[at..at + 3].copy_from_slice(&colour);
+                    rgba[at + 3] = (coverage * 255.0).round() as u8;
+                }
+            } }
+            images.push((format!("light-ring-{tick:02}-{}.png", if lit { "on" } else { "off" }), encode_rgba(size, &rgba)?));
+        }
+    }
+    Ok((layout, images))
+}
+
+fn segment_distance((px, py): (f64, f64), (ax, ay): (f64, f64), (bx, by): (f64, f64)) -> f64 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    ((px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt()
+}
+
+fn encode_rgba(size: usize, rgba: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut data, size as u32, size as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(rgba)?;
+    }
+    Ok(data)
+}
+
 fn publish_activity_icons() -> std::io::Result<()> {
     let size = scaled(56);
     let (centre, orbit, dot_radius) = (size as f64 / 2.0, size as f64 * 20.0 / 56.0, size as f64 * 4.0 / 56.0);
@@ -140,6 +216,37 @@ fn encode_matter_codes(comm: &rs_matter::BasicCommData, capabilities: rs_matter:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_light_ring_spans_a_dimmer_arc_inside_the_display() {
+        for display in [480usize, 320] {
+            let (layout, images) = super::light_ring(display).unwrap();
+            let mut lines = layout.lines();
+            assert_eq!(lines.next(), Some(super::RING_TICKS.to_string().as_str()));
+            let ticks: Vec<(i32, i32)> = lines.map(|l| {
+                let mut xy = l.split(' ').map(|v| v.parse::<i32>().unwrap());
+                (xy.next().unwrap(), xy.next().unwrap())
+            }).collect();
+            assert_eq!(ticks.len(), super::RING_TICKS);
+            assert_eq!(images.len(), super::RING_TICKS * 2);
+            let half = display as i32 / 2;
+            for &(x, y) in &ticks {
+                assert!(x >= -half && y >= -half && x < half && y < half, "{display}: {x} {y}");
+            }
+            // Mirror images about the vertical, open at the bottom, starting lower left.
+            let (first, last) = (ticks[0], ticks[super::RING_TICKS - 1]);
+            assert!(first.0 < 0 && first.1 > 0 && last.0 > 0 && last.1 > 0);
+            assert!((first.1 - last.1).abs() <= 1);
+            let middle = ticks[super::RING_TICKS / 2];
+            assert!(middle.1 < -half / 2, "the middle tick is at the top");
+            // Every image is a PNG of the same small square.
+            let mut reader = png::Decoder::new(images[0].1.as_slice()).read_info().unwrap();
+            let mut buffer = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buffer).unwrap();
+            assert!(info.width == info.height && (info.width as usize) < display / 8);
+            assert!(buffer.chunks(4).any(|p| p[3] == 255), "a tick is drawn");
+        }
+    }
+
     use super::*;
     use rs_matter::{BasicCommData, sc::pase::{Spake2pVerifierPassword, Spake2pVerifierPasswordRef}};
 
