@@ -143,8 +143,10 @@ impl Bridge {
                     logf!("update: installed {version}; restarting into it");
                     *updates.progress.lock().unwrap() = Progress::Restarting;
                     bridge.publish_update();
-                    // monit stops this process; the shell outlives it.
-                    let restart = std::process::Command::new("sh").args(["-c", "sleep 2; monit restart nestlocal"]).spawn();
+                    // monit stops this process: the restart runs detached
+                    // (the shell exits at once, and is waited for).
+                    let restart = std::process::Command::new("sh")
+                        .args(["-c", "(sleep 2; monit restart nestlocal) > /dev/null 2>&1 &"]).status();
                     if let Err(e) = restart {
                         logf!("update: monit restart: {e}; restarting by exiting");
                         tokio::time::sleep(Duration::from_secs(2)).await;

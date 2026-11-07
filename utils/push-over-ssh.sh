@@ -255,8 +255,9 @@ if [ $nestlocal = 1 ]; then
         say "nestlocal: copying"
         stage build/nestlocal-armv7 /nestlabs/sbin/nestlocal "$nestlocal_hash" 755
         swap /nestlabs/sbin/nestlocal
-        # This build replaces any update still pending; it is not rolled back.
-        on "rm -f /etc/nestlocal/update.pending && sync"
+        # This build replaces any update still pending or rolled back: it is
+        # not rolled back, and a release that was may be installed again.
+        on "rm -f /etc/nestlocal/update.pending /etc/nestlocal/update.failed && sync"
         say "nestlocal: restarting"
         old=$(pid_of nestlocal)
         on 'monit restart nestlocal'

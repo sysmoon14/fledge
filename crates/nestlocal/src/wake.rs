@@ -101,6 +101,12 @@ pub fn stay_awake(seconds: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Holds the unit awake for at least `seconds` from now, without
+/// shortening a longer hold.
+pub fn keep_awake_for(seconds: u64) {
+    STAY_AWAKE_UNTIL.fetch_max(unix_now() + seconds.min(MAX_STAY_AWAKE), Ordering::SeqCst);
+}
+
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }

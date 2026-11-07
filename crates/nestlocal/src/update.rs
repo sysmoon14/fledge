@@ -108,6 +108,20 @@ fn version_key(version: &str) -> Option<(u32, u32, u32, u32, u32)> {
     Some((major, minor, patch, ben, commits))
 }
 
+/// The release a build is on: git describe without -K-gHASH and -dirty.
+pub fn release_of(version: &str) -> &str {
+    let version = version.strip_suffix("-dirty").unwrap_or(version);
+    match version.rsplit_once("-g") {
+        Some((head, hash)) if !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
+            match head.rsplit_once('-') {
+                Some((base, k)) if !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()) => base,
+                _ => version,
+            }
+        }
+        _ => version,
+    }
+}
+
 /// Whether `latest` is newer than `installed`; neither readable is not.
 pub fn newer(latest: &str, installed: &str) -> bool {
     matches!((version_key(latest), version_key(installed)), (Some(l), Some(i)) if l > i)
@@ -169,7 +183,8 @@ impl Paths {
         path.into()
     }
 
-    /// Puts `binary` in place of the daemon, keeping the old one as .prev,
+    /// Puts `binary` in place of the daemon, keeping the old one as .prev (a
+    /// hard link: no space, and the running process keeps its path),
     /// and leaves PENDING (0 starts, the version) for nestlocal.init.
     pub fn install(&self, binary: &[u8], version: &str) -> Result<(), String> {
         use std::io::Write;
@@ -192,12 +207,14 @@ impl Paths {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(|e| err("chmod", &new, e))?;
         std::fs::write(&self.pending, format!("0\n{version}\n")).map_err(|e| err("write", &self.pending, e))?;
-        let swapped = std::fs::rename(&self.daemon, &prev).map_err(|e| err("keep", &self.daemon, e))
-            .and_then(|()| std::fs::rename(&new, &self.daemon).map_err(|e| err("install", &new, e)));
-        if let Err(e) = swapped {
-            let _ = std::fs::rename(&prev, &self.daemon);
+        // A second name for the running build, not a rename: start-stop-daemon
+        // finds the running nestlocal by its executable's path, which a
+        // rename would change, and stopping it would then miss it.
+        std::fs::hard_link(&self.daemon, &prev).map_err(|e| err("keep", &self.daemon, e))?;
+        if let Err(e) = std::fs::rename(&new, &self.daemon) {
+            let _ = std::fs::remove_file(&prev);
             let _ = std::fs::remove_file(&self.pending);
-            return Err(e);
+            return Err(err("install", &new, e));
         }
         sync();
         Ok(())
@@ -266,7 +283,7 @@ pub enum Progress {
 
 /// The entity's state: what the MQTT update entity reads from its state topic.
 pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>) -> Value {
-    let mut state = serde_json::json!({ "installed_version": VERSION });
+    let mut state = serde_json::json!({ "installed_version": VERSION, "title": "nestlocal" });
     state["in_progress"] = matches!(progress, Progress::Downloading(_) | Progress::Restarting).into();
     if let Progress::Downloading(percent) = progress {
         state["update_percentage"] = (*percent).into();
@@ -281,6 +298,16 @@ pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>
     }
     if let Some(r) = latest {
         state["latest_version"] = offered(VERSION, &r.tag).into();
+        // Home Assistant ranks a development build's -K-gHASH above a plain
+        // -ben.N, so it would not offer a newer release: show it the release
+        // the build is on (the title keeps the build).
+        if newer(&r.tag, VERSION) {
+            let base = release_of(VERSION);
+            if base != VERSION {
+                state["installed_version"] = base.into();
+                state["title"] = format!("nestlocal {VERSION}").into();
+            }
+        }
         state["release_url"] = r.url.clone().into();
         // Home Assistant shows at most 255 characters of the summary.
         state["release_summary"] = r.notes.chars().take(255).collect::<String>().into();
@@ -345,6 +372,8 @@ impl Updates {
     /// repository has no release yet.
     pub async fn refresh(&self) -> Result<Option<Release>, String> {
         *self.checked.lock().unwrap() = Some(SystemTime::now());
+        // Asleep, the unit would drop the request half way.
+        crate::wake::keep_awake_for(TIMEOUT.as_secs() + 5);
         let latest = tokio::time::timeout(TIMEOUT, fetch(&self.repo, self.tls.clone())).await
             .map_err(|_| "timed out".to_string())??;
         *self.latest.lock().unwrap() = latest.clone();
@@ -396,7 +425,7 @@ async fn send(tls: &Arc<rustls::ClientConfig>, url: &str) -> Result<hyper::Respo
     let name = rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| e.to_string())?;
     let stream = tokio_rustls::TlsConnector::from(tls.clone()).connect(name, tcp).await.map_err(|e| format!("{host}: {e}"))?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-        .await.map_err(|e| e.to_string())?;
+        .await.map_err(|e| chain(&e))?;
     tokio::spawn(conn);
     let request = hyper::Request::get(path)
         .header("host", host)
@@ -404,7 +433,18 @@ async fn send(tls: &Arc<rustls::ClientConfig>, url: &str) -> Result<hyper::Respo
         .header("accept", if host == API_HOST { "application/vnd.github+json" } else { "application/octet-stream" })
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|e| e.to_string())?;
-    sender.send_request(request).await.map_err(|e| format!("{host}: {e}"))
+    sender.send_request(request).await.map_err(|e| format!("{host}: {}", chain(&e)))
+}
+
+/// An error and its causes: hyper's own says only "connection error".
+fn chain(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        text = format!("{text}: {c}");
+        cause = c.source();
+    }
+    text
 }
 
 async fn read(response: hyper::Response<hyper::body::Incoming>, limit: usize, progress: &impl Fn(u8)) -> Result<Vec<u8>, String> {
@@ -416,7 +456,7 @@ async fn read(response: hyper::Response<hyper::body::Incoming>, limit: usize, pr
     let mut data = Vec::with_capacity(length.unwrap_or(0));
     let mut shown = None;
     while let Some(frame) = body.frame().await {
-        if let Ok(chunk) = frame.map_err(|e| e.to_string())?.into_data() {
+        if let Ok(chunk) = frame.map_err(|e| chain(&e))?.into_data() {
             data.extend_from_slice(&chunk);
             if data.len() > limit {
                 return Err(format!("more than {limit} bytes"));
@@ -505,6 +545,23 @@ mod tests {
     }
 
     #[test]
+    fn a_build_s_release_is_its_tag() {
+        assert_eq!(release_of("v0.3.2-ben.1-1-g51fc988"), "v0.3.2-ben.1");
+        assert_eq!(release_of("v0.3.2-16-gffb3d93-dirty"), "v0.3.2");
+        assert_eq!(release_of("v0.3.2-ben.2"), "v0.3.2-ben.2");
+        assert_eq!(release_of("f290a39"), "f290a39");
+    }
+
+    #[test]
+    fn home_assistant_sees_a_development_build_as_its_release_when_one_is_newer() {
+        let r = Release { tag: "v99.0.0-ben.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
+        let s = state(Some(&r), &Progress::Idle, None);
+        assert_eq!(s["installed_version"], release_of(VERSION));
+        assert_eq!(s["latest_version"], "v99.0.0-ben.1");
+        assert_eq!(state(None, &Progress::Idle, None)["title"], "nestlocal");
+    }
+
+    #[test]
     fn versions_order_by_release_then_fork_release_then_commits() {
         assert!(newer("v0.3.2-ben.2", "v0.3.2-ben.1"));
         assert!(newer("v0.3.2-ben.2", "v0.3.2-ben.1-5-gabc1234"));
@@ -560,6 +617,7 @@ mod tests {
         paths.install(b"new", "v0.3.2-ben.2").unwrap();
         assert_eq!(std::fs::read(&paths.daemon).unwrap(), b"new");
         assert_eq!(std::fs::read(dir.join("nestlocal.prev")).unwrap(), b"old");
+        assert!(!dir.join("nestlocal.new").exists());
         assert_eq!(std::fs::read_to_string(&paths.pending).unwrap(), "0\nv0.3.2-ben.2\n");
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&paths.daemon).unwrap().permissions().mode() & 0o777, 0o755);
