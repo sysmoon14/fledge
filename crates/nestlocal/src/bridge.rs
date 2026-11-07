@@ -9,6 +9,7 @@
 //!                                      (retained, will)
 //!   <prefix>/<serial>/state            the computed state (retained)
 //!   <prefix>/<serial>/raw/<bucket>     each bucket, whole (retained)
+//!   <prefix>/<serial>/hot_water_times  the hot water schedule, by day (retained)
 //!   <prefix>/<serial>/set/<command>    Home Assistant's commands
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
@@ -243,6 +244,15 @@ impl Bridge {
             shown.insert("temperature_source".into(), self.temperature_source().map_or(Value::Null, Value::from));
         }
         self.publish(&format!("{}/state", self.base), true, Value::Object(shown).to_string().as_bytes());
+        if let Some(hw) = self.hot_water_schedule() {
+            let times = crate::hotwater::simple(&hw.value);
+            self.publish(&format!("{}/hot_water_times", self.base), true, times.to_string().as_bytes());
+        }
+    }
+
+    /// The hot water schedule's bucket, once nlclient has synced it.
+    pub fn hot_water_schedule(&self) -> Option<crate::store::Object> {
+        self.store.all().into_iter().find(|o| o.key.starts_with("custom_schedule.") && crate::hotwater::is_hot_water(&o.value))
     }
 
     /// Publishes Home Assistant discovery, for what this unit's equipment
@@ -481,6 +491,18 @@ impl Bridge {
             "options" => vec!["C", "F"],
             "entity_category" => "config",
         });
+        // The hot water schedule: how many on periods the week has, with the
+        // days as attributes; set/hot_water_times writes them.
+        if self.hot_water_schedule().is_some() {
+            let times = format!("{}/hot_water_times", self.base);
+            add("sensor", "hot_water_times", "Hot water times", fields!{
+                "state_topic" => times.clone(),
+                "value_template" => "{{ value_json.days.values() | map('length') | sum }}",
+                "json_attributes_topic" => times,
+                "json_attributes_template" => "{{ value_json.days | tojson }}",
+                "icon" => "mdi:water-boiler-auto",
+            });
+        }
         add("button", "clear_schedule", "Clear Nest schedule", fields!{
             "command_topic" => format!("{set}clear_schedule"),
             "entity_category" => "config",

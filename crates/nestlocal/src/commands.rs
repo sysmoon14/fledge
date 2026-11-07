@@ -72,7 +72,9 @@ impl Bridge {
             Ok(None) => return Ok(()),
             Ok(Some(change)) => change,
         };
-        let mut changes = vec![(format!("{bucket}.{}", self.serial), fields)];
+        // A bucket named whole (custom_schedule.<id>) is not the serial's.
+        let key = if bucket.contains('.') { bucket } else { format!("{bucket}.{}", self.serial) };
+        let mut changes = vec![(key, fields)];
         if name == "clear_schedule" {
             // Learning off too, or the unit would build a new schedule.
             changes.push((format!("device.{}", self.serial), fields!{"learning_mode" => false}));
@@ -257,6 +259,13 @@ impl Bridge {
 
             // Not a bucket: the unit's clock (clock.rs).
             "time" => self.time_answer(arg).map(|()| None),
+
+            "hot_water_times" => {
+                // Days the command names replace theirs (hotwater.rs).
+                let hw = self.hot_water_schedule().ok_or("no hot water schedule yet")?;
+                let fields = crate::hotwater::write(&hw.value, arg, now)?;
+                Ok(Some((hw.key, fields)))
+            }
 
             "clear_schedule" => {
                 // Every day empty: the unit keeps whatever setpoint it has
@@ -483,6 +492,21 @@ mod tests {
         assert_eq!(field("hot_water_schedule", "ON", "hot_water_mode"), json!("schedule"));
         assert_eq!(field("hot_water_schedule", "OFF", "hot_water_mode"), json!("off"));
         assert!(b.fields("hot_water_schedule", "maybe").is_err());
+    }
+
+    #[test]
+    fn hot_water_times_write_the_hot_water_schedules_bucket() {
+        let b = test_bridge();
+        let cmd = r#"{"mon": [{"on": "06:30", "off": "07:30"}]}"#;
+        assert_eq!(b.apply("mqtt", "hot_water_times", cmd), Err("no hot water schedule yet".into()));
+        b.store.merge("custom_schedule.hotwater", &fields!{"mode" => "hotwater", "intervals" => json!([])}, 2, 100, true);
+        let (mut changes, _sub) = b.store.subscribe();
+        b.apply("mqtt", "hot_water_times", cmd).unwrap();
+        // Pushed to nlclient as a server-side change of that bucket.
+        let pushed = changes.try_recv().unwrap();
+        assert_eq!(pushed[0].key, "custom_schedule.hotwater");
+        assert_eq!(pushed[0].value["intervals"][0]["start_time"], json!(23400));
+        assert!(b.store.get("device.S").is_none(), "nothing else written");
     }
 
     #[test]
