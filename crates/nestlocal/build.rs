@@ -6,6 +6,10 @@
 //! Embeds the zbwake.ko builds (platform/diamond3/zbwake/, one per gen3 release) found in the
 //! directory NESTLOCAL_ZBWAKE names, each distinct one once. Without them,
 //! -zigbee cannot wake the sleeping unit.
+//!
+//! Embeds the version update.rs reports as NESTLOCAL_VERSION:
+//! UNFR0ZEN_BUILD_VERSION, else `git describe` of the tree at build time, as
+//! the app has it.
 
 use std::fmt::Write;
 
@@ -51,4 +55,26 @@ fn main() {
     }
     list.push(']');
     std::fs::write(out.join("zbwake.rs"), list).unwrap();
+
+    version();
+}
+
+fn version() {
+    let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    println!("cargo:rerun-if-env-changed=UNFR0ZEN_BUILD_VERSION");
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&root).output().ok()
+        .filter(|out| out.status.success()).map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let version = std::env::var("UNFR0ZEN_BUILD_VERSION").ok().filter(|v| !v.is_empty())
+        .or_else(|| git(&["describe", "--tag", "--always", "--dirty"]))
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap());
+    println!("cargo:rustc-env=NESTLOCAL_VERSION={version}");
+    // Track all version inputs, including changes outside this crate.
+    if let Some(files) = git(&["ls-files"]) {
+        for file in files.lines() { println!("cargo:rerun-if-changed={}", root.join(file).display()); }
+    }
+    if let Some(dir) = git(&["rev-parse", "--absolute-git-dir"]) {
+        for file in ["HEAD", "index", "packed-refs", "refs"] {
+            println!("cargo:rerun-if-changed={}", std::path::Path::new(&dir).join(file).display());
+        }
+    }
 }

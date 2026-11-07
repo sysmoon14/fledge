@@ -13,6 +13,8 @@
 //!   <prefix>/<serial>/hot_water_times  the hot water schedule, by day (retained)
 //!   <prefix>/<serial>/motion           ON at each PIR event (motion.rs)
 //!   <prefix>/<serial>/near             ON at each proximity event
+//!   <prefix>/<serial>/update           this build and the latest release, with
+//!                                      -update-repo (update.rs; retained)
 //!   <prefix>/<serial>/set/<command>    Home Assistant's commands
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
@@ -54,6 +56,8 @@ pub struct Bridge {
     sensors: std::sync::atomic::AtomicBool, // motion.rs follows nlclient's log
     /// Home Assistant's lights, for the UNFR0ZEN screen (lights.rs).
     pub lights: crate::lights::Lights,
+    /// The releases the update entity offers, with -update-repo (update.rs).
+    updates: OnceLock<crate::update::Updates>,
 }
 
 impl Bridge {
@@ -76,6 +80,7 @@ impl Bridge {
             time_ok_rx: Mutex::new(Some(time_ok_rx)),
             sensors: std::sync::atomic::AtomicBool::new(false),
             lights: Default::default(),
+            updates: OnceLock::new(),
         })
     }
 
@@ -95,6 +100,45 @@ impl Bridge {
             }
         });
         let _ = self.sensor.set(sensor);
+    }
+
+    /// Offers `repo`'s latest release on an update entity, checked daily and
+    /// when Home Assistant presses its check button (update.rs).
+    pub fn offer_updates(self: &Arc<Self>, repo: &str) {
+        if self.updates.set(crate::update::Updates::new(repo)).is_ok() {
+            tokio::spawn(self.clone().check_updates());
+        }
+    }
+
+    async fn check_updates(self: Arc<Self>) {
+        let Some(updates) = self.updates.get() else { return };
+        loop {
+            let pressed = tokio::select! {
+                () = updates.check.notified() => true,
+                () = tokio::time::sleep(crate::update::TICK) => false,
+            };
+            let connected = self.mqtt.get().is_some_and(|c| c.is_connected());
+            if !connected || !(pressed || crate::update::due(*updates.checked.lock().unwrap(), SystemTime::now())) {
+                continue;
+            }
+            match updates.refresh().await {
+                Ok(Some(r)) => logf!("update: {} has {} (this is {})", updates.repo, r.tag, crate::update::VERSION),
+                Ok(None) => logf!("update: {} has no release yet", updates.repo),
+                Err(e) => logf!("update: {}: {e}", updates.repo),
+            }
+            self.publish_update();
+        }
+    }
+
+    pub fn updates(&self) -> Option<&crate::update::Updates> {
+        self.updates.get()
+    }
+
+    fn publish_update(&self) {
+        if let Some(updates) = self.updates.get() {
+            let state = crate::update::state(updates.latest.lock().unwrap().as_ref());
+            self.publish(&format!("{}/update", self.base), true, state.to_string().as_bytes());
+        }
     }
 
     /// motion.rs follows the unit's sensor events: announce their sensors.
@@ -184,6 +228,10 @@ impl Bridge {
         }
         self.publish_availability(self.live.as_ref().is_some_and(|l| l.alive()));
         self.ask_time();
+        self.publish_update();
+        if let Some(updates) = self.updates.get().filter(|u| crate::update::due(*u.checked.lock().unwrap(), SystemTime::now())) {
+            updates.check.notify_one();
+        }
         for o in self.store.all() {
             self.publish_raw(&o);
         }
@@ -565,6 +613,19 @@ impl Bridge {
                 "icon" => "mdi:water-boiler-auto",
             });
         }
+        // This build and the latest release of -update-repo; the entity
+        // only tells of it: there is no install (update.rs).
+        if self.updates.get().is_some() {
+            add("update", "nestlocal", "nestlocal", fields!{
+                "state_topic" => format!("{}/update", self.base),
+                "entity_category" => "config",
+            });
+            add("button", "check_update", "Check for nestlocal update", fields!{
+                "command_topic" => format!("{set}check_update"),
+                "entity_category" => "config",
+                "icon" => "mdi:update",
+            });
+        }
         add("button", "clear_schedule", "Clear Nest schedule", fields!{
             "command_topic" => format!("{set}clear_schedule"),
             "entity_category" => "config",
@@ -830,6 +891,26 @@ pub mod tests {
         assert!(configs.contains_key("homeassistant/binary_sensor/nestlocal_s/heating/config"));
         assert!(!configs.contains_key("homeassistant/binary_sensor/nestlocal_s/cooling/config"));
         assert!(configs.contains_key("homeassistant/select/nestlocal_s/fan_timer_duration/config"));
+    }
+
+    #[test]
+    fn the_update_entity_is_offered_only_with_an_update_repo() {
+        let (dev, sh) = (obj(json!({})), obj(json!({"can_heat": true})));
+        let b = test_bridge();
+        b.announce(&dev, &sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        assert!(!configs.keys().any(|t| t.contains("update")));
+
+        let b = test_bridge();
+        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/unfr0zen")).is_ok());
+        b.announce(&dev, &sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let update: Value = serde_json::from_str(&configs["homeassistant/update/nestlocal_s/nestlocal/config"]).unwrap();
+        assert_eq!(update["state_topic"], json!("nestlocal/S/update"));
+        // Nothing installs yet: no command topic, so Home Assistant shows no install.
+        assert!(update.get("command_topic").is_none());
+        let check: Value = serde_json::from_str(&configs["homeassistant/button/nestlocal_s/check_update/config"]).unwrap();
+        assert_eq!(check["command_topic"], json!("nestlocal/S/set/check_update"));
     }
 
     #[test]

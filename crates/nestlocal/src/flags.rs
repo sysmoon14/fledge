@@ -44,6 +44,7 @@ const FLAGS: &[(&str, Kind, &str, &str)] = &[
     ("state", Kind::Text, "/media/data/nestlocal.json", "bucket store"),
     ("syslog", Kind::Bool, "false", "log to syslog instead of stderr"),
     ("topic", Kind::Text, "nestlocal", "MQTT topic prefix"),
+    ("update-repo", Kind::Text, "", "GitHub owner/name whose latest release Home Assistant's update entity offers (update.rs), empty for none"),
     ("wake-iface", Kind::Text, "wlan0", "WiFi interface the broker's packets wake the sleeping unit on (wake.rs); empty for none, which also lets the unit sleep with -matter"),
     ("v", Kind::Bool, "false", "log every request and answer"),
 ];
@@ -79,6 +80,7 @@ pub struct Config {
     pub state: String,
     pub syslog: bool,
     pub topic: String,
+    pub update_repo: String,
     pub verbose: bool,
     pub wake_iface: String,
 }
@@ -201,6 +203,10 @@ pub fn parse(args: &[String]) -> Result<Config, Option<String>> {
     let matter_passcode = get("matter-passcode").parse::<u32>().ok()
         .filter(|p| crate::matter::check_passcode(*p).is_ok())
         .ok_or_else(|| Some(format!("invalid value {:?} for flag -matter-passcode", get("matter-passcode"))))?;
+    let update_repo = get("update-repo");
+    if !update_repo.is_empty() && !crate::update::valid_repo(&update_repo) {
+        return Err(Some(format!("invalid value {update_repo:?} for flag -update-repo: expected owner/name")));
+    }
     let matter_discriminator = get("matter-discriminator").parse::<u16>().ok().filter(|d| *d < 4096)
         .ok_or_else(|| Some(format!("invalid value {:?} for flag -matter-discriminator", get("matter-discriminator"))))?;
     Ok(Config {
@@ -234,6 +240,7 @@ pub fn parse(args: &[String]) -> Result<Config, Option<String>> {
         state: get("state"),
         syslog: flag("syslog"),
         topic: get("topic"),
+        update_repo,
         verbose: flag("v"),
         wake_iface: get("wake-iface"),
     })

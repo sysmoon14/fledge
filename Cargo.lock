@@ -3384,6 +3384,7 @@ dependencies = [
  "socket2",
  "tokio",
  "tokio-rustls",
+ "webpki-roots",
  "zbus",
 ]
 

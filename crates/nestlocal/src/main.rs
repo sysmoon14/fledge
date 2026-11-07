@@ -29,6 +29,7 @@ mod store;
 mod settings_ui;
 mod structure;
 mod thread_sleep;
+mod update;
 mod wake;
 mod weather;
 mod zigbee;
@@ -204,6 +205,10 @@ async fn run(config: flags::Config) {
                 .trim_end_matches(['\r', '\n']).to_string(),
         };
         let (broker, tls) = mqtttls::broker(&config.mqtt, config.mqtt_tls, &config.mqtt_ca).unwrap_or_else(|e| fatal!("{e}"));
+        // Before connecting: the first announcement includes the update entity.
+        if !config.update_repo.is_empty() {
+            bridge.offer_updates(&config.update_repo);
+        }
         bridge.run(&broker, &config.mqtt_user, &password, tls);
         motion::start(bridge.clone());
         broker_port = Some(broker.port);
