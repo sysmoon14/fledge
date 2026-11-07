@@ -2,7 +2,8 @@
 # Pushes a development build of nestlocal and/or the UNFR0ZEN screen to a
 # unit already running unfr0zen, over its SSH (--ssh), without USB:
 #
-#     utils/push-over-ssh.sh [--nestlocal] [--screen] [--build] [--dry-run] [--log FILE] root@HOST
+#     utils/push-over-ssh.sh [--nestlocal] [--screen] [--build] [--dry-run] [--log FILE]
+#                            [--wake mqtt://[USER@]BROKER[:PORT]] [--wake-topic TOPIC] root@HOST
 #
 #   --nestlocal  push build/nestlocal-armv7 to /nestlabs/sbin/nestlocal
 #   --screen     patch the unit's own stock nlclient (/etc/unfr0zen/nlclient.original,
@@ -13,6 +14,12 @@
 #                utils/build-firmware.sh does; it needs one full build first)
 #   --dry-run    build and check everything, then change nothing on the unit
 #   --log FILE   where the log goes (default .work/push-over-ssh.log)
+#   --wake URL   wake the unit through the MQTT broker nestlocal uses, with
+#                mosquitto_pub and mosquitto_sub (brew install mosquitto); default
+#                $UNFR0ZEN_WAKE. The password, if any, is read from
+#                $UNFR0ZEN_WAKE_PASSWORD_FILE, else ~/.config/unfr0zen/mqtt.password
+#   --wake-topic the unit's topic (nestlocal/SERIAL); by default the one unit whose
+#                availability the broker keeps under nestlocal/
 #
 # Each file is streamed to a temporary name beside its destination (the unit's
 # dropbear has neither scp nor sftp), checked against its hash, and renamed
@@ -24,9 +31,11 @@
 #
 # The unit sleeps when left alone, and asleep it drops the connection. So
 # everything is built before connecting, and each command on the unit first
-# touches /var/run/unfr0zen/push-awake, which nestlocal (from this change on)
-# reads as a hold: it declines sleep for 2 minutes after each touch. Wake the
-# unit (turn its ring) just before a run.
+# touches /var/run/unfr0zen/push-awake, which nestlocal reads as a hold: it
+# declines sleep for 2 minutes after each touch. Connecting is tried for about
+# a minute. With --wake, set/stay_awake is published first and before each try:
+# the broker's message wakes the unit, and nestlocal holds it awake until the
+# run ends. Without it, turn the unit's ring when asked.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -34,6 +43,7 @@ cd "$root"
 work=.work/push
 log=.work/push-over-ssh.log
 nestlocal=0 screen=0 build=0 dry=0 host=
+wake=${UNFR0ZEN_WAKE:-} wake_topic=
 while [ $# -gt 0 ]; do
     case $1 in
         --nestlocal) nestlocal=1 ;;
@@ -41,6 +51,8 @@ while [ $# -gt 0 ]; do
         --build) build=1 ;;
         --dry-run) dry=1 ;;
         --log) [ $# -gt 1 ] || { echo "--log needs a file" >&2; exit 2; }; log=$2; shift ;;
+        --wake) [ $# -gt 1 ] || { echo "--wake needs mqtt://[USER@]BROKER[:PORT]" >&2; exit 2; }; wake=$2; shift ;;
+        --wake-topic) [ $# -gt 1 ] || { echo "--wake-topic needs a topic" >&2; exit 2; }; wake_topic=$2; shift ;;
         -h|--help) sed -n '2,/^set -eu/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*) echo "unknown option $1" >&2; exit 2 ;;
         *) [ -z "$host" ] || { echo "one host only" >&2; exit 2; }; host=$1 ;;
@@ -99,6 +111,37 @@ if [ $screen = 1 ]; then
     [ ! -f "$stock" ] || patch_screen
 fi
 
+# --- wake --------------------------------------------------------------------
+if [ -n "$wake" ]; then
+    command -v mosquitto_pub > /dev/null && command -v mosquitto_sub > /dev/null ||
+        fail "--wake needs mosquitto_pub and mosquitto_sub: brew install mosquitto"
+    broker=${wake#mqtt://}
+    case $broker in *@*) wake_user=${broker%%@*}; broker=${broker#*@} ;; *) wake_user= ;; esac
+    case $broker in *:*) wake_port=${broker##*:}; broker=${broker%:*} ;; *) wake_port=1883 ;; esac
+    password_file=${UNFR0ZEN_WAKE_PASSWORD_FILE:-$HOME/.config/unfr0zen/mqtt.password}
+    wake_pass=
+    [ ! -f "$password_file" ] || wake_pass=$(head -n 1 "$password_file")
+    # mq TOOL ARGS...: a mosquitto client on the broker.
+    mq() {
+        tool=$1; shift
+        [ -z "$wake_pass" ] || set -- -P "$wake_pass" "$@"
+        [ -z "$wake_user" ] || set -- -u "$wake_user" "$@"
+        "$tool" -h "$broker" -p "$wake_port" "$@"
+    }
+    if [ -z "$wake_topic" ]; then
+        units=$(mq mosquitto_sub -t 'nestlocal/+/availability' -v -W 3 2>/dev/null | sed 's#/availability .*##' | sort -u || true)
+        case $(printf '%s' "$units" | grep -c .) in
+            1) wake_topic=$units ;;
+            0) fail "no nestlocal/+/availability on $broker: check --wake, or give --wake-topic" ;;
+            *) fail "more than one unit on $broker; give --wake-topic, one of: $(echo $units)" ;;
+        esac
+    fi
+    # wake_unit SECONDS: wakes the unit and holds it awake that long; 0 releases.
+    wake_unit() { mq mosquitto_pub -q 1 -t "$wake_topic/set/stay_awake" -m "$1" 2>> "$log"; }
+    wake_unit 900 || fail "cannot publish to $broker: check --wake and the password file"
+    say "Waking $wake_topic through $broker"
+fi
+
 # --- connect -----------------------------------------------------------------
 # One connection for the run: the password, if any, is asked once.
 # /tmp: a socket path under macOS's TMPDIR can exceed the 104-byte limit.
@@ -108,13 +151,22 @@ awake=/var/run/unfr0zen/push-awake
 connected=0
 cleanup() {
     [ $connected = 0 ] || ssh $ssh_opts "$host" "rm -f $awake" > /dev/null 2>&1 || true
+    [ -z "$wake" ] || wake_unit 0 > /dev/null 2>&1 || true
     ssh $ssh_opts -O exit "$host" > /dev/null 2>&1 || true
     rm -rf "$control"
 }
 trap cleanup EXIT
 # on COMMAND: run on the unit, renewing the hold that keeps it awake first.
 on() { ssh $ssh_opts "$host" "mkdir -p ${awake%/*} 2>/dev/null; touch $awake 2>/dev/null; $*"; }
-on true || fail "cannot reach $host over SSH: wake the unit (turn its ring) and run again"
+# A sleeping unit does not answer: try for about a minute.
+tries=0
+until on true 2>> "$log"; do
+    tries=$((tries + 1))
+    [ $tries -lt 6 ] || fail "cannot reach $host over SSH: wake the unit (turn its ring) and run again"
+    [ $tries -gt 1 ] || if [ -n "$wake" ]; then say "Waiting for $host to wake"; else say "Waiting for $host: turn the unit's ring to wake it"; fi
+    [ -z "$wake" ] || wake_unit 900 || true
+    sleep 2
+done
 connected=1
 on 'command -v sha256sum > /dev/null && command -v monit > /dev/null' ||
     fail "the unit lacks sha256sum or monit"

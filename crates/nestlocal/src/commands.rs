@@ -58,6 +58,15 @@ impl Bridge {
     /// bucket, which then reaches nlclient on its held subscribe.
     pub fn command(&self, topic: &str, payload: &[u8]) {
         let name = topic.strip_prefix(&format!("{}/set/", self.base)).unwrap_or(topic);
+        if name == "stay_awake" {
+            let arg = String::from_utf8_lossy(payload);
+            match arg.trim().parse::<u64>().map_err(|e| e.to_string()).and_then(|s| crate::wake::stay_awake(s).map(|()| s)) {
+                Ok(0) => logf!("mqtt: stay_awake: released"),
+                Ok(seconds) => logf!("mqtt: stay_awake: held for {seconds} s"),
+                Err(e) => logf!("mqtt: stay_awake {:?}: {e}", arg.trim()),
+            }
+            return;
+        }
         if name == "check_update" {
             match self.updates() {
                 Some(updates) => updates.check.notify_one(),

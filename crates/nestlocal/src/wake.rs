@@ -49,10 +49,14 @@
 //! the unit, and RequestSleep is declined while the file is younger than
 //! HOLD_FOR: asleep, the unit drops the push's SSH connection. A push that
 //! dies leaves the file to go stale, so the unit sleeps again on its own.
+//!
+//! <base>/set/stay_awake <seconds> (at most MAX_STAY_AWAKE, 0 to release)
+//! declines sleep until then too. The broker's message is what wakes the
+//! sleeping unit, so a push can wake it without anyone turning its ring.
 
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::logf;
 
@@ -82,6 +86,30 @@ const HOLD_FILE: &str = "/var/run/unfr0zen/push-awake";
 /// How long a touch of HOLD_FILE keeps the unit awake: longer than the
 /// longest single command the push runs on the unit (60 s).
 const HOLD_FOR: Duration = Duration::from_secs(120);
+/// The longest set/stay_awake: a forgotten hold must not drain the unit.
+pub const MAX_STAY_AWAKE: u64 = 900;
+/// Until when set/stay_awake holds the unit awake, in seconds since 1970.
+static STAY_AWAKE_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+/// Holds the unit awake for `seconds` from now (set/stay_awake); 0 releases.
+pub fn stay_awake(seconds: u64) -> Result<(), String> {
+    if seconds > MAX_STAY_AWAKE {
+        return Err(format!("at most {MAX_STAY_AWAKE} seconds"));
+    }
+    let until = if seconds == 0 { 0 } else { unix_now() + seconds };
+    STAY_AWAKE_UNTIL.store(until, Ordering::SeqCst);
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Whether a set/stay_awake ending at `until` still holds at `now`; one
+/// further off than MAX_STAY_AWAKE (the clock was set back) does not.
+fn staying_awake(until: u64, now: u64) -> bool {
+    now < until && until - now <= MAX_STAY_AWAKE
+}
 
 /// An established TCP connection, as /proc/net/tcp lists it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -281,9 +309,10 @@ fn sleep_blocked(matter: bool, ready: bool, commissioning: bool) -> bool {
     matter && (!ready || commissioning)
 }
 
-/// A push over SSH is working on the unit: HOLD_FILE was touched recently.
+/// A push over SSH is working on the unit: HOLD_FILE was touched recently,
+/// or set/stay_awake holds it.
 fn push_holds_awake() -> bool {
-    std::fs::metadata(HOLD_FILE).and_then(|m| m.modified())
+    staying_awake(STAY_AWAKE_UNTIL.load(Ordering::SeqCst), unix_now()) || std::fs::metadata(HOLD_FILE).and_then(|m| m.modified())
         .is_ok_and(|touched| held(touched, SystemTime::now()))
 }
 
@@ -497,6 +526,16 @@ mod tests {
         assert!(!sleep_blocked(true, true, false));
         // A disabled Matter service must not block MQTT or Zigbee sleep.
         assert!(!sleep_blocked(false, false, true));
+    }
+
+    #[test]
+    fn stay_awake_holds_only_until_its_end_and_never_too_far_off() {
+        assert!(staying_awake(1_000 + 600, 1_000));
+        assert!(!staying_awake(1_000, 1_000));
+        assert!(!staying_awake(0, 1_000));
+        // An end further off than the longest hold: the clock went back.
+        assert!(!staying_awake(1_000 + MAX_STAY_AWAKE + 1, 1_000));
+        assert!(stay_awake(MAX_STAY_AWAKE + 1).is_err());
     }
 
     #[test]
