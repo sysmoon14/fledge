@@ -280,6 +280,30 @@ static inline unsigned int custom_light_value(char *out, unsigned int at, unsign
     at = custom_append_number(out, at, size, light->brightness);
     return custom_append(out, at, size, "%");
 }
+/* The light page's brightness ring, from /var/run/unfr0zen/light-ring.layout:
+ * "<count>\n" then "<x> <y>\n" per tick, its image's top left relative to the
+ * display's centre. The count, or 0 for a missing or malformed layout. */
+#define CUSTOM_RING_MAX 64
+static inline int custom_ring_parse(const char *text, short *xs, short *ys) {
+    int count = 0;
+    if (!(text = custom_number(text, &count)) || count < 1 || count > CUSTOM_RING_MAX) return 0;
+    for (int i = 0; i < count; i++) {
+        int x, y;
+        while (*text == '\n' || *text == '\r') text++;
+        if (!(text = custom_number(text, &x)) || !(text = custom_number(text, &y))) return 0;
+        xs[i] = (short)x;
+        ys[i] = (short)y;
+    }
+    return count;
+}
+/* Ticks lit for the light: none when off, all at an unknown brightness, and
+ * at least one for any brightness above 0. */
+static inline int custom_light_ticks(const struct custom_light *light, int ticks) {
+    if (!light->on) return 0;
+    if (light->brightness < 0) return ticks;
+    int lit = (light->brightness * ticks + 50) / 100;
+    return lit < 1 ? 1 : lit > ticks ? ticks : lit;
+}
 /* Its row on the Lights page: "Snug lamp: 60%". */
 static inline void custom_light_label(char *out, unsigned int size, const struct custom_light *light) {
     unsigned int at = custom_append(out, 0, size, light->name);
