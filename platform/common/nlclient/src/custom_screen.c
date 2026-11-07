@@ -109,6 +109,9 @@ extern int native_enqueue(void *, const void *, void *);
 #define CUSTOM_IMAGE "/nestlabs/share/images/G_unfr0zen_192px.png"
 #define FALLBACK_IMAGE CUSTOM_IMAGE
 #define MENU_GLYPH "/nestlabs/share/images/G_unfr0zen_glyph_80px.png"
+#define LIGHTS_FILE "/var/run/unfr0zen/lights"
+/* The Lights page's choices: each light, then Back. Home has at most five. */
+#define CUSTOM_CHOICES (CUSTOM_LIGHTS_MAX + 1)
 struct custom_state {
     struct custom_flow flow;
     int active;
@@ -132,9 +135,11 @@ struct custom_state {
     void *menu_glyph;
     text_config config;
     nl_string text[3];
-    nl_string choices[4];
+    nl_string choices[CUSTOM_CHOICES];
     u32 flags[3];
-    const char *choice_ids[5];
+    const char *choice_ids[CUSTOM_CHOICES + 1];
+    struct custom_lights lights;
+    struct custom_dial dial;
     u8 layer_vtables[VTABLE_MAX];
     u8 screen_vtables[VTABLE_MAX];
 };
@@ -188,8 +193,16 @@ static void trace(void *raw, u32 type, u32 value) {
     native_fclose(file);
 }
 #endif
+static void show(void *raw, int opening);
 static int custom_wheel(void *raw, int value) {
-    if (value) state(raw)->at_top = 0;
+    struct custom_state *s = state(raw);
+    /* On a light's page the ring is its brightness, not the scroller:
+     * keep the native result for a wheel event that moves nothing. */
+    if (s->active && s->flow.page == CUSTOM_LIGHT && s->flow.light < s->lights.count) {
+        if (custom_light_turn(&s->lights.light[s->flow.light], &s->dial, value)) show(raw, 0);
+        return native_layer_wheel(raw, 0);
+    }
+    if (value) s->at_top = 0;
     int result = native_layer_wheel(raw, value);
 #ifdef CUSTOM_TRACE
     trace(raw, 0x40000004, value);
@@ -328,6 +341,28 @@ static int request_action(int which) {
     if (written != 1 || closed != 0) return -1;
     return rename_setting(tmp, path);
 }
+/* Leaves the light's wanted state for nestlocal, which sends it to Home
+ * Assistant. A newer request replaces one not yet taken: each is the
+ * whole state wanted, so only the latest matters. */
+static void send_light(struct custom_state *s) {
+    if (s->flow.light >= s->lights.count) return;
+    char request[48];
+    custom_light_request(request, sizeof(request), s->lights.generation, s->flow.light,
+                         &s->lights.light[s->flow.light]);
+    unsigned int length = 0;
+    while (request[length]) length++;
+    void *file = native_fopen("/var/run/unfr0zen/lights.request.tmp", "w");
+    if (!file) return;
+    unsigned int written = native_fwrite(request, 1, length, file);
+    if (native_fclose(file) != 0 || written != length) return;
+    rename_setting("/var/run/unfr0zen/lights.request.tmp", "/var/run/unfr0zen/lights.request");
+}
+static void read_lights(struct custom_lights *lights) {
+    char text[CUSTOM_LIGHTS_MAX * (CUSTOM_LIGHT_NAME + 16) + 16];
+    read_text(LIGHTS_FILE, text, sizeof(text), "");
+    custom_lights_parse(text, lights);
+}
+static int light_page(enum custom_page page) { return page == CUSTOM_LIGHTS || page == CUSTOM_LIGHT; }
 static void matter_detail(struct custom_state *s) {
     unsigned int n = 0;
     const char *code = s->activity_started ? s->code : "";
@@ -407,10 +442,61 @@ static unsigned int enabled_features(void) {
            (option_word(options, "-zigbee") || option_word(options, "--zigbee") ? 2 : 0) |
            (option_word(options, "-doom") || option_word(options, "--doom") ? 4 : 0);
 }
+/* Home's choices, with Lights while Home Assistant has configured any. */
+static unsigned int home_features(struct custom_state *s) {
+    read_lights(&s->lights);
+    return enabled_features() | (s->lights.count ? 8 : 0);
+}
+static void clear_choices(struct custom_state *s, int from) {
+    for (int i = from; i < CUSTOM_CHOICES; i++) native_string_copy(&s->choices[i], "");
+}
+/* The Lights page lists each light and Back; a light's own page shows its
+ * name and brightness, and its one choice is what a press does. */
+static int show_lights(struct custom_state *s) {
+    native_config_invalidate(&s->config);
+    s->flags[0] = s->flags[1] = s->flags[2] = 0;
+    native_string_copy(&s->text[2], "");
+    char text[CUSTOM_LIGHT_NAME + 32];
+    if (s->flow.page == CUSTOM_LIGHT) {
+        struct custom_light *light = &s->lights.light[s->flow.light];
+        native_string_copy(&s->text[0], light->name);
+        unsigned int at = custom_light_value(text, 0, sizeof(text), light);
+        custom_append(text, at, sizeof(text), "\n\nTurn to dim");
+        native_string_copy(&s->text[1], text);
+        native_string_copy(&s->choices[0], light->on ? "Turn off" : "Turn on");
+        clear_choices(s, 1);
+        s->config.text_count = 2;
+        return 1;
+    }
+    native_string_copy(&s->text[0], "Lights");
+    native_string_copy(&s->text[1], "");
+    for (int i = 0; i < s->lights.count; i++) {
+        custom_light_label(text, sizeof(text), &s->lights.light[i]);
+        native_string_copy(&s->choices[i], text);
+    }
+    native_string_copy(&s->choices[s->lights.count], "Back");
+    clear_choices(s, s->lights.count + 1);
+    s->config.text_count = 1;
+    return s->lights.count + 1;
+}
 static void show(void *raw, int opening) {
     float old_y = *(float *)((u8 *)raw + 8);
     int old_selection = WORD(common(raw), 0x7c);
     struct custom_state *s = state(raw);
+    if (light_page(s->flow.page)) {
+        if (opening) {
+            struct custom_lights read;
+            read_lights(&read);
+            custom_lights_merge(&s->lights, &read, s->dial.hold > 0 ? s->flow.light : -1);
+        }
+        /* The list emptied, or shrank under the open light. */
+        if (!s->lights.count) s->flow.page = CUSTOM_HOME;
+        else if (s->flow.light >= s->lights.count) { s->flow.light = 0; s->flow.page = CUSTOM_LIGHTS; }
+    }
+    int choice_count;
+    if (light_page(s->flow.page)) {
+        choice_count = show_lights(s);
+    } else {
     if (s->flow.page != CUSTOM_HOME) {
         read_text(custom_matter(s->flow.page) ? "/var/run/unfr0zen/matter.status" :
                   "/var/run/unfr0zen/zigbee.status", s->status, sizeof(s->status), "Not enabled or service unavailable");
@@ -420,8 +506,8 @@ static void show(void *raw, int opening) {
     }
     int activity = custom_activity(s->flow.page);
     int matter_pairing = s->flow.page == CUSTOM_MATTER_PAIRING;
-    if (s->flow.page == CUSTOM_HOME) s->features = enabled_features();
-    int choice_count = s->flow.page == CUSTOM_HOME ? custom_home_count(s->features) : activity ? 1 : 2;
+    if (s->flow.page == CUSTOM_HOME) s->features = home_features(s);
+    choice_count = s->flow.page == CUSTOM_HOME ? custom_home_count(s->features) : activity ? 1 : 2;
     native_config_invalidate(&s->config);
     s->flags[0] = s->flags[1] = s->flags[2] = 0;
     s->config.text_count = activity ? 3 : 2;
@@ -435,10 +521,10 @@ static void show(void *raw, int opening) {
         char name[64];
         read_text("/etc/unfr0zen/version", name, sizeof(name), "unfr0zen");
         native_string_copy(&s->text[1], name);
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < CUSTOM_CHOICES; i++) {
             int action = custom_home_action(i, s->features);
             native_string_copy(&s->choices[i], action == 0 ? "Matter" : action == 1 ? "Zigbee" :
-                               action == 2 ? "Done" : action == 3 ? "Doom" : "");
+                               action == 2 ? "Done" : action == 3 ? "Doom" : action == 4 ? "Lights" : "");
         }
     } else {
         read_text("/var/run/unfr0zen/matter.code", s->code, sizeof(s->code), "Code unavailable");
@@ -457,8 +543,7 @@ static void show(void *raw, int opening) {
             native_string_copy(&s->choices[0], s->flow.page == CUSTOM_MATTER_CONFIRM ? "Forget and pair" : "Enable pairing");
             native_string_copy(&s->choices[1], "Back");
         }
-        native_string_copy(&s->choices[2], "");
-        native_string_copy(&s->choices[3], "");
+        clear_choices(s, 2);
         if (!matter_pairing) {
             /* Text-only pages start at their first real row. Empty rows still
              * occupy native line height and must not create scroll margins. */
@@ -470,6 +555,7 @@ static void show(void *raw, int opening) {
             s->config.text_count = activity ? 2 : 1;
         }
     }
+    }
     if (s->image_page != s->flow.page) load_image(raw);
     s->config.choice_count = choice_count;
     void *base = common(raw);
@@ -477,7 +563,8 @@ static void show(void *raw, int opening) {
     WORD(base, 0x94) = 0;
     WORD(base, 0x98) = choice_count - 1;
     native_config_layout(raw, &s->config, 0x10000, choice_count);
-    int selection = opening ? (s->flow.page == CUSTOM_HOME ? s->flow.parent_selection : 0) : old_selection;
+    int selection = opening ? (s->flow.page == CUSTOM_HOME ? s->flow.parent_selection :
+                               s->flow.page == CUSTOM_LIGHTS ? s->flow.light : 0) : old_selection;
     if (selection >= choice_count) selection = choice_count - 1;
     if (selection < 0) selection = 0;
     native_select(raw, selection);
@@ -500,10 +587,16 @@ static int click(void *raw) {
     int selected = (int)WORD(common(raw), 0x7c);
     enum custom_page before = s->flow.page;
     int result;
+    if (light_page(before)) {
+        if (custom_lights_choose(&s->flow, &s->lights, &s->dial, selected)) send_light(s);
+        show(raw, s->flow.page != before);
+        return 1;
+    }
     if (before == CUSTOM_HOME) {
         int action = custom_home_action(selected, s->features);
         result = action < 0 ? 1 : custom_choose(&s->flow, action, request_action);
         if (result != 2) s->flow.parent_selection = selected;
+        if (s->flow.page == CUSTOM_LIGHTS) bytes_zero(&s->dial, sizeof(s->dial));
     } else result = custom_choose(&s->flow, selected, request_action);
     if (s->flow.page != before && custom_activity(s->flow.page)) {
         s->activity_ticks = 0; s->activity_started = 0;
@@ -512,10 +605,33 @@ static int click(void *raw) {
     if (result != 2) show(raw, s->flow.page != before);
     return result;
 }
+/* Every 250 ms on the light pages: send a settled brightness, leave an
+ * idle light's page, and take Home Assistant's latest state. */
+static void refresh_lights(void *raw) {
+    struct custom_state *s = state(raw);
+    enum custom_page before = s->flow.page;
+    if (custom_light_tick(&s->dial)) send_light(s);
+    if (before == CUSTOM_LIGHT && s->dial.idle >= CUSTOM_LIGHT_IDLE && !s->dial.pending) {
+        custom_back(&s->flow);
+        show(raw, 1);
+        return;
+    }
+    struct custom_lights read;
+    read_lights(&read);
+    int held = s->dial.hold > 0 ? s->flow.light : -1;
+    int changed = custom_lights_merge(&s->lights, &read, held);
+    /* A different list: the open light may be another one now. */
+    if (changed == 2 && before == CUSTOM_LIGHT) s->flow.page = CUSTOM_LIGHTS;
+    if (changed) show(raw, s->flow.page != before);
+}
 static void refresh_status(void *raw) {
     struct custom_state *s = state(raw);
+    if (light_page(s->flow.page)) {
+        refresh_lights(raw);
+        return;
+    }
     if (s->flow.page == CUSTOM_HOME) {
-        if (s->features != enabled_features()) show(raw, 0);
+        if (s->features != home_features(s)) show(raw, 0);
         return;
     }
     if (s->flow.page == CUSTOM_ZIGBEE_CONFIRM || s->flow.page == CUSTOM_MATTER_CONFIRM) return;
@@ -573,7 +689,7 @@ static void stop_refresh(void *raw) {
 static void schedule_refresh(void *raw) {
     struct custom_state *s = state(raw);
     void *globals = PTR(common(raw), 0x8c);
-    native_send_timeout(&s->refresh_request, (u32)s, custom_activity(s->flow.page) ? 250 : 1000,
+    native_send_timeout(&s->refresh_request, (u32)s, custom_activity(s->flow.page) || light_page(s->flow.page) ? 250 : 1000,
                         PTR(common(raw), 0x14), common(raw), PTR(globals, GLOBALS_TIMER_OFFSET));
 }
 static int layer_event(void *raw, void *event, void *target) {
@@ -726,6 +842,9 @@ static void enter_screen(void *screen) {
     s->flow.page = CUSTOM_HOME;
     s->flow.parent_selection = 0;
     s->flow.action_failed = 0;
+    s->flow.light = 0;
+    s->lights.count = 0;
+    bytes_zero(&s->dial, sizeof(s->dial));
     load_image(raw_layer(screen));
     native_screen_enter(screen);
     show(raw_layer(screen), 1);
@@ -791,8 +910,12 @@ void *custom_factory(void *globals, void *handler, const char *name) {
     s->choice_ids[1] = "second";
     s->choice_ids[2] = "third";
     s->choice_ids[3] = "fourth";
+    s->choice_ids[4] = "fifth";
+    s->choice_ids[5] = "sixth";
+    s->choice_ids[6] = "seventh";
+    _Static_assert(CUSTOM_CHOICES == 7, "a choice id for each choice");
     for (int i = 0; i < 3; i++) native_string_ctor(&s->text[i]);
-    for (int i = 0; i < 4; i++) native_string_ctor(&s->choices[i]);
+    for (int i = 0; i < CUSTOM_CHOICES; i++) native_string_ctor(&s->choices[i]);
     /* Preserve negative-offset metadata and all adjustment thunks. */
     bytes_copy(s->layer_vtables, (u8 *)PTR(raw, 0) - 12, LAYER_VTABLE_SIZE);
     PTR(raw, 0) = s->layer_vtables + 12;
