@@ -45,6 +45,8 @@ pub struct Bridge {
     time_asked: Mutex<Option<SystemTime>>, // when ask_time last asked, wall clock
     time_ok: mpsc::Sender<()>,             // Home Assistant answered in time
     time_ok_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    /// Home Assistant's lights, for the UNFR0ZEN screen (lights.rs).
+    pub lights: crate::lights::Lights,
 }
 
 impl Bridge {
@@ -64,6 +66,7 @@ impl Bridge {
             time_asked: Mutex::new(None),
             time_ok,
             time_ok_rx: Mutex::new(Some(time_ok_rx)),
+            lights: Default::default(),
         })
     }
 
@@ -87,6 +90,7 @@ impl Bridge {
             live.on_change(move |alive| bridge.publish_availability(alive));
         }
         tokio::spawn(self.clone().keep_time());
+        tokio::spawn(self.clone().serve_lights());
         tokio::spawn(connection.run(self.clone()));
     }
 
@@ -175,6 +179,23 @@ impl Bridge {
     fn publish_availability(&self, alive: bool) {
         if let Some(c) = self.mqtt.get() {
             c.publish(&format!("{}/availability", self.base), if alive { "online" } else { "offline" }.as_bytes(), 1, true);
+        }
+    }
+
+    /// Sends the screen's light requests on to Home Assistant (lights.rs).
+    async fn serve_lights(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let Some(request) = crate::settings_ui::take_request_text("lights") else {
+                continue;
+            };
+            match self.lights.command(&request) {
+                Ok(command) => {
+                    logf!("lights: {command}");
+                    self.publish(&format!("{}/lights/command", self.base), false, command.to_string().as_bytes());
+                }
+                Err(e) => logf!("lights: {e}"),
+            }
         }
     }
 

@@ -15,6 +15,7 @@ mod flags;
 mod heatlink;
 mod json;
 mod liveness;
+mod lights;
 mod logger;
 mod matter;
 mod mqtt;
