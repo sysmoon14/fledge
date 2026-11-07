@@ -650,7 +650,8 @@ mod tests {
             .replace("/var/run/nestlocal.pid", &format!("{d}/pid"))
             .replace("/etc/nestlocal/options", &format!("{d}/options"))
             .replace("/etc/nestlocal/update.", &format!("{d}/update."))
-            .replace("/var/run/unfr0zen/", &format!("{d}/"));
+            .replace("/var/run/unfr0zen/", &format!("{d}/"))
+            .replace("        sleep 5\n", "        sleep 0\n");
         exe(&dir.join("init"), &init);
         let start = || {
             let path = format!("{d}/bin:{}", std::env::var("PATH").unwrap_or_default());
@@ -669,6 +670,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("update.failed")).unwrap(), "v0.3.2-ben.3\n");
         // Committed (no PENDING): starts are not counted.
         start();
+
+        // A pending build that exits at once is retried in the same start,
+        // and rolled back there: start-stop-daemon -t finds nothing running.
+        exe(&dir.join("nestlocal"), "#!/bin/sh\n# new\nexit 0\n");
+        exe(&dir.join("nestlocal.prev"), "#!/bin/sh\n# old\nexit 0\n");
+        std::fs::remove_file(dir.join("update.failed")).unwrap();
+        std::fs::write(dir.join("update.pending"), "0\nv0.3.2-ben.4\n").unwrap();
+        exe(&dir.join("bin/start-stop-daemon"), "#!/bin/sh\ncase \" $* \" in *\" -t \"*) exit 1 ;; esac\nexit 0\n");
+        start();
+        assert!(!dir.join("update.pending").exists());
+        assert!(std::fs::read_to_string(dir.join("nestlocal")).unwrap().contains("old"));
+        assert_eq!(std::fs::read_to_string(dir.join("update.failed")).unwrap(), "v0.3.2-ben.4\n");
         // stop kills what pidof still finds; here nothing is left.
         exe(&dir.join("bin/pidof"), "#!/bin/sh\nexit 1\n");
         let path = format!("{d}/bin:{}", std::env::var("PATH").unwrap_or_default());

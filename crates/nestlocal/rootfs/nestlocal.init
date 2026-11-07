@@ -43,6 +43,15 @@ start)
     ${DAEMON} -syslog -prepare-settings `cat ${OPTIONS}`
     rm -f /var/run/unfr0zen/external-temperature.ready
     start-stop-daemon -S -q -b -m -p ${PIDFILE} -x ${DAEMON} -- -syslog `cat ${OPTIONS}`
+    # A pending update that exits at once is counted and started again here,
+    # not once per monit cycle: asleep, monit does not run, and a build that
+    # dies never holds the unit awake, so the rollback could take hours.
+    if [ -f "$PENDING" ] && [ "${NESTLOCAL_STARTS:-0}" -lt 4 ]; then
+        sleep 5
+        if ! start-stop-daemon -K -t -q -p ${PIDFILE} -x ${DAEMON}; then
+            NESTLOCAL_STARTS=$((${NESTLOCAL_STARTS:-0} + 1)) exec "$0" start
+        fi
+    fi
     # nlclient opens the BLE chip's UART as it starts: with the stand-in sensor
     # it must find nestlocal's stand-in there (crates/nestlocal/src/sensor/).
     if grep -q -- '-external-temperature' "$OPTIONS"; then
