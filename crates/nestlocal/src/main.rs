@@ -16,6 +16,7 @@ mod heatlink;
 mod hotwater;
 mod json;
 mod liveness;
+mod lights;
 mod logger;
 mod matter;
 mod motion;

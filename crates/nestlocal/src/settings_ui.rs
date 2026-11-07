@@ -33,6 +33,17 @@ pub fn take_request_age(protocol: &str) -> Option<std::time::Duration> {
     Some(age)
 }
 
+/// A request's contents, taken atomically: one the screen leaves while this
+/// reads is a new request, not lost.
+pub fn take_request_text(protocol: &str) -> Option<String> {
+    let path = Path::new(DIR).join(format!("{protocol}.request"));
+    let taken = Path::new(DIR).join(format!("{protocol}.taken"));
+    std::fs::rename(path, &taken).ok()?;
+    let text = std::fs::read_to_string(&taken).ok();
+    let _ = std::fs::remove_file(taken);
+    text
+}
+
 pub fn init(matter: bool, zigbee: bool, doom: bool) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(DIR)?;
@@ -41,7 +52,7 @@ pub fn init(matter: bool, zigbee: bool, doom: bool) -> std::io::Result<()> {
     let features = (matter as u8) | ((zigbee as u8) << 1) | ((doom as u8) << 2);
     publish("features", &[b'0' + features])?;
     publish_activity_icons()?;
-    for name in ["display.request", "display.taken", "matter.request", "matter-reset.request", "zigbee.request", "doom.request", "matter.code", "matter.png"] {
+    for name in ["display.request", "display.taken", "lights.request", "lights.taken", "matter.request", "matter-reset.request", "zigbee.request", "doom.request", "matter.code", "matter.png"] {
         let _ = std::fs::remove_file(Path::new(DIR).join(name));
     }
     status("matter", if matter { "Starting Matter..." } else { "Matter not enabled" });

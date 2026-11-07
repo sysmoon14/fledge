@@ -58,6 +58,12 @@ impl Bridge {
     /// bucket, which then reaches nlclient on its held subscribe.
     pub fn command(&self, topic: &str, payload: &[u8]) {
         let name = topic.strip_prefix(&format!("{}/set/", self.base)).unwrap_or(topic);
+        if name == "lights" {
+            if let Err(e) = self.lights.configure(payload) {
+                logf!("mqtt: lights: {e}");
+            }
+            return;
+        }
         let arg = String::from_utf8_lossy(payload).trim().to_string();
         let _ = self.apply("mqtt", name, &arg);
     }
