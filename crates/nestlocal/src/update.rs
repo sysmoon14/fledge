@@ -288,20 +288,14 @@ pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>
     if let Progress::Downloading(percent) = progress {
         state["update_percentage"] = (*percent).into();
     }
-    let note = match (progress, failed) {
-        (Progress::Failed(e), _) => Some(format!("install failed: {e}")),
-        (_, Some(v)) => Some(format!("{v} did not start and was rolled back")),
-        _ => None,
-    };
-    if let Some(note) = note {
-        state["title"] = format!("nestlocal ({note})").into();
-    }
     if let Some(r) = latest {
-        state["latest_version"] = offered(VERSION, &r.tag).into();
+        // A release that was rolled back is not offered again.
+        let tag = if failed == Some(r.tag.as_str()) { VERSION } else { r.tag.as_str() };
+        state["latest_version"] = offered(VERSION, tag).into();
         // Home Assistant ranks a development build's -K-gHASH above a plain
         // -ben.N, so it would not offer a newer release: show it the release
         // the build is on (the title keeps the build).
-        if newer(&r.tag, VERSION) {
+        if newer(tag, VERSION) {
             let base = release_of(VERSION);
             if base != VERSION {
                 state["installed_version"] = base.into();
@@ -311,6 +305,14 @@ pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>
         state["release_url"] = r.url.clone().into();
         // Home Assistant shows at most 255 characters of the summary.
         state["release_summary"] = r.notes.chars().take(255).collect::<String>().into();
+    }
+    let note = match (progress, failed) {
+        (Progress::Failed(e), _) => Some(format!("install failed: {e}")),
+        (_, Some(v)) => Some(format!("{v} did not start and was rolled back")),
+        _ => None,
+    };
+    if let Some(note) = note {
+        state["title"] = format!("nestlocal ({note})").into();
     }
     state
 }
@@ -542,6 +544,19 @@ mod tests {
         assert_eq!(s["in_progress"], false);
         assert!(s["title"].as_str().unwrap().contains("v9.9.9-ben.1 did not start"));
         assert!(state(None, &Progress::Failed("no room".into()), None)["title"].as_str().unwrap().contains("no room"));
+    }
+
+    #[test]
+    fn a_release_that_was_rolled_back_is_not_offered_again() {
+        let r = Release { tag: "v99.0.0-ben.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
+        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-ben.1"));
+        assert_eq!(s["latest_version"], s["installed_version"]);
+        assert!(s["title"].as_str().unwrap().contains("v99.0.0-ben.1 did not start"));
+        // A newer one than that is.
+        let r = Release { tag: "v99.0.0-ben.2".into(), ..r };
+        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-ben.1"));
+        assert_eq!(s["latest_version"], "v99.0.0-ben.2");
+        assert!(s["title"].as_str().unwrap().contains("rolled back"));
     }
 
     #[test]
