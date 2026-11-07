@@ -13,6 +13,7 @@ mod doom;
 mod entropy;
 mod flags;
 mod heatlink;
+mod hotwater;
 mod json;
 mod liveness;
 mod logger;
