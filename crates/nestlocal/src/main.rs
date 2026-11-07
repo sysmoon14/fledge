@@ -102,6 +102,14 @@ fn main() {
         prepare_settings(&config);
         return;
     }
+    if !config.hold_awake.is_zero() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+            .unwrap_or_else(|e| fatal!("{e}"));
+        if let Err(e) = runtime.block_on(wake::hold_awake(config.hold_awake)) {
+            fatal!("hold awake: {e}");
+        }
+        return;
+    }
 
     #[cfg(target_os = "linux")]
     if let (true, Some(ble)) = (config.external_temperature, device::current().ble.as_ref()) {

@@ -674,7 +674,7 @@ mod tests {
         // A pending build that exits at once is retried in the same start,
         // and rolled back there: start-stop-daemon -t finds nothing running.
         exe(&dir.join("nestlocal"), "#!/bin/sh\n# new\nexit 0\n");
-        exe(&dir.join("nestlocal.prev"), "#!/bin/sh\n# old\nexit 0\n");
+        exe(&dir.join("nestlocal.prev"), &format!("#!/bin/sh\n# old\necho \"$*\" >> {d}/prev-args\nexit 0\n"));
         std::fs::remove_file(dir.join("update.failed")).unwrap();
         std::fs::write(dir.join("update.pending"), "0\nv0.3.2-ben.4\n").unwrap();
         exe(&dir.join("bin/start-stop-daemon"), "#!/bin/sh\ncase \" $* \" in *\" -t \"*) exit 1 ;; esac\nexit 0\n");
@@ -682,6 +682,10 @@ mod tests {
         assert!(!dir.join("update.pending").exists());
         assert!(std::fs::read_to_string(dir.join("nestlocal")).unwrap().contains("old"));
         assert_eq!(std::fs::read_to_string(dir.join("update.failed")).unwrap(), "v0.3.2-ben.4\n");
+        // The previous build held the unit awake meanwhile, started once.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let held = std::fs::read_to_string(dir.join("prev-args")).unwrap();
+        assert_eq!(held.lines().filter(|l| l.contains("-hold-awake 90s")).count(), 1, "{held}");
         // stop kills what pidof still finds; here nothing is left.
         exe(&dir.join("bin/pidof"), "#!/bin/sh\nexit 1\n");
         let path = format!("{d}/bin:{}", std::env::var("PATH").unwrap_or_default());

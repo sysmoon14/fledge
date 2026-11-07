@@ -32,6 +32,12 @@ start)
             printf '%s\n%s\n' "$starts" "$version" > "$PENDING.new" && mv -f "$PENDING.new" "$PENDING"
         fi
         sync
+        # The build being tried may never start, so never hold the unit
+        # awake: the previous one does while the starts below are counted
+        # (one without -hold-awake exits at once, unknown flag).
+        if [ -z "${NESTLOCAL_STARTS:-}" ] && [ -f "$PENDING" ] && [ -x "${DAEMON}.prev" ]; then
+            "${DAEMON}.prev" -syslog -hold-awake 90s > /dev/null 2>&1 &
+        fi
     fi
     # A radio that will not flash or attach must not take MQTT and Wi-Fi Matter down with it.
     if grep -q -- '-matter-thread' "$OPTIONS"; then

@@ -50,6 +50,10 @@
 //! HOLD_FOR: asleep, the unit drops the push's SSH connection. A push that
 //! dies leaves the file to go stale, so the unit sleeps again on its own.
 //!
+//! `nestlocal -hold-awake 60s` is a sleep entity of its own (HOLD_PATH) that
+//! declines sleep that long and exits: nestlocal.init runs the previous
+//! build so while it tries an update, which may never start to hold it.
+//!
 //! <base>/set/stay_awake <seconds> (at most MAX_STAY_AWAKE, 0 to release)
 //! declines sleep until then too. The broker's message is what wakes the
 //! sleeping unit, so a push can wake it without anyone turning its ring.
@@ -69,6 +73,8 @@ const MANAGER_PATH: &str = "/com/nestlabs/scpm/sleepd";
 const MANAGER: &str = "com.nestlabs.scpm.sleep_manager";
 const CZSNIFFER_PATH: &str = "/com/nestlabs/czsniffer";
 const ENTITY_PATH: &str = "/com/nestlabs/nestlocal";
+/// The sleep entity of `nestlocal -hold-awake`.
+const HOLD_PATH: &str = "/com/nestlabs/nestlocal_hold";
 /// What nlclient registers its own sniffer with.
 const SNIFFER_INTERVAL: i32 = 10;
 /// IPv4 and TCP headers without options: what nlsleepd takes.
@@ -98,6 +104,34 @@ pub fn stay_awake(seconds: u64) -> Result<(), String> {
     }
     let until = if seconds == 0 { 0 } else { unix_now() + seconds };
     STAY_AWAKE_UNTIL.store(until, Ordering::SeqCst);
+    Ok(())
+}
+
+/// A sleep entity that always declines sleep (-hold-awake).
+struct Holder;
+
+#[zbus::interface(name = "com.nestlabs.scpm.sleep_client")]
+impl Holder {
+    #[zbus(name = "RequestSleep")]
+    async fn request_sleep(&self) -> (String, bool) {
+        (HOLD_PATH.into(), false)
+    }
+
+    #[zbus(name = "WakeUp")]
+    async fn wake_up(&self, _reason: i32) -> (String, bool) {
+        (HOLD_PATH.into(), true)
+    }
+}
+
+/// Holds the unit awake for `duration` as a sleep entity of its own, then
+/// releases it.
+pub async fn hold_awake(duration: Duration) -> Result<(), String> {
+    let bus = zbus::Connection::system().await.map_err(|e| format!("system bus: {e}"))?;
+    bus.object_server().at(HOLD_PATH, Holder).await.map_err(|e| e.to_string())?;
+    call(&bus, MANAGER_PATH, MANAGER, "RegisterEntity", &(HOLD_PATH,)).await?;
+    logf!("wake: holding the unit awake for {} s", duration.as_secs());
+    tokio::time::sleep(duration).await;
+    let _ = call(&bus, MANAGER_PATH, MANAGER, "ReleaseResource", &(HOLD_PATH,)).await;
     Ok(())
 }
 
