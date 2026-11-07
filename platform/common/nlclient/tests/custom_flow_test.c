@@ -118,6 +118,18 @@ static void lights_test(void) {
     assert(custom_lights_parse("43\n0 -1 1 Snug lamp\n", &read) == 1);
     assert(custom_lights_merge(&lights, &read, 0) == 2 && lights.count == 1);
 
+    /* The brightness ring: its layout, and the ticks lit. */
+    short xs[CUSTOM_RING_MAX], ys[CUSTOM_RING_MAX];
+    assert(custom_ring_parse("3\n-10 20\n0 -230\n10 20\n", xs, ys) == 3);
+    assert(xs[0] == -10 && ys[1] == -230 && xs[2] == 10);
+    assert(!custom_ring_parse("", xs, ys) && !custom_ring_parse("3\n1 2\n", xs, ys));
+    assert(!custom_ring_parse("99\n", xs, ys) && !custom_ring_parse("0\n", xs, ys));
+    struct custom_light ring = {.on = 1, .brightness = 60, .dimmable = 1};
+    assert(custom_light_ticks(&ring, 50) == 30);
+    ring.brightness = 1; assert(custom_light_ticks(&ring, 50) == 1);
+    ring.brightness = 100; assert(custom_light_ticks(&ring, 50) == 50);
+    ring.brightness = -1; assert(custom_light_ticks(&ring, 50) == 50);
+    ring.on = 0; assert(custom_light_ticks(&ring, 50) == 0);
     /* Idle ticks count up; Back returns to the list, then home. */
     d.idle = 0;
     for (int i = 0; i < CUSTOM_LIGHT_IDLE; i++) custom_light_tick(&d);

@@ -140,6 +140,10 @@ struct custom_state {
     const char *choice_ids[CUSTOM_CHOICES + 1];
     struct custom_lights lights;
     struct custom_dial dial;
+    /* The light page's brightness ring: each tick lit and unlit, and where. */
+    int ring_count;
+    short ring_x[CUSTOM_RING_MAX], ring_y[CUSTOM_RING_MAX];
+    void *ring_images[2][CUSTOM_RING_MAX];
     u8 layer_vtables[VTABLE_MAX];
     u8 screen_vtables[VTABLE_MAX];
 };
@@ -362,6 +366,38 @@ static void read_lights(struct custom_lights *lights) {
     read_text(LIGHTS_FILE, text, sizeof(text), "");
     custom_lights_parse(text, lights);
 }
+static void release_image(void *image);
+/* Loaded when a light's page first opens; nestlocal renders them at start. */
+static void load_ring(struct custom_state *s) {
+    if (s->ring_count) return;
+    char layout[CUSTOM_RING_MAX * 12 + 8];
+    read_text("/var/run/unfr0zen/light-ring.layout", layout, sizeof(layout), "");
+    int count = custom_ring_parse(layout, s->ring_x, s->ring_y);
+    for (int i = 0; i < count; i++) {
+        for (int lit = 0; lit < 2; lit++) {
+            char path[64];
+            unsigned int at = custom_append(path, 0, sizeof(path), "/var/run/unfr0zen/light-ring-");
+            if (i < 10) at = custom_append(path, at, sizeof(path), "0");
+            at = custom_append_number(path, at, sizeof(path), i);
+            custom_append(path, at, sizeof(path), lit ? "-on.png" : "-off.png");
+            void *file = native_fopen(path, "rb");
+            if (!file) continue;
+            native_fclose(file);
+            int error = 0;
+            s->ring_images[lit][i] = native_image_load(path, &error);
+        }
+    }
+    s->ring_count = count;
+}
+static void release_ring(struct custom_state *s) {
+    for (int i = 0; i < s->ring_count; i++) {
+        for (int lit = 0; lit < 2; lit++) {
+            release_image(s->ring_images[lit][i]);
+            s->ring_images[lit][i] = 0;
+        }
+    }
+    s->ring_count = 0;
+}
 static int light_page(enum custom_page page) { return page == CUSTOM_LIGHTS || page == CUSTOM_LIGHT; }
 static void matter_detail(struct custom_state *s) {
     unsigned int n = 0;
@@ -460,9 +496,9 @@ static int show_lights(struct custom_state *s) {
     if (s->flow.page == CUSTOM_LIGHT) {
         struct custom_light *light = &s->lights.light[s->flow.light];
         native_string_copy(&s->text[0], light->name);
-        unsigned int at = custom_light_value(text, 0, sizeof(text), light);
-        custom_append(text, at, sizeof(text), "\n\nTurn to dim");
+        custom_light_value(text, 0, sizeof(text), light);
         native_string_copy(&s->text[1], text);
+        load_ring(s);
         native_string_copy(&s->choices[0], light->on ? "Turn off" : "Turn on");
         clear_choices(s, 1);
         s->config.text_count = 2;
@@ -762,6 +798,16 @@ static int draw(void *raw, void *context) {
             draw_image(context, -width / 2, top - height, image, style);
         }
     }
+    /* The ring is fixed at the display's edge, behind the text; the
+     * drawing origin is the display's centre, as the home image's is. */
+    if (s->flow.page == CUSTOM_LIGHT && s->flow.light < s->lights.count) {
+        void (*draw_image)(void *, int, int, void *, int) = PTR(PTR(context, 0), 0x50);
+        int lit = custom_light_ticks(&s->lights.light[s->flow.light], s->ring_count);
+        for (int i = 0; i < s->ring_count; i++) {
+            void *tick = s->ring_images[i < lit][i];
+            if (tick) draw_image(context, s->ring_x[i], s->ring_y[i], tick, style);
+        }
+    }
     if (custom_activity(s->flow.page)) {
         void *spinner = s->activity_images[s->activity_ticks % 8];
         if (spinner) {
@@ -855,6 +901,7 @@ static void exit_screen(void *screen) {
     stop_refresh(raw_layer(screen));
     struct custom_state *s = state(raw_layer(screen));
     for (int i = 0; i < 8; i++) { release_image(s->activity_images[i]); s->activity_images[i] = 0; }
+    release_ring(s);
 }
 static int screen_event(void *screen, void *event, void *target) {
     void *raw = raw_layer(screen);
