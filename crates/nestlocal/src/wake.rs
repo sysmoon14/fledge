@@ -44,10 +44,15 @@
 //!
 //! A Thread RCP uses the same interrupt and programs host wake deadlines in
 //! the radio. While thread0 exists, its daemon's idle record gates suspend.
+//!
+//! utils/push-over-ssh.sh touches HOLD_FILE before each command it runs on
+//! the unit, and RequestSleep is declined while the file is younger than
+//! HOLD_FOR: asleep, the unit drops the push's SSH connection. A push that
+//! dies leaves the file to go stale, so the unit sleeps again on its own.
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::logf;
 
@@ -72,6 +77,11 @@ const REPORT_DELAY: Duration = Duration::from_millis(300);
 const WAKE_HOLD: Duration = Duration::from_secs(3);
 /// nlsleepd answers at once; one it drops must not hang the loop.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Touched by utils/push-over-ssh.sh while it works on the unit.
+const HOLD_FILE: &str = "/var/run/unfr0zen/push-awake";
+/// How long a touch of HOLD_FILE keeps the unit awake: longer than the
+/// longest single command the push runs on the unit (60 s).
+const HOLD_FOR: Duration = Duration::from_secs(120);
 
 /// An established TCP connection, as /proc/net/tcp lists it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -271,6 +281,21 @@ fn sleep_blocked(matter: bool, ready: bool, commissioning: bool) -> bool {
     matter && (!ready || commissioning)
 }
 
+/// A push over SSH is working on the unit: HOLD_FILE was touched recently.
+fn push_holds_awake() -> bool {
+    std::fs::metadata(HOLD_FILE).and_then(|m| m.modified())
+        .is_ok_and(|touched| held(touched, SystemTime::now()))
+}
+
+/// Whether a hold touched at `touched` still holds at `now`; a touch from the
+/// future (the clock was set back) holds for no longer than HOLD_FOR from now.
+fn held(touched: SystemTime, now: SystemTime) -> bool {
+    match now.duration_since(touched) {
+        Ok(age) => age < HOLD_FOR,
+        Err(ahead) => ahead.duration() < HOLD_FOR,
+    }
+}
+
 fn release_when_idle(bus: zbus::Connection, matter: bool, ready: Arc<AtomicBool>) {
     tokio::spawn(async move {
         loop {
@@ -360,9 +385,13 @@ struct SleepClient {
 #[zbus::interface(name = "com.nestlabs.scpm.sleep_client")]
 impl SleepClient {
     /// The unit is about to sleep: report the connection last, or decline
-    /// while holding it awake or while the radio has something to say.
+    /// while holding it awake, while a push holds it, or while the radio has
+    /// something to say.
     #[zbus(name = "RequestSleep")]
     async fn request_sleep(&self) -> (String, bool) {
+        if push_holds_awake() {
+            return (ENTITY_PATH.into(), false);
+        }
         if sleep_blocked(self.matter, self.ready.load(Ordering::SeqCst), crate::matter::sleep_blocked()) || (self.zigbee && crate::zigbee::wakeup::pending()) || crate::thread_sleep::blocked() {
             return (ENTITY_PATH.into(), false);
         }
@@ -468,6 +497,18 @@ mod tests {
         assert!(!sleep_blocked(true, true, false));
         // A disabled Matter service must not block MQTT or Zigbee sleep.
         assert!(!sleep_blocked(false, false, true));
+    }
+
+    #[test]
+    fn a_push_holds_the_unit_awake_only_while_its_touch_is_recent() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert!(held(now, now));
+        assert!(held(now - Duration::from_secs(119), now));
+        assert!(!held(now - HOLD_FOR, now));
+        assert!(!held(now - Duration::from_secs(3600), now));
+        // A touch dated ahead of the clock must not hold the unit for good.
+        assert!(held(now + Duration::from_secs(30), now));
+        assert!(!held(now + Duration::from_secs(3600), now));
     }
 
     #[test]

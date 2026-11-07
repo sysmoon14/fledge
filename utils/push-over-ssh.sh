@@ -21,6 +21,12 @@
 # started as the Doom launcher does. A service that does not stay up is put
 # back as it was. One SSH connection serves the whole run, so a password is
 # asked once. The bootloader, kernel, radio firmware and recovery still need USB.
+#
+# The unit sleeps when left alone, and asleep it drops the connection. So
+# everything is built before connecting, and each command on the unit first
+# touches /var/run/unfr0zen/push-awake, which nestlocal (from this change on)
+# reads as a hold: it declines sleep for 2 minutes after each touch. Wake the
+# unit (turn its ring) just before a run.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -54,18 +60,6 @@ say "push-over-ssh $(date -u +%Y-%m-%dT%H:%M:%SZ) to $host from $(git describe -
 if command -v sha256sum > /dev/null; then hash() { sha256sum "$1" | cut -d' ' -f1; }
 else hash() { shasum -a 256 "$1" | cut -d' ' -f1; }; fi
 
-# One connection for the run: the password, if any, is asked once.
-# /tmp: a socket path under macOS's TMPDIR can exceed the 104-byte limit.
-control=$(mktemp -d /tmp/unfr0zen-ssh.XXXXXX)
-ssh_opts="-o ControlMaster=auto -o ControlPath=$control/c -o ControlPersist=120 -o ConnectTimeout=10"
-cleanup() { ssh $ssh_opts -O exit "$host" > /dev/null 2>&1 || true; rm -rf "$control"; }
-trap cleanup EXIT
-on() { ssh $ssh_opts "$host" "$@"; }
-on true || fail "cannot reach $host over SSH"
-on 'command -v sha256sum > /dev/null && command -v monit > /dev/null' ||
-    fail "the unit lacks sha256sum or monit"
-remote_hash() { on "sha256sum '$1' 2>/dev/null | cut -d' ' -f1"; }
-
 in_image() {  # the firmware build image on macOS, as utils/build-firmware.sh runs it
     if [ "$(uname -s)" = Darwin ]; then
         quiet docker build -q -t unfr0zen-build - < utils/ci/Dockerfile
@@ -76,7 +70,7 @@ in_image() {  # the firmware build image on macOS, as utils/build-firmware.sh ru
     fi
 }
 
-# --- build and check locally ------------------------------------------------
+# --- build locally, before connecting ------------------------------------------
 if [ $nestlocal = 1 ]; then
     if [ $build = 1 ]; then
         say "Building nestlocal (log: $log)"
@@ -87,23 +81,56 @@ if [ $nestlocal = 1 ]; then
     say "nestlocal: $(wc -c < build/nestlocal-armv7 | tr -d ' ') bytes, sha256 $nestlocal_hash"
 fi
 
+stock=$work/nlclient.original
+# patch_screen: the stock nlclient, patched with this checkout's screen.
+patch_screen() {
+    say "Patching the stock nlclient with this checkout's screen"
+    rm -f "$work/nlclient" "$work/nlclient.undo.gz" "$work/nlclient.json"
+    quiet cargo run --quiet --release -p unfr0zen-gui -- nlclient "$stock" --out "$work/nlclient"
+}
+if [ $screen = 1 ]; then
+    if [ $build = 1 ]; then
+        say "Building the screen object (log: $log)"
+        in_image sh platform/common/nlclient/build.sh build
+    fi
+    say "Building the patcher (log: $log)"
+    quiet cargo build --quiet --release -p unfr0zen-gui
+    # The unit's stock nlclient from an earlier run; checked against the unit below.
+    [ ! -f "$stock" ] || patch_screen
+fi
+
+# --- connect -----------------------------------------------------------------
+# One connection for the run: the password, if any, is asked once.
+# /tmp: a socket path under macOS's TMPDIR can exceed the 104-byte limit.
+control=$(mktemp -d /tmp/unfr0zen-ssh.XXXXXX)
+ssh_opts="-o ControlMaster=auto -o ControlPath=$control/c -o ControlPersist=600 -o ServerAliveInterval=15 -o ConnectTimeout=10"
+awake=/var/run/unfr0zen/push-awake
+connected=0
+cleanup() {
+    [ $connected = 0 ] || ssh $ssh_opts "$host" "rm -f $awake" > /dev/null 2>&1 || true
+    ssh $ssh_opts -O exit "$host" > /dev/null 2>&1 || true
+    rm -rf "$control"
+}
+trap cleanup EXIT
+# on COMMAND: run on the unit, renewing the hold that keeps it awake first.
+on() { ssh $ssh_opts "$host" "mkdir -p ${awake%/*} 2>/dev/null; touch $awake 2>/dev/null; $*"; }
+on true || fail "cannot reach $host over SSH: wake the unit (turn its ring) and run again"
+connected=1
+on 'command -v sha256sum > /dev/null && command -v monit > /dev/null' ||
+    fail "the unit lacks sha256sum or monit"
+remote_hash() { on "sha256sum '$1' 2>/dev/null | cut -d' ' -f1"; }
+
+# --- check against the unit ----------------------------------------------------
 if [ $screen = 1 ]; then
     original_hash=$(remote_hash /etc/unfr0zen/nlclient.original)
     [ -n "$original_hash" ] || fail "the unit has no /etc/unfr0zen/nlclient.original: patch it once with the app"
-    stock=$work/nlclient.original
     if [ ! -f "$stock" ] || [ "$(hash "$stock")" != "$original_hash" ]; then
         say "Fetching the unit's stock nlclient"
         on "cat /etc/unfr0zen/nlclient.original" > "$stock.partial"
         [ "$(hash "$stock.partial")" = "$original_hash" ] || fail "the stock nlclient did not arrive intact"
         mv "$stock.partial" "$stock"
+        patch_screen
     fi
-    if [ $build = 1 ]; then
-        say "Building the screen object (log: $log)"
-        in_image sh platform/common/nlclient/build.sh build
-    fi
-    say "Patching the stock nlclient with this checkout's screen"
-    rm -f "$work/nlclient" "$work/nlclient.undo.gz" "$work/nlclient.json"
-    quiet cargo run --quiet --release -p unfr0zen-gui -- nlclient "$stock" --out "$work/nlclient"
     nlclient_hash=$(hash "$work/nlclient")
     journal_hash=$(hash "$work/nlclient.undo.gz")
     grep -q "\"$original_hash\"" "$work/nlclient.json" || fail "the manifest is not for the unit's stock nlclient"
@@ -116,6 +143,7 @@ fi
 stage() {
     size=$(wc -c < "$1" | tr -d ' ')
     free=$(on "df -k '$(dirname -- "$2")' | tail -n 1" | awk '{print $(NF-2)}')
+    [ -n "$free" ] || fail "lost $host while checking free space: wake the unit and run again"
     [ $((free * 1024)) -gt $((size + 1048576)) ] || fail "$(dirname -- "$2") has ${free}K free, $2 needs $((size / 1024))K"
     on "cat > '$2.unfr0zen-new'" < "$1"
     [ "$(remote_hash "$2.unfr0zen-new")" = "$3" ] || { on "rm -f '$2.unfr0zen-new'"; fail "$2 did not arrive intact"; }
