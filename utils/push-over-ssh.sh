@@ -222,6 +222,18 @@ stays_up() {
             sleep 1
         done
         exit 1"
+    status=$?
+    [ $status = 255 ] || return $status
+    # The unit's Wi-Fi dropped the session, not the process: once it answers
+    # again, a new pid that has run for 10 s or more is as good.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 6
+        on "pid=\$(pidof $1) && [ \"\$pid\" != '${3:-}' ] &&
+            [ \$((\$(date +%s) - \$(stat -c %Y /proc/\$pid))) -ge 10 ]"
+        status=$?
+        [ $status = 255 ] || return $status
+    done
+    return 1
 }
 stop_nlclient() {  # as the Doom launcher does
     on 'monit unmonitor nlclient > /dev/null 2>&1
