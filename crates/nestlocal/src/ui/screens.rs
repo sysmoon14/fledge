@@ -9,11 +9,15 @@ use super::paint::{self, *};
 pub enum Screen<'a> {
     LightsCard { card: &'a LightsCard },
     ClimateCard { card: &'a ClimateCard, target: Option<f64> },
-    MediaCard { card: &'a MediaCard, volume: Option<u8> },
+    /// `progress`: how far through its track (0..1), for its bar.
+    MediaCard { card: &'a MediaCard, volume: Option<u8>, progress: Option<f32> },
     SettingsCard,
     /// The lights card pressed: its lights and Back, `selected` highlighted.
     LightList { card: &'a LightsCard, selected: usize },
     LightDim { light: &'a Light, on: bool, value: u8 },
+    /// A light's white (kelvin) and colour (hue, degrees) dials.
+    LightWarmth { light: &'a Light, value: u16 },
+    LightHue { light: &'a Light, value: u16 },
     ClimateSet { card: &'a ClimateCard, target: f64 },
     Volume { card: &'a MediaCard, value: u8 },
 }
@@ -31,7 +35,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
             climate_moving(&mut p, None, fonts, card, target, None);
             p
         }
-        Screen::MediaCard { card, volume } => media_card(fonts, card, volume.or(card.volume)),
+        Screen::MediaCard { card, volume, progress } => media_card(fonts, card, volume.or(card.volume), *progress),
         Screen::SettingsCard => settings_card(fonts),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         _ => {
@@ -48,6 +52,8 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
 pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
     match screen {
         Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on),
+        Screen::LightWarmth { light, .. } => light_dial_still(fonts, light, "Warmth"),
+        Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour"),
         Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), true),
         Screen::Volume { card, .. } => volume_still(fonts, card),
         _ => draw(fonts, screen, None),
@@ -59,6 +65,8 @@ pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
 pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>, mut live: Option<&mut paint::Live>) {
     match screen {
         Screen::LightDim { light, on, value } => light_dim_moving(p, live.as_deref_mut(), fonts, light, *on, *value, sweep),
+        Screen::LightWarmth { light, value } => warmth_moving(p, live.as_deref_mut(), fonts, light, *value, sweep),
+        Screen::LightHue { value, .. } => hue_moving(p, live.as_deref_mut(), fonts, *value, sweep),
         Screen::ClimateSet { card, target } => climate_moving(p, live.as_deref_mut(), fonts, card, Some(*target), sweep),
         Screen::Volume { value, .. } => volume_moving(p, live.as_deref_mut(), fonts, *value, sweep),
         _ => {}
@@ -72,6 +80,8 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
 pub fn still_key(screen: &Screen) -> Option<String> {
     match screen {
         Screen::LightDim { light, on, .. } => Some(format!("dim {light:?} {on}")),
+        Screen::LightWarmth { light, .. } => Some(format!("warmth {}", light.id)),
+        Screen::LightHue { light, .. } => Some(format!("hue {}", light.id)),
         Screen::ClimateSet { card, .. } => Some(format!("set {card:?}")),
         Screen::Volume { card, .. } => Some(format!("volume {card:?}")),
         _ => None,
@@ -243,7 +253,10 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
     }
 }
 
-fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>) -> Canvas {
+/// How wide a media card's progress bar is.
+pub const PROGRESS_WIDTH: f32 = 180.0;
+
+fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, progress: Option<f32>) -> Canvas {
     let mut p = paint::canvas(BLACK);
     let playing = card.state == "playing";
     let lit = volume.map(|v| paint::tick_at(v as f32 / 100.0));
@@ -268,8 +281,17 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>) -> Canvas {
     let title = if card.title.is_empty() { capitalise(&card.state) } else { card.title.clone() };
     let title = paint::fit(&fonts.medium, 28.0, &title, 0.0, 300.0);
     paint::text(&mut p, &fonts.medium, 28.0, HALF, top + 42.0, &title, 0.0, WHITE);
+    // How far through the track, under its title.
+    let mut below = top + 76.0;
+    if let Some(done) = progress {
+        let (x, y) = (HALF - PROGRESS_WIDTH / 2.0, top + 58.0);
+        paint::pill(&mut p, x, y, PROGRESS_WIDTH, 5.0, colour(DIM));
+        let width = (PROGRESS_WIDTH * done).max(5.0);
+        paint::pill(&mut p, x, y, width, 5.0, colour(if playing { MEDIA } else { GREY }));
+        below += 14.0;
+    }
     let under = if card.artist.is_empty() { String::new() } else { card.artist.clone() };
-    line(&mut p, fonts, top + 76.0, &under, GREY);
+    line(&mut p, fonts, below, &under, GREY);
     p
 }
 
@@ -344,6 +366,90 @@ fn light_dim_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &
     }
 }
 
+/// A light's warmth or colour dial without its ring and value: its name and
+/// what the dial sets.
+fn light_dial_still(fonts: &Fonts, light: &Light, what: &str) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, GREY);
+    label(&mut p, fonts, 150.0, &light.name, GREY);
+    line(&mut p, fonts, 366.0, &format!("{what} · press when done"), GREY);
+    p
+}
+
+/// A white light's colour at `kelvin`: candle orange to daylight blue.
+pub fn kelvin_rgb(kelvin: f32) -> [u8; 3] {
+    const STOPS: [(f32, [f32; 3]); 4] =
+        [(2000.0, [255.0, 138.0, 18.0]), (3000.0, [255.0, 180.0, 107.0]), (4500.0, [255.0, 228.0, 206.0]),
+         (6500.0, [201.0, 218.0, 255.0])];
+    let k = kelvin.clamp(STOPS[0].0, STOPS[3].0);
+    let i = STOPS.windows(2).position(|w| k <= w[1].0).unwrap_or(2);
+    let ((k0, a), (k1, b)) = (STOPS[i], STOPS[i + 1]);
+    let t = (k - k0) / (k1 - k0);
+    [0, 1, 2].map(|c| (a[c] + (b[c] - a[c]) * t).round() as u8)
+}
+
+/// The fully saturated colour at `hue` degrees.
+pub fn hue_rgb(hue: f32) -> [u8; 3] {
+    let h = hue.rem_euclid(360.0) / 60.0;
+    let x = 1.0 - (h % 2.0 - 1.0).abs();
+    let (r, g, b) = match h as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    [r, g, b].map(|c: f32| (c * 255.0).round() as u8)
+}
+
+/// The warmth dial: the ring warm to cool across the light's range, the
+/// mark at its white, the kelvin in the middle.
+fn warmth_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, light: &Light, value: u16,
+                 sweep: Option<f32>) {
+    let [low, high] = light.kelvins.unwrap_or([2000, 6500]);
+    let span = (high as f32 - low as f32).max(1.0);
+    let fraction = sweep.unwrap_or((value as f32 - low as f32) / span);
+    let mark = paint::tick_at(fraction);
+    let last = (paint::TICKS - 1) as f32;
+    ring_on(p, live.as_deref_mut(), |i| colour(kelvin_rgb(low as f32 + span * i as f32 / last)), &[mark]);
+    big_text_on(p, live, fonts, &value.to_string(), "K", 120.0, WHITE);
+}
+
+/// The colour dial: the ring round the colour wheel, the mark at the
+/// light's hue, a swatch of it in the middle.
+fn hue_moving(p: &mut Canvas, live: Option<&mut paint::Live>, _fonts: &Fonts, value: u16, sweep: Option<f32>) {
+    let mark = paint::tick_at(sweep.unwrap_or(value as f32 / 360.0));
+    let last = (paint::TICKS - 1) as f32;
+    ring_on(p, live, |i| colour(hue_rgb(360.0 * i as f32 / last)), &[mark]);
+    // Opaque over the last one, the edge on black, so nothing builds up.
+    paint::circle(p, HALF, 258.0, 76.0, colour(BLACK));
+    paint::circle(p, HALF, 258.0, 72.0, colour(hue_rgb(value as f32)));
+}
+
+/// Text as large as the dial's number, `unit` raised beside it: for values
+/// too long for big_number's size.
+#[allow(clippy::too_many_arguments)]
+fn big_text_on(pixmap: &mut Canvas, live: Option<&mut paint::Live>, fonts: &Fonts, digits: &str, unit: &str, size: f32,
+               c: [u8; 3]) {
+    let width = paint::measure(&fonts.regular, size, digits, -3.0);
+    let small = size * 0.31;
+    let small_width = if unit.is_empty() { 0.0 } else { paint::measure(&fonts.regular, small, unit, 0.0) + 6.0 };
+    let x = HALF - (width + small_width) / 2.0;
+    let mut parts = vec![(&fonts.regular, size, x, 300.0, digits, -3.0)];
+    if !unit.is_empty() {
+        parts.push((&fonts.regular, small, x + width + 4.0, 300.0 - size * 0.7 + small, unit, 0.0));
+    }
+    match live {
+        Some(live) => paint::number_live(pixmap, live, &parts, c),
+        None => {
+            for (font, size, x, y, text, spacing) in parts {
+                paint::text_at(pixmap, font, size, x, y, text, spacing, c, 1.0);
+            }
+        }
+    }
+}
+
 fn volume_still(fonts: &Fonts, card: &MediaCard) -> Canvas {
     let mut p = paint::canvas(BLACK);
     label(&mut p, fonts, 150.0, &card.name, MEDIA);
@@ -390,6 +496,7 @@ mod tests {
     fn a_room_is_the_average_of_its_lights_that_are_on() {
         let light = |on, brightness: Option<u8>, rgb| Light {
             id: "light.x".into(), name: String::new(), icon: String::new(), on, dimmable: true, brightness, rgb: Some(rgb),
+            ..Default::default()
         };
         assert_eq!(room(&[light(false, None, [255, 0, 0])]), None);
         let lights = [light(true, Some(60), [255, 0, 0]), light(false, None, [0, 255, 0]), light(true, Some(20), [0, 0, 255])];

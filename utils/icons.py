@@ -28,8 +28,8 @@ door doorbell bell cctv camera garage gate lock
 water coffee kettle blinds curtains window robot vacuum washing dishwasher
 """.split())
 
-# The cards' own: Nest settings and the lists' Back.
-NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause"}
+# The cards' own: Nest settings, the lists' Back, a light's warmth and colour.
+NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause", "palette", "white-balance-sunny"}
 
 # Home Assistant's Material Symbols sets, by its prefixes.
 SETS = {"outlined": "m3o", "rounded": "m3r", "sharp": "m3s"}

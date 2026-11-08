@@ -141,6 +141,10 @@ struct Runtime {
     /// and zoomed out (zoom::shrink; the thermostat's under 0).
     cards: std::collections::HashMap<usize, device::Frame>,
     shrunk: std::collections::HashMap<usize, device::Frame>,
+    /// Each media card's progress bar as drawn, in pixels, and when they
+    /// were last looked at: a card is drawn again as its bar moves.
+    progress: std::collections::HashMap<usize, u32>,
+    progress_checked: Instant,
     /// How big the cards show (1 full size, zoom::ZOOMED while moving).
     zoom: f32,
     /// A frame to compose zoomed cards in.
@@ -185,6 +189,7 @@ impl Runtime {
             ui, sender, fonts, display, input, beeper: device::Beeper::open(), machine: Machine::new(now),
             generation: u64::MAX, saved: None, home: None, transition: Transition::Cut, view: None,
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
+            progress: Default::default(), progress_checked: Instant::now(),
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, dial: None, last_dial: now - Duration::from_secs(60),
@@ -278,6 +283,10 @@ impl Runtime {
             self.last_frame = now;
             let swept = self.sweep(elapsed);
             let mut dirty = self.machine.take_dirty();
+            if now.duration_since(self.progress_checked) >= Duration::from_millis(500) {
+                self.progress_checked = now;
+                dirty |= self.progress_moved();
+            }
             if self.machine.owns() && self.display.lost() {
                 // The display was panned away (as it lit): show the UI again, whole.
                 dirty = true;
@@ -518,6 +527,25 @@ impl Runtime {
         }
     }
 
+    /// Forgets each media card whose progress bar has moved a pixel, so it
+    /// is drawn again; whether any had.
+    fn progress_moved(&mut self) -> bool {
+        let now = unix_now();
+        let mut moved = false;
+        for (index, slot) in self.machine.deck().into_iter().enumerate() {
+            let Slot::Card(slot) = slot else { continue };
+            let Some(Card::Media(card)) = self.machine.cards.cards.get(slot) else { continue };
+            let Some(done) = card.progress(now) else { continue };
+            let pixels = (done * screens::PROGRESS_WIDTH) as u32;
+            if self.progress.insert(index, pixels).is_some_and(|was| was != pixels) {
+                self.cards.remove(&index);
+                self.shrunk.remove(&index);
+                moved = true;
+            }
+        }
+        moved
+    }
+
     /// Draws card `at` (wrapping round the deck) if it isn't yet.
     fn prepare(&mut self, at: i64) {
         let deck = self.machine.deck();
@@ -530,7 +558,7 @@ impl Runtime {
             Slot::Card(slot) => match card(slot) {
                 Some(Card::Lights(card)) => Screen::LightsCard { card },
                 Some(Card::Climate(card)) => Screen::ClimateCard { card, target: None },
-                Some(Card::Media(card)) => Screen::MediaCard { card, volume: None },
+                Some(Card::Media(card)) => Screen::MediaCard { card, volume: None, progress: card.progress(unix_now()) },
                 None => return,
             },
             _ => Screen::SettingsCard,
@@ -557,6 +585,14 @@ impl Runtime {
                 Some(Card::Climate(c)) => Some(((target - c.min) / (c.max - c.min).max(0.5)) as f32),
                 _ => None,
             },
+            Mode::LightWarmth { slot, light, value } => match card(*slot) {
+                Some(Card::Lights(c)) => {
+                    let [low, high] = c.lights.get(*light)?.kelvins.unwrap_or([2000, 6500]);
+                    Some((*value as f32 - low as f32) / (high as f32 - low as f32).max(1.0))
+                }
+                _ => None,
+            },
+            Mode::LightHue { value, .. } => Some(*value as f32 / 360.0),
             _ => None,
         }
     }
@@ -692,6 +728,14 @@ impl Runtime {
                 Card::Lights(card) => Screen::LightDim { light: card.lights.get(*light)?, on: *on, value: *value },
                 _ => return None,
             },
+            Mode::LightWarmth { slot, light, value } => match card(*slot)? {
+                Card::Lights(card) => Screen::LightWarmth { light: card.lights.get(*light)?, value: *value },
+                _ => return None,
+            },
+            Mode::LightHue { slot, light, value } => match card(*slot)? {
+                Card::Lights(card) => Screen::LightHue { light: card.lights.get(*light)?, value: *value },
+                _ => return None,
+            },
             Mode::ClimateSet { slot, target } => match card(*slot)? {
                 Card::Climate(card) => Screen::ClimateSet { card, target: *target },
                 _ => return None,
@@ -719,6 +763,8 @@ impl Runtime {
             Action::Switch(false) => ("mdi:power", "Turn off"),
             Action::Play(true) => ("mdi:play", "Play"),
             Action::Play(false) => ("mdi:pause", "Pause"),
+            Action::Warmth => ("mdi:white-balance-sunny", "Warmth"),
+            Action::Colour => ("mdi:palette", "Colour"),
         }).collect();
         screens::menu(&mut canvas, &self.fonts, &title, &items, selected);
         let frame = device::frame(canvas);
@@ -796,6 +842,8 @@ type SweepKey = (u8, usize, usize);
 fn sweep_key(mode: &Mode) -> Option<SweepKey> {
     match *mode {
         Mode::LightDim { slot, light, .. } => Some((0, slot, light)),
+        Mode::LightWarmth { slot, light, .. } => Some((3, slot, light)),
+        Mode::LightHue { slot, light, .. } => Some((4, slot, light)),
         Mode::Volume { slot, .. } => Some((1, slot, 0)),
         Mode::ClimateSet { slot, .. } => Some((2, slot, 0)),
         _ => None,
@@ -822,6 +870,11 @@ fn transition(before: &Mode, after: &Mode, turned: bool) -> Transition {
         return Transition::Cut;
     }
     Transition::Fade
+}
+
+/// The wall clock, in Unix seconds.
+fn unix_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
 fn ease(t: f32) -> f32 {
@@ -957,7 +1010,7 @@ mod shots {
         let shots = [
             ("1-lights", Screen::LightsCard { card: lights }),
             ("2-climate", Screen::ClimateCard { card: climate, target: None }),
-            ("3-media", Screen::MediaCard { card: media, volume: None }),
+            ("3-media", Screen::MediaCard { card: media, volume: None, progress: Some(0.4) }),
             ("4-settings", Screen::SettingsCard),
             ("5-list", Screen::LightList { card: lights, selected: 0 }),
             ("6-dim", Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }),
@@ -970,10 +1023,14 @@ mod shots {
         let mut menu = screens::draw(&fonts, &Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, None);
         screens::menu(&mut menu, &fonts, "Reading Lamp", &[("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off")], 0);
         save(&menu, &format!("{out}/9-menu.png"));
+        let mut tunable = lights.lights[0].clone();
+        (tunable.kelvin, tunable.kelvins, tunable.hues, tunable.hue) = (Some(2700), Some([2200, 6500]), true, Some(200));
+        save(&screens::draw(&fonts, &Screen::LightWarmth { light: &tunable, value: 2700 }, None), &format!("{out}/9b-warmth.png"));
+        save(&screens::draw(&fonts, &Screen::LightHue { light: &tunable, value: 200 }, None), &format!("{out}/9c-colour.png"));
         let mut with_art = media.clone();
         let size = model::ART_MAX * 7 / 10;
         let rgb = (0..size * size).flat_map(|i| [(i % size * 255 / size) as u8, (i / size * 255 / size) as u8, 160]);
         with_art.art = Some(Arc::new(Art { size, rgb: rgb.collect() }));
-        save(&screens::draw(&fonts, &Screen::MediaCard { card: &with_art, volume: None }, None), &format!("{out}/3b-art.png"));
+        save(&screens::draw(&fonts, &Screen::MediaCard { card: &with_art, volume: None, progress: Some(0.4) }, None), &format!("{out}/3b-art.png"));
     }
 }

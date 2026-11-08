@@ -59,7 +59,7 @@ pub struct LightsCard {
     pub lights: Vec<Light>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct Light {
     pub id: String,
     #[serde(default)]
@@ -75,6 +75,17 @@ pub struct Light {
     pub brightness: Option<u8>,
     #[serde(default)]
     pub rgb: Option<[u8; 3]>,
+    /// Its white's warmth, in kelvin, and the range it takes: None, it has
+    /// no warmth to set.
+    #[serde(default)]
+    pub kelvin: Option<u16>,
+    #[serde(default)]
+    pub kelvins: Option<[u16; 2]>,
+    /// Whether it takes colours, and its hue (0..360) when it shows one.
+    #[serde(default)]
+    pub hues: bool,
+    #[serde(default)]
+    pub hue: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -126,6 +137,27 @@ pub struct MediaCard {
     /// Its album art, from its own topic.
     #[serde(skip)]
     pub art: Option<Arc<Art>>,
+    /// Where the track was (seconds) when Home Assistant last said, and when
+    /// that was (Unix seconds), and how long it is.
+    #[serde(default)]
+    pub position: Option<f64>,
+    #[serde(default)]
+    pub position_at: Option<f64>,
+    #[serde(default)]
+    pub duration: Option<f64>,
+}
+
+impl MediaCard {
+    /// How far through the track it is at `now` (Unix seconds), 0..1: on
+    /// from where it was while it plays. None without a length.
+    pub fn progress(&self, now: f64) -> Option<f32> {
+        let duration = self.duration.filter(|d| *d > 0.0)?;
+        let mut at = self.position?;
+        if self.state == "playing" {
+            at += (now - self.position_at.unwrap_or(now)).max(0.0);
+        }
+        Some((at / duration).clamp(0.0, 1.0) as f32)
+    }
 }
 
 /// Album art: a square picture, RGB, at most ART_MAX wide.
@@ -201,6 +233,10 @@ pub enum Command {
     Temperature(String, f64),
     Volume(String, u8),
     PlayPause(String),
+    /// A light's white, in kelvin.
+    Kelvin(String, u16),
+    /// A light's colour, by hue (0..360).
+    Hue(String, u16),
 }
 
 impl Command {
@@ -212,6 +248,8 @@ impl Command {
             Command::Temperature(id, t) => json!({"id": id, "action": "temperature", "value": t}),
             Command::Volume(id, v) => json!({"id": id, "action": "volume", "value": v}),
             Command::PlayPause(id) => json!({"id": id, "action": "play_pause"}),
+            Command::Kelvin(id, k) => json!({"id": id, "action": "color_temp", "value": k}),
+            Command::Hue(id, h) => json!({"id": id, "action": "hue", "value": h}),
         }
     }
 }
@@ -250,7 +288,7 @@ mod tests {
     #[test]
     fn a_dim_colour_is_lifted_and_none_is_warm() {
         let mut light = Light { id: "light.x".into(), name: String::new(), icon: String::new(), on: true,
-                                dimmable: true, brightness: Some(10), rgb: Some([40, 0, 20]) };
+                                dimmable: true, brightness: Some(10), rgb: Some([40, 0, 20]), ..Default::default() };
         assert_eq!(light.colour(), [200, 0, 100]);
         light.rgb = Some([255, 249, 253]);
         assert_eq!(light.colour(), [255, 249, 253]);

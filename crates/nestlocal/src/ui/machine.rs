@@ -26,6 +26,9 @@ const GESTURE: Duration = Duration::from_millis(400);
 const TURN_KEPT: Duration = Duration::from_millis(1500);
 /// Between cards, a turn that stops this long settles: on the next card if
 /// it went past halfway, else back where it was.
+/// A step of a light's warmth dial, in kelvin, and of its colour's, in degrees.
+pub const KELVIN_STEP: i32 = 50;
+pub const HUE_STEP: i32 = 4;
 /// How far the cards follow a turn past either end, in counts.
 pub const END_GIVE: i32 = CARD_STEP / 6;
 pub const SNAP: Duration = Duration::from_millis(250);
@@ -59,6 +62,10 @@ pub enum Action {
     Switch(bool),
     /// Plays (true) or pauses the media player.
     Play(bool),
+    /// A light's white: its own dial.
+    Warmth,
+    /// A light's colour: its own dial.
+    Colour,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +82,9 @@ pub enum Mode {
     Chooser(usize),
     LightList { slot: usize, selected: usize },
     LightDim { slot: usize, light: usize, on: bool, value: u8 },
+    /// A light's white, in kelvin, and its colour, by hue: dials of their own.
+    LightWarmth { slot: usize, light: usize, value: u16 },
+    LightHue { slot: usize, light: usize, value: u16 },
     ClimateSet { slot: usize, target: f64 },
     Volume { slot: usize, value: u8 },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -94,7 +104,8 @@ impl Mode {
     /// The card a device's own screen belongs to, by its place in the deck.
     pub fn card_index(&self) -> Option<usize> {
         match self {
-            Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::ClimateSet { slot, .. }
+            Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
+            | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. }
             | Mode::Volume { slot, .. } => Some(slot + 1),
             Mode::Menu { view, .. } => view.card_index(),
             _ => None,
@@ -188,7 +199,8 @@ impl Machine {
             Mode::LightList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(_))),
             Mode::ClimateSet { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Climate(_))),
             Mode::Volume { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Media(_))),
-            Mode::LightDim { slot, light, .. } => match cards.cards.get(*slot) {
+            Mode::LightDim { slot, light, .. } | Mode::LightWarmth { slot, light, .. }
+            | Mode::LightHue { slot, light, .. } => match cards.cards.get(*slot) {
                 Some(Card::Lights(card)) => *light < card.lights.len(),
                 _ => false,
             },
@@ -390,6 +402,22 @@ impl Machine {
                 }
                 self.mode = Mode::LightDim { slot, light, on: true, value };
             }
+            Mode::LightWarmth { slot, light, value } => {
+                if let Some(Card::Lights(card)) = self.card(slot) {
+                    let one = &card.lights[light];
+                    let [low, high] = one.kelvins.unwrap_or([2000, 6500]);
+                    let value = (value as i32 + steps * KELVIN_STEP).clamp(low as i32, high as i32) as u16;
+                    self.pending = Some(Command::Kelvin(one.id.clone(), value));
+                    self.mode = Mode::LightWarmth { slot, light, value };
+                }
+            }
+            Mode::LightHue { slot, light, value } => {
+                if let Some(Card::Lights(card)) = self.card(slot) {
+                    let value = (value as i32 + steps * HUE_STEP).rem_euclid(360) as u16;
+                    self.pending = Some(Command::Hue(card.lights[light].id.clone(), value));
+                    self.mode = Mode::LightHue { slot, light, value };
+                }
+            }
             Mode::ClimateSet { slot, target } => {
                 if let Some(Card::Climate(card)) = self.card(slot) {
                     let target = (target + steps as f64 * card.step).clamp(card.min, card.max);
@@ -470,8 +498,21 @@ impl Machine {
                     Some(light) => self.switch_light(slot, selected, !light.on, out),
                 }
             }
-            view @ Mode::LightDim { on, .. } => {
-                self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Switch(!on)], selected: 0 };
+            view @ Mode::LightDim { slot, light, on, .. } => {
+                let mut actions = vec![Action::Back, Action::Switch(!on)];
+                if let Some(Card::Lights(card)) = self.card(slot) {
+                    if card.lights[light].kelvins.is_some() {
+                        actions.push(Action::Warmth);
+                    }
+                    if card.lights[light].hues {
+                        actions.push(Action::Colour);
+                    }
+                }
+                self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
+            }
+            Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => {
+                // Done: back to its dimmer.
+                self.mode = self.dimmer(slot, light);
             }
             view @ Mode::Volume { slot, .. } => {
                 let playing = matches!(self.card(slot), Some(Card::Media(m)) if m.state == "playing");
@@ -495,6 +536,19 @@ impl Machine {
             (Action::Switch(on), Mode::LightDim { slot, light, value, .. }) => {
                 self.switch_light(slot, light, on, out);
                 self.mode = Mode::LightDim { slot, light, on, value };
+            }
+            (Action::Warmth, Mode::LightDim { slot, light, .. }) => {
+                if let Some(Card::Lights(card)) = self.card(slot) {
+                    let one = &card.lights[light];
+                    let [low, high] = one.kelvins.unwrap_or([2000, 6500]);
+                    let value = one.kelvin.unwrap_or((low + high) / 2).clamp(low, high);
+                    self.mode = Mode::LightWarmth { slot, light, value };
+                }
+            }
+            (Action::Colour, Mode::LightDim { slot, light, .. }) => {
+                if let Some(Card::Lights(card)) = self.card(slot) {
+                    self.mode = Mode::LightHue { slot, light, value: card.lights[light].hue.unwrap_or(30) % 360 };
+                }
             }
             (Action::Play(_), Mode::Volume { slot, value }) => {
                 self.toggle(slot, None, out);
@@ -547,6 +601,7 @@ impl Machine {
                 }
                 toggled
             }
+            Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => self.toggle(slot, Some(light), out),
             Mode::Volume { slot, .. } => self.toggle(slot, None, out),
             _ => false,
         };
@@ -570,6 +625,15 @@ impl Machine {
         };
         out.push(Effect::Click);
         self.go(back, out);
+    }
+
+    /// A light's dimmer, as it is now.
+    fn dimmer(&self, slot: usize, light: usize) -> Mode {
+        let (on, value) = match self.card(slot) {
+            Some(Card::Lights(card)) => (card.lights[light].on, card.lights[light].brightness.unwrap_or(100)),
+            _ => (false, 100),
+        };
+        Mode::LightDim { slot, light, on, value }
     }
 
     /// Switches a light, showing it switched until Home Assistant says.
@@ -631,6 +695,9 @@ impl Machine {
                 Some(Card::Lights(card)) if card.lights.len() > 1 => Mode::LightList { slot, selected: light },
                 _ => Mode::Chooser(slot + 1),
             }),
+            Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } if idle >= CONTROL_IDLE => {
+                Some(self.dimmer(slot, light))
+            }
             Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
             Mode::Menu { view, .. } if idle >= CONTROL_IDLE => Some(*view),
             _ => None,
@@ -808,6 +875,50 @@ mod tests {
         rig.turn(CARD_STEP);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::On("switch.fan".into())], "switched where it is");
         assert_eq!(rig.machine.mode, Mode::Chooser(2));
+    }
+
+    #[test]
+    fn a_light_s_warmth_and_colour_have_dials_of_their_own() {
+        let mut rig = Rig::with(Cards::parse(br#"{"cards":[
+            {"kind":"lights","name":"Lamp","icon":"","lights":[
+                {"id":"light.lamp","name":"Lamp","on":true,"dimmable":true,"brightness":60,
+                 "kelvin":2700,"kelvins":[2200,6500],"hues":true,"hue":350}]},
+            {"kind":"lights","name":"Strip","icon":"","lights":[
+                {"id":"light.strip","name":"Strip","on":true,"dimmable":true,"brightness":60}]}]}"#).unwrap());
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.press();
+        let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!() };
+        assert_eq!(actions, vec![Action::Back, Action::Switch(false), Action::Warmth, Action::Colour]);
+        rig.turn(ROW_STEP * 2);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::LightWarmth { slot: 0, light: 0, value: 2700 });
+        for _ in 0..3 {
+            rig.turn(VALUE_STEP);
+        }
+        assert_eq!(Rig::sends(&rig.wait(SEND_EVERY)), vec![Command::Kelvin("light.lamp".into(), 2850)]);
+        rig.turn(-VALUE_STEP * 40);
+        assert_eq!(rig.machine.mode, Mode::LightWarmth { slot: 0, light: 0, value: 2200 }, "no warmer than it goes");
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 60 }, "done: its dimmer");
+        rig.press();
+        rig.turn(ROW_STEP * 3);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::LightHue { slot: 0, light: 0, value: 350 });
+        rig.turn(VALUE_STEP * 4);
+        assert_eq!(rig.machine.mode, Mode::LightHue { slot: 0, light: 0, value: 6 }, "round the wheel");
+        rig.wait(CONTROL_IDLE);
+        assert!(matches!(rig.machine.mode, Mode::LightDim { .. }), "left: its dimmer");
+        rig.press();
+        rig.press();
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.press();
+        let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!() };
+        assert_eq!(actions, vec![Action::Back, Action::Switch(false)], "a light with neither: neither");
     }
 
     #[test]
