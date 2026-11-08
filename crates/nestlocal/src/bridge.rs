@@ -175,6 +175,11 @@ impl Bridge {
                 crate::update::commit();
                 let _ = crate::wake::stay_awake(0);
                 logf!("update: {version} is running and nlclient talks to it; committed");
+                match crate::update::install_init(std::path::Path::new(crate::update::INIT_SCRIPT)) {
+                    Ok(true) => logf!("update: installed this build's {}", crate::update::INIT_SCRIPT),
+                    Ok(false) => {}
+                    Err(e) => logf!("update: {e}"),
+                }
                 self.publish_update();
                 return;
             }

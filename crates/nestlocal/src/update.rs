@@ -9,6 +9,10 @@
 //! until the new build clears it once nlclient is talking to it, and after
 //! three puts nestlocal.prev back, recording the version in FAILED.
 //!
+//! An install replaces only the binary, so once committed the new build
+//! puts its own nestlocal.init (INIT) in place too: what decides the next
+//! rollback must come with the build that is now known to start.
+//!
 //! The latest release is asked for when the broker connects, when Home
 //! Assistant presses the entity's check button, and once a day. A day is
 //! counted by the wall clock: tokio's timers stop while the unit sleeps.
@@ -41,6 +45,9 @@ pub const PENDING: &str = "/etc/nestlocal/update.pending";
 /// The version nestlocal.init rolled back from.
 pub const FAILED: &str = "/etc/nestlocal/update.failed";
 pub const DAEMON: &str = "/nestlabs/sbin/nestlocal";
+/// The init script, and this build's own (what the app installs).
+pub const INIT_SCRIPT: &str = "/etc/init.d/nestlocal";
+const INIT: &str = include_str!("../rootfs/nestlocal.init");
 /// Room left beside the new binary on its filesystem.
 const SPARE: u64 = 1 << 20;
 
@@ -247,6 +254,23 @@ pub fn pending() -> Option<String> {
 pub fn commit() {
     let _ = std::fs::remove_file(PENDING);
     sync();
+}
+
+/// Puts this build's nestlocal.init at `path` if it differs; whether it did.
+pub fn install_init(path: &Path) -> Result<bool, String> {
+    if std::fs::read(path).ok().as_deref() == Some(INIT.as_bytes()) {
+        return Ok(false);
+    }
+    let mut new = path.as_os_str().to_owned();
+    new.push(".new");
+    let new = PathBuf::from(new);
+    let err = |what: &str, e: std::io::Error| format!("{what} {}: {e}", new.display());
+    std::fs::write(&new, INIT).map_err(|e| err("write", e))?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(|e| err("chmod", e))?;
+    std::fs::rename(&new, path).map_err(|e| err("install", e))?;
+    sync();
+    Ok(true)
 }
 
 /// The version nestlocal.init last rolled back from.
@@ -544,6 +568,22 @@ mod tests {
         assert_eq!(s["in_progress"], false);
         assert!(s["title"].as_str().unwrap().contains("v9.9.9-ben.1 did not start"));
         assert!(state(None, &Progress::Failed("no room".into()), None)["title"].as_str().unwrap().contains("no room"));
+    }
+
+    #[test]
+    fn a_committed_build_puts_its_init_script_in_place_once() {
+        let dir = std::env::temp_dir().join(format!("nestlocal-init-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nestlocal");
+        std::fs::write(&path, "#!/bin/sh\n# older\n").unwrap();
+        assert!(install_init(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), INIT);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(!install_init(&path).unwrap());
+        assert!(!dir.join("nestlocal.new").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
