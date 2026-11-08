@@ -68,7 +68,7 @@ live (`kill(pid, 0)` on every frame), so the display returns to nlclient the
 moment the owner exits or dies; a stale file does nothing.
 
 nestlocal's home screen cards (`crates/nestlocal/src/ui/`) use this. With
-cards from Home Assistant (the Fledge integration, `custom_components/fledge`),
+cards from Home Assistant (the Fledge integration, sysmoon14/fledge-homeassistant),
 waking the unit shows the device chooser: the thermostat among the cards,
 zoomed out (or the device Fledge was told to wake to). Turning browses,
 pressing opens; the thermostat hands the ring back to nlclient, and choosing

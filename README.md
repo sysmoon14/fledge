@@ -8,6 +8,10 @@ thermostat's own screen, signed updates from Home Assistant, and more. The app,
 its executable and the paths on the thermostat keep unfr0zen's names for now, so
 units and backups made with either keep working.
 
+Home screen cards (Home Assistant's lights, thermostats and speakers on the
+thermostat's screen) come with the Fledge integration, released apart from this
+repository: [sysmoon14/fledge-homeassistant](https://github.com/sysmoon14/fledge-homeassistant).
+
 Root and free the Nest Learning Thermostat (1st, 2nd and 3rd generation) over USB.
 Local control over MQTT, Matter (Wi-Fi, Thread) or Zigbee, no Google cloud needed.
 

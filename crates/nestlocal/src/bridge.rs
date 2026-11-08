@@ -15,6 +15,8 @@
 //!   <prefix>/<serial>/near             ON at each proximity event
 //!   <prefix>/<serial>/update           this build and the latest release, with
 //!                                      -update-repo (update.rs; retained)
+//!   <prefix>/<serial>/ui/protocol      what of the home screen cards this build
+//!                                      understands (ui::PROTOCOL; retained)
 //!   <prefix>/<serial>/set/<command>    Home Assistant's commands
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
@@ -319,6 +321,9 @@ impl Bridge {
             c.subscribe("homeassistant/status");
         }
         self.publish_availability(self.live.as_ref().is_some_and(|l| l.alive()));
+        if let Some(c) = self.mqtt.get() {
+            c.publish(&format!("{}/ui/protocol", self.base), crate::ui::PROTOCOL.to_string().as_bytes(), 1, true);
+        }
         self.ask_time();
         self.publish_update();
         if let Some(updates) = self.updates.get().filter(|u| crate::update::due(*u.checked.lock().unwrap(), SystemTime::now())) {

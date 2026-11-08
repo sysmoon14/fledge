@@ -33,6 +33,11 @@ use screens::Screen;
 
 use crate::logf;
 
+/// What of the cards this build understands, for the Fledge integration to
+/// check (<base>/ui/protocol). Raise it with each addition Fledge relies on:
+///   1  device cards (one light each), wake, album art (<base>/set/art/...)
+pub const PROTOCOL: u32 = 1;
+
 #[derive(Default)]
 pub struct Ui {
     /// Home Assistant's cards and a count of their changes.
