@@ -16,6 +16,30 @@ pub struct Cards {
     /// or a card's place in `cards`, opened.
     #[serde(default)]
     wake: Option<serde_json::Value>,
+    /// Shown as the display lights by itself (someone near), if Home
+    /// Assistant asks for it: the time, the weather, what's on.
+    #[serde(default)]
+    pub glance: Option<Glance>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Glance {
+    /// Home Assistant's time zone, seconds east of UTC.
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default)]
+    pub weather: Option<Weather>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Weather {
+    /// cloudy, sunny, rainy, ... (Home Assistant's conditions).
+    #[serde(default)]
+    pub condition: String,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub unit: String,
 }
 
 /// What waking shows.

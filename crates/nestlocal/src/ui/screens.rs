@@ -3,7 +3,7 @@
 
 
 use super::icons;
-use super::model::{ActionCard, Alert, CameraCard, ClimateCard, CoverCard, Light, LightsCard, MediaCard, OptionsCard};
+use super::model::{ActionCard, Alert, CameraCard, Card, ClimateCard, CoverCard, Glance, Light, LightsCard, MediaCard, OptionsCard};
 use super::paint::{self, *};
 
 pub enum Screen<'a> {
@@ -27,6 +27,8 @@ pub enum Screen<'a> {
     /// A cover's card, and its position on the ring.
     CoverCard { card: &'a CoverCard },
     CoverSet { card: &'a CoverCard, value: u8 },
+    /// The time (`now`, Unix seconds), the weather and what's on.
+    Glance { glance: &'a Glance, cards: &'a [Card], now: i64 },
     /// The lights card pressed: its lights and Back, `selected` highlighted.
     LightList { card: &'a LightsCard, selected: usize },
     LightDim { light: &'a Light, on: bool, value: u8 },
@@ -60,6 +62,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::OptionList { card, selected } => option_list(fonts, card, *selected),
         Screen::Members { card, selected } => lights_listed(fonts, &card.name, &card.members, *selected),
         Screen::CoverCard { card } => cover_card(fonts, card),
+        Screen::Glance { glance, cards, now } => glance_screen(fonts, glance, cards, *now),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         _ => {
             let mut p = still(fonts, screen);
@@ -627,6 +630,97 @@ pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], 
     }
 }
 
+/// The glance: the time large, the date, the weather and what's on.
+fn glance_screen(fonts: &Fonts, glance: &Glance, cards: &[Card], now: i64) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    let local = now + glance.offset;
+    let (minutes, days) = (local.rem_euclid(86_400) / 60, local.div_euclid(86_400));
+    let time = format!("{:02}:{:02}", minutes / 60, minutes % 60);
+    paint::text(&mut p, &fonts.regular, 120.0, HALF, 232.0, &time, -2.0, WHITE);
+    line(&mut p, fonts, 276.0, &date(days), GREY);
+    if let Some(weather) = &glance.weather {
+        let temperature = weather.temperature.map(|t| format!("{t:.0}{}", if weather.unit.contains('F') { "°F" } else { "°" }));
+        let text = [temperature.unwrap_or_default(), condition_name(&weather.condition)]
+            .into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        let name = format!("mdi:{}", weather_icon(&weather.condition));
+        let width = paint::measure(&fonts.regular, 26.0, &text, 0.0);
+        let left = HALF - (width + 44.0) / 2.0;
+        icon(&mut p, &name, "weather", left + 16.0, 323.0, 34.0, WHITE);
+        paint::text_at(&mut p, &fonts.regular, 26.0, left + 44.0, 332.0, &text, 0.0, WHITE, 1.0);
+    }
+    line(&mut p, fonts, 380.0, &whats_on(cards), ACTION);
+    p
+}
+
+/// "Sunday 8 November" from days since 1970.
+fn date(days: i64) -> String {
+    const DAYS: [&str; 7] = ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"];
+    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                                "October", "November", "December"];
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{} {} {}", DAYS[days.rem_euclid(7) as usize], day, MONTHS[(month - 1) as usize])
+}
+
+/// An MDI weather icon for Home Assistant's condition.
+fn weather_icon(condition: &str) -> &'static str {
+    match condition {
+        "sunny" => "weather-sunny",
+        "clear-night" => "weather-night",
+        "partlycloudy" => "weather-partly-cloudy",
+        "rainy" => "weather-rainy",
+        "pouring" => "weather-pouring",
+        "snowy" | "snowy-rainy" => "weather-snowy",
+        "fog" => "weather-fog",
+        "windy" | "windy-variant" => "weather-windy",
+        "lightning" | "lightning-rainy" => "weather-lightning",
+        "hail" => "weather-hail",
+        _ => "weather-cloudy",
+    }
+}
+
+/// Home Assistant's weather condition in words.
+fn condition_name(condition: &str) -> String {
+    match condition {
+        "partlycloudy" => "Partly cloudy".to_owned(),
+        "clear-night" => "Clear".to_owned(),
+        "snowy-rainy" => "Sleet".to_owned(),
+        "lightning-rainy" => "Thunderstorms".to_owned(),
+        "windy-variant" => "Windy".to_owned(),
+        "exceptional" => String::new(),
+        other => capitalise(&other.replace('-', " ")),
+    }
+}
+
+/// What's on among the cards: lights, music.
+fn whats_on(cards: &[Card]) -> String {
+    let lights: usize = cards.iter().map(|c| match c {
+        Card::Lights(card) => card.lights.iter().filter(|l| l.on).count(),
+        _ => 0,
+    }).sum();
+    let playing = cards.iter().find_map(|c| match c {
+        Card::Media(m) if m.state == "playing" => Some(if m.title.is_empty() { m.name.clone() } else { m.title.clone() }),
+        _ => None,
+    });
+    let mut parts = Vec::new();
+    match lights {
+        0 => {}
+        1 => parts.push("1 light on".to_owned()),
+        n => parts.push(format!("{n} lights on")),
+    }
+    if let Some(title) = playing {
+        parts.push(format!("playing {title}"));
+    }
+    if parts.is_empty() { "All quiet".to_owned() } else { parts.join(" · ") }
+}
+
 /// A thermostat preset's icon in its menu.
 pub fn preset_icon(preset: &str) -> &'static str {
     match preset {
@@ -732,6 +826,13 @@ pub fn capitalise(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_glance_s_date_is_the_calendar_s() {
+        assert_eq!(date(0), "Thursday 1 January");
+        assert_eq!(date(20_765), "Sunday 8 November");
+        assert_eq!(date(19_782), "Thursday 29 February", "a leap day");
+    }
+
     use super::*;
 
     #[test]

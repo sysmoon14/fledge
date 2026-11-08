@@ -30,6 +30,8 @@ const TURN_KEPT: Duration = Duration::from_millis(1500);
 /// stays with nothing pressed.
 pub const CAMERA_EVERY: Duration = Duration::from_secs(3);
 pub const CAMERA_IDLE: Duration = Duration::from_secs(60);
+/// How long the glance shows with nothing touched.
+pub const GLANCE_IDLE: Duration = Duration::from_secs(20);
 /// How long a scene's card says it ran.
 pub const RAN_SHOWN: Duration = Duration::from_secs(2);
 /// A step of a light's warmth dial, in kelvin, and of its colour's, in degrees.
@@ -111,6 +113,9 @@ pub enum Mode {
     Members { slot: usize, selected: usize },
     /// A cover, the ring setting how open (percent).
     CoverSet { slot: usize, value: u8 },
+    /// The time, the weather and what's on, as someone comes near; a touch
+    /// shows what waking does.
+    Glance,
     /// A notification over `back`, which shows again once it goes.
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -350,6 +355,11 @@ impl Machine {
                 return;
             }
             (Mode::Alert { .. }, _) => return,
+            // A touch on the glance: what waking shows.
+            (Mode::Glance, Input::Turn(_) | Input::Press | Input::LongPress) => {
+                self.wake(out);
+                return;
+            }
             // The thermostat opened: nlclient has the ring; its menu's Back,
             // or a long press, brings the cards back.
             (Mode::Native, Input::LongPress) => {
@@ -586,7 +596,7 @@ impl Machine {
                 let selected = (selected as i32 + steps).clamp(0, actions.len() as i32 - 1) as usize;
                 self.mode = Mode::Menu { view, actions, selected };
             }
-            Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } => {}
+            Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance => {}
         }
         self.dirty = true;
     }
@@ -732,7 +742,7 @@ impl Machine {
                 self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Open, Action::Close], selected: 0 };
             }
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
-            Mode::Idle | Mode::Native | Mode::Alert { .. } => {}
+            Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Glance => {}
         }
         self.dirty = true;
     }
@@ -907,9 +917,14 @@ impl Machine {
         }
         let idle = now.duration_since(self.last_input);
         if self.was_lit.replace(lit) == Some(false) && lit && self.mode == Mode::Home {
-            // Lit by itself, as someone came near: wake as a turn would.
+            // Lit by itself, as someone came near: the glance, if Home
+            // Assistant asks for one; else wake as a turn would.
             self.last_input = now;
-            self.wake(out);
+            if self.cards.glance.is_some() {
+                self.go(Mode::Glance, out);
+            } else {
+                self.wake(out);
+            }
             return;
         }
         // Dark, unless the display was just woken and is still lighting.
@@ -957,6 +972,7 @@ impl Machine {
             }
             Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
             Mode::Camera { slot } if idle >= CAMERA_IDLE => Some(Mode::Chooser(slot + 1)),
+            Mode::Glance if idle >= GLANCE_IDLE => Some(Mode::Home),
             Mode::OptionList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(slot + 1)),
             Mode::Members { slot, .. } if idle >= LIST_IDLE => Some(self.dimmer(slot, 0)),
             Mode::CoverSet { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
@@ -1354,6 +1370,25 @@ mod tests {
         rig.turn(ROW_STEP);
         rig.press();
         assert!(matches!(rig.machine.mode, Mode::LightDim { .. }), "Back: the group's dimmer");
+    }
+
+    #[test]
+    fn coming_near_shows_the_glance_if_asked_for_and_a_touch_wakes() {
+        let mut rig = Rig::with(Cards::parse(br#"{"cards":[{"kind":"climate","id":"climate.k","name":"K"}],
+            "glance":{"offset":0}}"#).unwrap());
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        rig.lit = true;
+        rig.tick();
+        assert_eq!(rig.machine.mode, Mode::Glance, "lit by itself: the glance");
+        rig.turn(CARD_STEP);
+        assert_eq!(rig.machine.mode, Mode::Chooser(0), "a touch: what waking shows, the turn taken by it");
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        rig.lit = true;
+        rig.tick();
+        rig.wait(GLANCE_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Home, "untouched, it goes");
     }
 
     #[test]

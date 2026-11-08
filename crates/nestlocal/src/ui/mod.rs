@@ -190,6 +190,8 @@ struct Runtime {
     /// The notifications taken, and the scene last shown as run.
     alerts: u64,
     ran: Option<(usize, Instant)>,
+    /// The minute the glance's clock last showed.
+    glance_minute: i64,
     /// How big the cards show (1 full size, zoom::ZOOMED while moving).
     zoom: f32,
     /// A frame to compose zoomed cards in.
@@ -239,7 +241,7 @@ impl Runtime {
             generation: u64::MAX, saved: None, home: None, transition: Transition::Cut, view: None,
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             progress: Default::default(), progress_checked: Instant::now(), wakes: 0, kept_on: Instant::now(),
-            alerts: 0, ran: None,
+            alerts: 0, ran: None, glance_minute: 0,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, settings: None, settings_checked: now, dial: None, last_dial: now - Duration::from_secs(60),
@@ -392,6 +394,11 @@ impl Runtime {
             self.last_frame = now;
             let swept = self.sweep(elapsed);
             let mut dirty = self.machine.take_dirty();
+            if self.machine.mode == Mode::Glance && unix_now() as i64 / 60 != self.glance_minute {
+                // The glance's clock, as the minute turns.
+                self.glance_minute = unix_now() as i64 / 60;
+                dirty = true;
+            }
             if now.duration_since(self.progress_checked) >= Duration::from_millis(500) {
                 self.progress_checked = now;
                 dirty |= self.progress_moved();
@@ -909,6 +916,8 @@ impl Runtime {
                 _ => return None,
             },
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
+            Mode::Glance => Screen::Glance { glance: machine.cards.glance.as_ref()?, cards: &machine.cards.cards,
+                                             now: unix_now() as i64 },
             _ => return None,
         })
     }
@@ -1293,6 +1302,10 @@ mod shots {
         let group = model::LightsCard { name: "Bedroom Lights".into(), icon: String::new(), lights: vec![lights.lights[2].clone()],
             members: lights.lights.clone() };
         save(&screens::draw(&fonts, &Screen::Members { card: &group, selected: 1 }, None), &format!("{out}/b5-members.png"));
+        let glance = model::Glance { offset: 0, weather: Some(model::Weather { condition: "partlycloudy".into(),
+            temperature: Some(8.4), unit: "°C".into() }) };
+        save(&screens::draw(&fonts, &Screen::Glance { glance: &glance, cards: &cards.cards, now: 1_794_172_380 }, None),
+             &format!("{out}/b6-glance.png"));
         let mut tunable = lights.lights[0].clone();
         (tunable.kelvin, tunable.kelvins, tunable.hues, tunable.hue) = (Some(2700), Some([2200, 6500]), true, Some(200));
         save(&screens::draw(&fonts, &Screen::LightWarmth { light: &tunable, value: 2700 }, None), &format!("{out}/9b-warmth.png"));
