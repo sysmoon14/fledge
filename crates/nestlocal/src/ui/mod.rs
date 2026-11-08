@@ -97,8 +97,10 @@ struct Runtime {
     beeper: device::Beeper,
     machine: Machine,
     generation: u64,
-    /// nlclient's frame from before the UI owned the display.
+    /// nlclient's frame from before the UI owned the display, and it round
+    /// (zoom::round) as a card among the others.
     saved: Option<device::Frame>,
+    home: Option<device::Frame>,
     /// How the display moves to what the mode shows next.
     transition: Transition,
     /// Where the cards show, on the way to machine.position(): a place in
@@ -142,7 +144,7 @@ impl Runtime {
         let now = Instant::now();
         Runtime {
             ui, sender, fonts, display, input, beeper: device::Beeper::open(), machine: Machine::new(now),
-            generation: u64::MAX, saved: None, transition: Transition::Cut, view: None,
+            generation: u64::MAX, saved: None, home: None, transition: Transition::Cut, view: None,
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
@@ -342,9 +344,9 @@ impl Runtime {
         }
         self.prepare(right);
         let count = self.machine.deck().len() as i64;
-        let (cards, saved) = (&self.cards, &self.saved);
+        let (cards, home) = (&self.cards, &self.home);
         let get = |at: i64| match at.rem_euclid(count) as usize {
-            0 => saved.as_deref(),
+            0 => home.as_deref(),
             index => cards.get(&index).map(Vec::as_slice),
         };
         if let (Some(from), Some(to)) = (get(left), get(right)) {
@@ -361,19 +363,19 @@ impl Runtime {
             self.prepare(k);
             let index = k.rem_euclid(count) as usize;
             if shrunk && !self.shrunk.contains_key(&index) {
-                let full = if index == 0 { self.saved.clone() } else { self.cards.get(&index).cloned() };
+                let full = if index == 0 { self.home.clone() } else { self.cards.get(&index).cloned() };
                 if let Some(full) = full {
                     self.shrunk.insert(index, zoom::shrink(&full));
                 }
             }
         }
-        let (cards, shrunk_cards, saved) = (&self.cards, &self.shrunk, &self.saved);
+        let (cards, shrunk_cards, home) = (&self.cards, &self.shrunk, &self.home);
         let get = |k: i64| -> Option<&[u8]> {
             let index = k.rem_euclid(count) as usize;
             if shrunk {
                 shrunk_cards.get(&index).map(Vec::as_slice)
             } else if index == 0 {
-                saved.as_deref()
+                home.as_deref()
             } else {
                 cards.get(&index).map(Vec::as_slice)
             }
@@ -400,7 +402,8 @@ impl Runtime {
             },
             _ => Screen::SettingsCard,
         };
-        let frame = device::frame(screens::draw(&self.fonts, &screen, position, None));
+        let mut frame = device::frame(screens::draw(&self.fonts, &screen, position, None));
+        zoom::round(&mut frame);
         self.cards.insert(index, frame);
     }
 
@@ -408,7 +411,7 @@ impl Runtime {
     fn card_frame(&mut self, at: i64) -> device::Frame {
         self.prepare(at);
         let index = at.rem_euclid(self.machine.deck().len() as i64) as usize;
-        let frame = if index == 0 { self.saved.clone() } else { self.cards.get(&index).cloned() };
+        let frame = if index == 0 { self.home.clone() } else { self.cards.get(&index).cloned() };
         frame.unwrap_or_else(|| vec![0; (paint::SIZE * paint::SIZE * 4) as usize])
     }
 
@@ -459,9 +462,13 @@ impl Runtime {
                 self.saved = Some(self.display.save());
                 device::own(true);
                 self.display.begin();
-                // The thermostat zoomed out too, before the first frame needs it.
+                // The thermostat as a card, and zoomed out, before the first
+                // frame needs it.
                 if let Some(saved) = &self.saved {
-                    self.shrunk.insert(0, zoom::shrink(saved));
+                    let mut home = saved.clone();
+                    zoom::round(&mut home);
+                    self.shrunk.insert(0, zoom::shrink(&home));
+                    self.home = Some(home);
                 }
             }
             Effect::Own(false) => {
@@ -481,6 +488,7 @@ impl Runtime {
                     self.display.end(&saved);
                 }
                 self.saved = None;
+                self.home = None;
                 self.view = None;
                 device::own(false);
             }

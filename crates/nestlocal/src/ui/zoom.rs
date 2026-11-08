@@ -20,6 +20,25 @@ pub fn spacing(z: f32) -> f32 {
     SIDE as f32 - (1.0 - z) * 400.0
 }
 
+/// Black outside the display's circle, the edge softened over a pixel: a
+/// card as the round display shows it, so a coloured one (a thermostat
+/// heating) shows no square corners when zoomed out beside the others.
+pub fn round(frame: &mut [u8]) {
+    let pixels = frame.as_chunks_mut::<4>().0;
+    for r in 0..SIDE {
+        let dy = r as f32 + 0.5 - CENTRE;
+        for c in 0..SIDE {
+            let dx = c as f32 + 0.5 - CENTRE;
+            let cover = (CENTRE + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            if cover < 1.0 {
+                for channel in &mut pixels[r * SIDE + c][..3] {
+                    *channel = (*channel as f32 * cover) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// `frame` at ZOOMED, centred, black around it: drawn once per card, with
 /// each pixel the average of the four it falls between, so a card moved
 /// whole pixels at a time doesn't shimmer. In whole numbers, with each
@@ -115,6 +134,17 @@ mod tests {
             *b = if i % 4 == 3 { 0xff } else { shade };
         }
         frame
+    }
+
+    #[test]
+    fn a_card_is_round() {
+        let mut a = card(200);
+        round(&mut a);
+        assert_eq!(a[240 * ROW + 240 * 4], 200, "the middle as it was");
+        assert_eq!(a[240 * ROW + 2 * 4], 200, "the edge at the middle row");
+        assert_eq!(a[5 * ROW + 5 * 4], 0, "a corner black");
+        let edge = a[240 * ROW];
+        assert!(edge < 200, "the very edge softened: {edge}");
     }
 
     #[test]
