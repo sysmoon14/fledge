@@ -320,18 +320,13 @@ fn action_card(fonts: &Fonts, card: &ActionCard, done: bool) -> Canvas {
     p
 }
 
-/// A camera's latest still, the whole display, its name over it; before
-/// the first, its icon.
+/// A camera's latest still, the whole display; before the first, its icon
+/// and name.
 fn camera_card(fonts: &Fonts, card: &CameraCard) -> Canvas {
     let mut p = paint::canvas(BLACK);
     match &card.art {
-        Some(art) => {
-            paint::picture(&mut p, &art.rgb, art.size, HALF, HALF, 0.0);
-            let name = paint::fit(&fonts.medium, 24.0, &card.name, 0.0, 280.0);
-            let width = paint::measure(&fonts.medium, 24.0, &name, 0.0) + 36.0;
-            paint::pill(&mut p, HALF - width / 2.0, 386.0, width, 40.0, alpha(BLACK, 0.6));
-            paint::text(&mut p, &fonts.medium, 24.0, HALF, 414.0, &name, 0.0, WHITE);
-        }
+        // Its name shows above the cards: the picture alone.
+        Some(art) => paint::picture(&mut p, &art.rgb, art.size, HALF, HALF, 0.0),
         None => {
             paint::ring(&mut p, |_| colour(DIM), &[]);
             let icon_name = if card.icon.is_empty() { "mdi:cctv" } else { &card.icon };
