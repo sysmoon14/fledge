@@ -1,7 +1,6 @@
 //! The UI's screens, each drawn whole as the Nest draws its own: black, a
 //! ring of ticks, large numbers, and colour only for what is active.
 
-use tiny_skia::Pixmap;
 
 use super::icons;
 use super::model::{ClimateCard, Light, LightsCard, MediaCard};
@@ -28,32 +27,34 @@ pub struct Position {
 
 const HALF: f32 = 240.0;
 
-pub fn draw(fonts: &Fonts, screen: &Screen, at: Position) -> Pixmap {
+/// Draws `screen`; `sweep`, where it has a value on its ring, is how far the
+/// ring shows (0..1): the value itself, or on its way there.
+pub fn draw(fonts: &Fonts, screen: &Screen, at: Position, sweep: Option<f32>) -> Canvas {
     match screen {
         Screen::LightsCard { card } => lights_card(fonts, card, at),
-        Screen::ClimateCard { card, target } => climate(fonts, card, target.or(card.target), Some(at), false),
+        Screen::ClimateCard { card, target } => climate(fonts, card, target.or(card.target), Some(at), false, None),
         Screen::MediaCard { card, volume } => media_card(fonts, card, volume.or(card.volume), at),
         Screen::SettingsCard => settings_card(fonts, at),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
-        Screen::LightDim { light, on, value } => light_dim(fonts, light, *on, *value),
-        Screen::ClimateSet { card, target } => climate(fonts, card, Some(*target), None, true),
-        Screen::Volume { card, value } => volume(fonts, card, *value),
+        Screen::LightDim { light, on, value } => light_dim(fonts, light, *on, *value, sweep),
+        Screen::ClimateSet { card, target } => climate(fonts, card, Some(*target), None, true, sweep),
+        Screen::Volume { card, value } => volume(fonts, card, *value, sweep),
     }
 }
 
-fn label(pixmap: &mut Pixmap, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
+fn label(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
     let text = paint::fit(&fonts.medium, 22.0, &text.to_uppercase(), 1.5, 300.0);
     paint::text(pixmap, &fonts.medium, 22.0, HALF, y, &text, 1.5, c);
 }
 
-fn line(pixmap: &mut Pixmap, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
+fn line(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
     let text = paint::fit(&fonts.regular, 20.0, text, 0.0, 320.0);
     paint::text(pixmap, &fonts.regular, 20.0, HALF, y, &text, 0.0, c);
 }
 
 /// A large number as the Nest's dial shows a temperature: 21, or 21 with a
 /// small raised 5 for the half.
-fn big_number(pixmap: &mut Pixmap, fonts: &Fonts, value: f64, half: bool, unit: &str, c: [u8; 3]) {
+fn big_number(pixmap: &mut Canvas, fonts: &Fonts, value: f64, half: bool, unit: &str, c: [u8; 3]) {
     let size = 168.0;
     let whole = if half { value.floor() as i64 } else { value.round() as i64 };
     let digits = whole.to_string();
@@ -68,7 +69,7 @@ fn big_number(pixmap: &mut Pixmap, fonts: &Fonts, value: f64, half: bool, unit: 
     }
 }
 
-fn icon(pixmap: &mut Pixmap, name: &str, entity: &str, cx: f32, cy: f32, size: f32, c: [u8; 3]) {
+fn icon(pixmap: &mut Canvas, name: &str, entity: &str, cx: f32, cy: f32, size: f32, c: [u8; 3]) {
     if let Some(found) = icons::lookup(name, entity) {
         paint::icon(pixmap, found, cx, cy, size, colour(c));
     }
@@ -89,7 +90,7 @@ pub fn room(lights: &[Light]) -> Option<(u8, [u8; 3])> {
     Some((average, [mix(0), mix(1), mix(2)]))
 }
 
-fn lights_card(fonts: &Fonts, card: &LightsCard, at: Position) -> Pixmap {
+fn lights_card(fonts: &Fonts, card: &LightsCard, at: Position) -> Canvas {
     let mut p = paint::canvas(BLACK);
     let lights = &card.lights;
     let room = room(lights);
@@ -117,7 +118,8 @@ fn lights_card(fonts: &Fonts, card: &LightsCard, at: Position) -> Pixmap {
     p
 }
 
-fn climate(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Option<Position>, setting: bool) -> Pixmap {
+fn climate(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Option<Position>, setting: bool,
+           sweep: Option<f32>) -> Canvas {
     let (background, active) = match card.action.as_str() {
         "heating" | "preheating" => (HEAT, true),
         "cooling" => (COOL, true),
@@ -125,7 +127,7 @@ fn climate(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Option<Po
     };
     let mut p = paint::canvas(background);
     let fraction = |t: f64| ((t - card.min) / (card.max - card.min).max(0.5)) as f32;
-    let marks: Vec<usize> = target.map(|t| vec![paint::tick_at(fraction(t))]).unwrap_or_default();
+    let marks: Vec<usize> = target.map(|t| vec![paint::tick_at(sweep.unwrap_or(fraction(t)))]).unwrap_or_default();
     let now = card.current.map(|t| paint::tick_at(fraction(t)));
     paint::ring(&mut p, |i| {
         if Some(i) == now { alpha(WHITE, 0.9) } else if active { alpha(WHITE, 0.4) } else { colour(DIM) }
@@ -153,7 +155,7 @@ fn climate(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Option<Po
     p
 }
 
-fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, at: Position) -> Pixmap {
+fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, at: Position) -> Canvas {
     let mut p = paint::canvas(BLACK);
     let playing = card.state == "playing";
     let lit = volume.map(|v| paint::tick_at(v as f32 / 100.0));
@@ -174,7 +176,7 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, at: Position)
     p
 }
 
-fn settings_card(fonts: &Fonts, at: Position) -> Pixmap {
+fn settings_card(fonts: &Fonts, at: Position) -> Canvas {
     let mut p = paint::canvas(BLACK);
     paint::ring(&mut p, |_| colour(DIM), &[]);
     icon(&mut p, "mdi:cog", "settings", HALF, 168.0, 96.0, WHITE);
@@ -186,7 +188,7 @@ fn settings_card(fonts: &Fonts, at: Position) -> Pixmap {
 
 const ROWS: usize = 5;
 
-fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Pixmap {
+fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Canvas {
     let mut p = paint::canvas(BLACK);
     let accent = card.lights.iter().find(|l| l.on).map_or(GREY, |l| l.colour());
     label(&mut p, fonts, 100.0, &card.name, accent);
@@ -222,10 +224,10 @@ fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Pixmap {
     p
 }
 
-fn light_dim(fonts: &Fonts, light: &Light, on: bool, value: u8) -> Pixmap {
+fn light_dim(fonts: &Fonts, light: &Light, on: bool, value: u8, sweep: Option<f32>) -> Canvas {
     let mut p = paint::canvas(BLACK);
     let accent = if on { light.colour() } else { GREY };
-    let top = paint::tick_at(value as f32 / 100.0);
+    let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
     paint::ring(&mut p, |i| if on && i <= top { colour(accent) } else { colour(DIM) }, &if on { vec![top] } else { vec![] });
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, accent);
     label(&mut p, fonts, 150.0, &light.name, accent);
@@ -238,9 +240,9 @@ fn light_dim(fonts: &Fonts, light: &Light, on: bool, value: u8) -> Pixmap {
     p
 }
 
-fn volume(fonts: &Fonts, card: &MediaCard, value: u8) -> Pixmap {
+fn volume(fonts: &Fonts, card: &MediaCard, value: u8, sweep: Option<f32>) -> Canvas {
     let mut p = paint::canvas(BLACK);
-    let top = paint::tick_at(value as f32 / 100.0);
+    let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
     paint::ring(&mut p, |i| if i <= top { colour(MEDIA) } else { colour(DIM) }, &[top]);
     label(&mut p, fonts, 150.0, &card.name, MEDIA);
     big_number(&mut p, fonts, value as f64, false, "", WHITE);

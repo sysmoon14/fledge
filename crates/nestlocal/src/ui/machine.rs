@@ -10,7 +10,9 @@ use crate::logf;
 /// REL_DIAL reports the ADC's raw counts; a step is a deliberate movement.
 pub const CARD_STEP: i32 = 500;
 pub const ROW_STEP: i32 = 250;
-pub const VALUE_STEP: i32 = 60;
+/// A percent of brightness or volume; a thermostat's step (half a degree).
+pub const VALUE_STEP: i32 = 30;
+pub const CLIMATE_STEP: i32 = 90;
 /// A pause this long ends a movement (for the log); this long, its counts
 /// towards the next step.
 const GESTURE: Duration = Duration::from_millis(400);
@@ -212,6 +214,7 @@ impl Machine {
                 let step = match self.mode {
                     Mode::Home | Mode::Card(_) => CARD_STEP,
                     Mode::LightList { .. } => ROW_STEP,
+                    Mode::ClimateSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
                 let steps = self.turn / step;
@@ -241,7 +244,7 @@ impl Machine {
             }
             Mode::LightDim { slot, light, on, value } => {
                 let start = if on { value as i32 } else { 0 };
-                let value = (start + steps * 2).clamp(1, 100) as u8;
+                let value = (start + steps).clamp(1, 100) as u8;
                 if let Some(Card::Lights(card)) = self.card(slot) {
                     self.pending = Some(Command::Brightness(card.lights[light].id.clone(), value));
                 }
@@ -256,7 +259,7 @@ impl Machine {
             }
             Mode::Volume { slot, value } => {
                 if let Some(Card::Media(card)) = self.card(slot) {
-                    let value = (value as i32 + steps * 2).clamp(0, 100) as u8;
+                    let value = (value as i32 + steps).clamp(0, 100) as u8;
                     self.pending = Some(Command::Volume(card.id.clone(), value));
                     self.mode = Mode::Volume { slot, value };
                 }
@@ -602,9 +605,9 @@ mod tests {
         for _ in 0..5 {
             rig.turn(VALUE_STEP);
         }
-        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 70 });
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 65 });
         let sent = Rig::sends(&rig.wait(SEND_EVERY));
-        assert_eq!(sent, vec![Command::Brightness("light.lamp".into(), 70)], "a turn's commands are thinned");
+        assert_eq!(sent, vec![Command::Brightness("light.lamp".into(), 65)], "a turn's commands are thinned");
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Off("light.lamp".into())]);
         rig.wait(CONTROL_IDLE);
         assert_eq!(rig.machine.mode, Mode::LightList { slot: 0, selected: 0 });
@@ -620,7 +623,7 @@ mod tests {
         rig.press();
         rig.press();
         rig.turn(VALUE_STEP);
-        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 2 });
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 1 });
     }
 
     #[test]
@@ -628,7 +631,7 @@ mod tests {
         let mut rig = Rig::new();
         rig.turn(CARD_STEP * 2);
         rig.press();
-        rig.turn(VALUE_STEP * 3);
+        rig.turn(CLIMATE_STEP * 3);
         assert_eq!(rig.machine.mode, Mode::ClimateSet { slot: 1, target: 20.5 });
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Temperature("climate.kitchen".into(), 20.5)],
                    "done sends what is still waiting");
@@ -636,7 +639,7 @@ mod tests {
         rig.turn(CARD_STEP);
         rig.press();
         rig.turn(-VALUE_STEP * 5);
-        assert_eq!(rig.machine.mode, Mode::Volume { slot: 2, value: 20 });
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 2, value: 25 });
         let effects = rig.press();
         assert!(Rig::sends(&effects).contains(&Command::PlayPause("media_player.speaker".into())));
         assert!(matches!(&rig.machine.cards.cards[2], Card::Media(m) if m.state == "paused"));

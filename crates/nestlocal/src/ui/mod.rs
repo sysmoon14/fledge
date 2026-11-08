@@ -79,6 +79,7 @@ pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
         };
         // An owner file from before a restart names a pid that may be reused.
         device::own(false);
+        paint::for_panel();
         Runtime::new(ui, sender, fonts, display, input).run();
     });
     if let Err(e) = spawned {
@@ -101,6 +102,9 @@ struct Runtime {
     shown: Option<device::Frame>,
     /// How the display moves to what the mode shows next.
     transition: Transition,
+    /// How far the ring shows on a screen with a value, on its way to it.
+    sweep: Option<(SweepKey, f32)>,
+    last_frame: Instant,
     last_check: Instant,
     nlclient: bool,
 }
@@ -111,7 +115,7 @@ impl Runtime {
         let now = Instant::now();
         Runtime {
             ui, sender, fonts, display, input, beeper: device::Beeper::open(), machine: Machine::new(now), generation: u64::MAX, saved: None,
-            shown: None, transition: Transition::Cut,
+            shown: None, transition: Transition::Cut, sweep: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false,
         }
     }
@@ -120,7 +124,9 @@ impl Runtime {
         logf!("ui: ready for home screen cards");
         hold_state(false);
         loop {
-            let events = self.input.wait(Duration::from_millis(50));
+            // A frame each 16 ms while the ring sweeps; otherwise input or time.
+            let wait = if self.sweeping() { 16 } else { 50 };
+            let events = self.input.wait(Duration::from_millis(wait));
             let now = Instant::now();
             let mut effects = Vec::new();
             if now.duration_since(self.last_check) >= Duration::from_secs(2) {
@@ -151,8 +157,53 @@ impl Runtime {
             for effect in effects {
                 self.apply(effect);
             }
-            if self.machine.take_dirty() && self.machine.mode.owning() {
+            let swept = self.sweep(now);
+            if (self.machine.take_dirty() | swept) && self.machine.mode.owning() {
                 self.draw();
+            }
+        }
+    }
+
+    /// How far the ring of the mode's value should show (0..1), if it has one.
+    fn value(&self) -> Option<f32> {
+        let card = |slot: usize| self.machine.cards.cards.get(slot);
+        match &self.machine.mode {
+            Mode::LightDim { on: true, value, .. } | Mode::Volume { value, .. } => Some(*value as f32 / 100.0),
+            Mode::ClimateSet { slot, target } => match card(*slot) {
+                Some(Card::Climate(c)) => Some(((target - c.min) / (c.max - c.min).max(0.5)) as f32),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn sweeping(&self) -> bool {
+        matches!((&self.sweep, self.value()), (Some((_, shown)), Some(value)) if *shown != value)
+    }
+
+    /// Moves the ring towards its value, as the Nest's dial follows the
+    /// ring: most of the way in about a tenth of a second. A new screen
+    /// starts at its value. Returns whether the ring moved.
+    fn sweep(&mut self, now: Instant) -> bool {
+        let elapsed = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+        let Some(value) = self.value() else {
+            self.sweep = None;
+            return false;
+        };
+        let key = sweep_key(&self.machine.mode);
+        match self.sweep {
+            Some((was, shown)) if Some(was) == key => {
+                let mut next = shown + (value - shown) * (1.0 - (-elapsed / 0.045).exp());
+                if (next - value).abs() < 0.002 {
+                    next = value;
+                }
+                self.sweep = key.map(|key| (key, next));
+                next != shown
+            }
+            _ => {
+                self.sweep = key.map(|key| (key, value));
+                false
             }
         }
     }
@@ -232,9 +283,10 @@ impl Runtime {
             _ => return,
         };
         let started = Instant::now();
-        let pixmap = screens::draw(&self.fonts, &screen, at);
+        let sweep = self.sweep.as_ref().map(|(_, shown)| *shown);
+        let pixmap = screens::draw(&self.fonts, &screen, at, sweep);
         let drawn = started.elapsed();
-        let frame = device::frame(&pixmap);
+        let frame = device::frame(pixmap);
         let turned = started.elapsed() - drawn;
         // From the card before, or from nlclient's frame on the way in.
         if let Some(from) = self.shown.take().or_else(|| self.saved.clone()) {
@@ -272,6 +324,18 @@ impl Runtime {
                 _ => self.display.fade(from, to, (ease(t) * 256.0) as u16),
             }
         }
+    }
+}
+
+/// Which screen a sweep belongs to: the kind of value, and whose.
+type SweepKey = (u8, usize, usize);
+
+fn sweep_key(mode: &Mode) -> Option<SweepKey> {
+    match *mode {
+        Mode::LightDim { slot, light, .. } => Some((0, slot, light)),
+        Mode::Volume { slot, .. } => Some((1, slot, 0)),
+        Mode::ClimateSet { slot, .. } => Some((2, slot, 0)),
+        _ => None,
     }
 }
 
@@ -358,7 +422,8 @@ fn home_dial(display: &mut device::Display) -> bool {
 mod shots {
     use super::*;
 
-    fn save(pixmap: &tiny_skia::Pixmap, path: &str) {
+    fn save(canvas: &paint::Canvas, path: &str) {
+        let pixmap = &canvas.pixmap;
         let file = std::fs::File::create(path).unwrap();
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), pixmap.width(), pixmap.height());
         encoder.set_color(png::ColorType::Rgba);
@@ -393,7 +458,7 @@ mod shots {
             ("8-volume", Screen::Volume { card: media, value: 35 }, at(3)),
         ];
         for (name, screen, at) in shots {
-            save(&screens::draw(&fonts, &screen, at), &format!("{out}/{name}.png"));
+            save(&screens::draw(&fonts, &screen, at, None), &format!("{out}/{name}.png"));
         }
     }
 }

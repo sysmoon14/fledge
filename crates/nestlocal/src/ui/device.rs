@@ -18,7 +18,6 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::Duration;
 
-use tiny_skia::Pixmap;
 
 pub const OWNER: &str = "/var/run/unfr0zen/screen.owner";
 const RING: &str = "2280000.adc";
@@ -181,18 +180,9 @@ const ROW: usize = SIDE * 4;
 /// framebuffer turned a quarter clockwise.
 pub type Frame = Vec<u8>;
 
-/// An upright picture as a Frame: upright row r, column c is framebuffer
-/// row c, column 479-r.
-pub fn frame(pixmap: &Pixmap) -> Frame {
-    let source = pixmap.data();
-    let mut frame = vec![0u8; SIDE * ROW];
-    for (y, row) in frame.as_chunks_mut::<ROW>().0.iter_mut().enumerate() {
-        for (x, out) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let s = &source[((SIDE - 1 - x) * SIDE + y) * 4..];
-            *out = [s[2], s[1], s[0], 0xff];
-        }
-    }
-    frame
+/// A screen drawn for the panel (paint::for_panel) as a Frame: as it is.
+pub fn frame(canvas: super::paint::Canvas) -> Frame {
+    canvas.pixmap.take()
 }
 
 impl Drop for Display {
