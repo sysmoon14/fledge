@@ -1,0 +1,43 @@
+name: Checks
+
+# On every push and pull request: what runs without the firmware build (the
+# app's crates embed the firmware, so they are tested before a release, by
+# hand or in the Apps workflow's build): nestlocal's tests and lints, and the
+# Fledge page's navigation, in the build image (utils/ci/Dockerfile).
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  nestlocal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .work/cargo/registry
+            target
+          key: checks-${{ hashFiles('Cargo.lock', 'utils/ci/Dockerfile') }}
+          restore-keys: checks-
+
+      - name: Tests and lints, in the build image
+        run: |
+          image=unfr0zen/unfr0zen-build:$(sha256sum utils/ci/Dockerfile | cut -c1-12)
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e CARGO_HOME="$PWD/.work/cargo" -e CARGO_BUILD_JOBS=4 "$image" sh -ec '
+            git config --global --add safe.directory "$PWD"
+            cargo test -p nestlocal --locked
+            rustup component add clippy > /dev/null 2>&1 || true
+            cargo clippy -p nestlocal --locked --all-targets -- -D warnings
+            clang -std=c11 -Wall -Wextra -Werror platform/common/nlclient/tests/custom_flow_test.c -o /tmp/custom-flow-test
+            /tmp/custom-flow-test'
+
+      - name: Leave the cache readable
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .work target 2> /dev/null || true
