@@ -123,9 +123,9 @@ From the repository root:
 ```sh
 platform/common/radio/fetch-sdk.sh
 platform/common/radio/thread/fetch-openthread.sh
-docker build -t unfr0zen-thread-build -f platform/common/radio/thread/Dockerfile platform/common/radio/thread
+docker build -t fledge-thread-build -f platform/common/radio/thread/Dockerfile platform/common/radio/thread
 docker run --rm -v "$PWD:$PWD" -w "$PWD" \
-  -e CARGO_HOME="$PWD/.work/cargo" unfr0zen-thread-build platform/common/radio/thread/build.sh
+  -e CARGO_HOME="$PWD/.work/cargo" fledge-thread-build platform/common/radio/thread/build.sh
 ```
 
 `build.sh` first rebuilds the `zbwake.ko` modules whose build is missing or

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the universal unfr0zen binary and wrap it in a macOS .app bundle,
+# Build the universal fledge binary and wrap it in a macOS .app bundle,
 # into dist/Fledge.app. Run on macOS.
 #
 #     sh utils/make_macos_app.sh
@@ -20,24 +20,24 @@ app="$repo_dir/dist/Fledge.app"
 min_macos=13.0
 
 if [ -z "${UNFR0ZEN_BINARY:-}" ]; then
-    echo "Building universal unfr0zen ${version}"
+    echo "Building universal Fledge ${version}"
     export MACOSX_DEPLOYMENT_TARGET=$min_macos
     rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
-    cargo build --release -p unfr0zen-gui --target aarch64-apple-darwin
-    cargo build --release -p unfr0zen-gui --target x86_64-apple-darwin
+    cargo build --release -p fledge-gui --target aarch64-apple-darwin
+    cargo build --release -p fledge-gui --target x86_64-apple-darwin
 fi
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 if [ -n "${UNFR0ZEN_BINARY:-}" ]; then
-    cp "$UNFR0ZEN_BINARY" "$app/Contents/MacOS/unfr0zen"
+    cp "$UNFR0ZEN_BINARY" "$app/Contents/MacOS/fledge"
 else
-    lipo -create -output "$app/Contents/MacOS/unfr0zen" \
-        target/aarch64-apple-darwin/release/unfr0zen \
-        target/x86_64-apple-darwin/release/unfr0zen
+    lipo -create -output "$app/Contents/MacOS/fledge" \
+        target/aarch64-apple-darwin/release/fledge \
+        target/x86_64-apple-darwin/release/fledge
 fi
-cp assets/icon/unfr0zen.icns "$app/Contents/Resources/unfr0zen.icns"
+cp assets/icon/fledge.icns "$app/Contents/Resources/fledge.icns"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -47,16 +47,16 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleName</key><string>Fledge</string>
     <key>CFBundleDisplayName</key><string>Fledge</string>
-    <key>CFBundleIdentifier</key><string>dev.unfr0zen.gui</string>
-    <key>CFBundleExecutable</key><string>unfr0zen</string>
-    <key>CFBundleIconFile</key><string>unfr0zen</string>
+    <key>CFBundleIdentifier</key><string>dev.fledge.app</string>
+    <key>CFBundleExecutable</key><string>fledge</string>
+    <key>CFBundleIconFile</key><string>fledge</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${version}</string>
     <key>LSMinimumSystemVersion</key><string>${min_macos}</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
-    <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Fledge contributors, after unfr0zen</string>
+    <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Fledge contributors</string>
 </dict>
 </plist>
 PLIST
@@ -75,5 +75,5 @@ fi
 
 echo "Built $app"
 if command -v lipo >/dev/null 2>&1; then
-    echo "Universal: $(lipo -archs "$app/Contents/MacOS/unfr0zen")"
+    echo "Universal: $(lipo -archs "$app/Contents/MacOS/fledge")"
 fi

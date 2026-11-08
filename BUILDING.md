@@ -67,7 +67,7 @@ takes minutes with no output of its own; its step logs go to `.work/`:
 
 ```sh
 git submodule update --init
-cargo build --release -p unfr0zen-gui
+cargo build --release -p fledge-gui
 ```
 
 To rebuild the firmware after changing its sources, run it yourself:
@@ -79,7 +79,7 @@ utils/build-firmware.sh
 On Windows, and where `CI` is set, cargo does not run it: `build/` must already
 be there.
 
-The executable is `target/release/unfr0zen` (`unfr0zen.exe` on Windows). On
+The executable is `target/release/fledge` (`fledge.exe` on Windows). On
 Linux and macOS, run with arguments, it is the command-line tool.
 
 The version comes from `git describe --tag --always --dirty`.

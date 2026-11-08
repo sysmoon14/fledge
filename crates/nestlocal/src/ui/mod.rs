@@ -1056,6 +1056,8 @@ mod shots {
         let mut menu = screens::draw(&fonts, &Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, None);
         screens::menu(&mut menu, &fonts, "Reading Lamp", &[("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off")], 0);
         save(&menu, &format!("{out}/9-menu.png"));
+        let lamp = model::LightsCard { name: "Reading Lamp".into(), icon: String::new(), lights: vec![lights.lights[0].clone()] };
+        save(&screens::draw(&fonts, &Screen::LightsCard { card: &lamp }, None), &format!("{out}/1b-lamp.png"));
         let mut tunable = lights.lights[0].clone();
         (tunable.kelvin, tunable.kelvins, tunable.hues, tunable.hue) = (Some(2700), Some([2200, 6500]), true, Some(200));
         save(&screens::draw(&fonts, &Screen::LightWarmth { light: &tunable, value: 2700 }, None), &format!("{out}/9b-warmth.png"));

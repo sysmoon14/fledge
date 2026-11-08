@@ -99,7 +99,7 @@ stock=$work/nlclient.original
 patch_screen() {
     say "Patching the stock nlclient with this checkout's screen"
     rm -f "$work/nlclient" "$work/nlclient.undo.gz" "$work/nlclient.json"
-    quiet cargo run --quiet --release -p unfr0zen-gui -- nlclient "$stock" --out "$work/nlclient"
+    quiet cargo run --quiet --release -p fledge-gui -- nlclient "$stock" --out "$work/nlclient"
 }
 if [ $screen = 1 ]; then
     if [ $build = 1 ]; then
@@ -107,7 +107,7 @@ if [ $screen = 1 ]; then
         in_image sh platform/common/nlclient/build.sh build
     fi
     say "Building the patcher (log: $log)"
-    quiet cargo build --quiet --release -p unfr0zen-gui
+    quiet cargo build --quiet --release -p fledge-gui
     # The unit's stock nlclient from an earlier run; checked against the unit below.
     [ ! -f "$stock" ] || patch_screen
 fi

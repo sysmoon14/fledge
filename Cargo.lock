@@ -1952,6 +1952,87 @@ dependencies = [
 ]
 
 [[package]]
+name = "fledge-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "enable-ansi-support",
+ "fledge-host",
+ "log",
+ "serde_json",
+]
+
+[[package]]
+name = "fledge-core"
+version = "0.1.0"
+dependencies = [
+ "adler2",
+ "base64 0.22.1",
+ "capstone",
+ "crc32fast",
+ "flate2",
+ "getrandom 0.3.4",
+ "log",
+ "lzokay",
+ "rand_core 0.6.4",
+ "regex",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha-crypt",
+ "sha2 0.11.0",
+ "tar",
+ "x509-cert 0.2.5",
+]
+
+[[package]]
+name = "fledge-gui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crc32fast",
+ "eframe",
+ "egui",
+ "fledge-cli",
+ "fledge-core",
+ "fledge-host",
+ "libc",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "rfd",
+ "serde_json",
+ "single-instance",
+ "windows-sys 0.52.0",
+ "winresource",
+]
+
+[[package]]
+name = "fledge-host"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crc32fast",
+ "flate2",
+ "fledge-core",
+ "getrandom 0.3.4",
+ "hidapi",
+ "log",
+ "lzma-rs",
+ "nusb",
+ "regex",
+ "self_update",
+ "serde_json",
+ "serialport",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "windows-sys 0.52.0",
+ "zip 2.6.1",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6023,87 +6104,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7285e83a80ce76f5e7bce79fa41f68d78ba62d1003cf27bf748ab24413808cf4"
 dependencies = [
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "unfr0zen-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "enable-ansi-support",
- "log",
- "serde_json",
- "unfr0zen-host",
-]
-
-[[package]]
-name = "unfr0zen-core"
-version = "0.1.0"
-dependencies = [
- "adler2",
- "base64 0.22.1",
- "capstone",
- "crc32fast",
- "flate2",
- "getrandom 0.3.4",
- "log",
- "lzokay",
- "rand_core 0.6.4",
- "regex",
- "rsa",
- "serde",
- "serde_json",
- "sha-crypt",
- "sha2 0.11.0",
- "tar",
- "x509-cert 0.2.5",
-]
-
-[[package]]
-name = "unfr0zen-gui"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "crc32fast",
- "eframe",
- "egui",
- "libc",
- "log",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "rfd",
- "serde_json",
- "single-instance",
- "unfr0zen-cli",
- "unfr0zen-core",
- "unfr0zen-host",
- "windows-sys 0.52.0",
- "winresource",
-]
-
-[[package]]
-name = "unfr0zen-host"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "crc32fast",
- "flate2",
- "getrandom 0.3.4",
- "hidapi",
- "log",
- "lzma-rs",
- "nusb",
- "regex",
- "self_update",
- "serde_json",
- "serialport",
- "sha2 0.11.0",
- "tar",
- "tempfile",
- "unfr0zen-core",
- "windows-sys 0.52.0",
- "zip 2.6.1",
 ]
 
 [[package]]

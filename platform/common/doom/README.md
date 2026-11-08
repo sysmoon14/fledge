@@ -1,7 +1,7 @@
 # Doom on the thermostat
 
-Doom (the shareware episode) on the gen 3 and the gen 2, in place of their UI: unfr0zen's
-`--doom` installs it, and **UNFR0ZEN → Doom** on the thermostat launches it.
+Doom (the shareware episode) on the gen 3 and the gen 2, in place of their UI: Fledge's
+`--doom` installs it, and **Fledge → Doom** in the thermostat's settings launches it.
 Built from [doomgeneric](https://github.com/ozkl/doomgeneric)
 (`platform/common/doom/doomgeneric`, a submodule) with this unit's platform layer,
 `doomgeneric_nest.c`, as one static ARMv7 binary for both (`build.sh`, run by

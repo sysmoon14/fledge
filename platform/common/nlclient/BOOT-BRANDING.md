@@ -1,7 +1,7 @@
 # Automatic boot branding
 
 CLI and GUI patching automatically recolors recognized Google boot artwork with
-unfr0zen's ice palette. Shapes, alpha, sprite frames, geometry and timing stay
+an ice palette. Shapes, alpha, sprite frames, geometry and timing stay
 unchanged. Unknown or custom assets are skipped independently, without a UI option.
 
 The supported splash and 168-frame PNGs match their original SHA-256 hashes.
@@ -38,7 +38,7 @@ Dry runs report replacements and backups without writing either.
 The developer harness also supports experimental kernel transformations:
 
 ```sh
-cargo run -p unfr0zen-core --bin boot_branding -- \
+cargo run -p fledge-core --bin boot_branding -- \
   boot/kernel_fdt.itb kernel-from-unit.itb kernel-recolored.itb
 ```
 

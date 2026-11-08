@@ -1,7 +1,7 @@
-# Native UNFR0ZEN settings
+# The Fledge page in the Nest's settings
 
 Recovery reads the device's `nlclient`, discovers its native UI addresses and
-C++ object layouts, then links the embedded UNFR0ZEN ARM object **in memory**.
+C++ object layouts, then links the embedded Fledge ARM object **in memory**.
 The finished GUI and CLI require no Python, GCC, clang, LLVM linker, pip,
 network access, or installed disassembly library to patch the screen.
 The object is compiled once with the firmware when building the app.
@@ -14,7 +14,7 @@ this does not infer arbitrary C++ semantics. Unsupported ELF layouts,
 unknown instruction shapes, missing imports or unsupported relocations fail
 before device writes. No firmware hash selects native addresses.
 
-The home screen has a **192×192 unfr0zen icon**, the line “unfr0zen” with the
+The home screen has a **192×192 Fledge icon**, the line “Fledge” with the
 version of the app that patched the unit (`/etc/unfr0zen/version`), and Matter,
 Zigbee, Doom and Done ring choices. Pages open at the top; status updates
 preserve the viewport unless pairing completes. The larger QR has 10px of extra spacing above
@@ -54,8 +54,8 @@ holding it no longer starts Zigbee pairing.
 While an activity page is visible, stock user-activity notifications keep the
 display and device awake: for the open Matter window, or at most 30 seconds
 for Zigbee. Back or completion stops those notifications and restores normal inactivity behavior.
-UNFR0ZEN is at settings-menu index 1, after the thermostat/Back entry at 0.
-Its carousel tile displays the glyph above UNFR0ZEN.
+The Fledge page is at settings-menu index 1, after the thermostat/Back entry at 0.
+Its carousel tile displays the glyph above FLEDGE.
 The other items retain their order.
 
 ## Screen hand-over
@@ -87,7 +87,7 @@ into a temporary directory.
 
 Developers still need the ordinary firmware/app build toolchain.
 `utils/build-firmware.sh` compiles `build/custom-screen.o` with ARM clang;
-`unfr0zen-host` embeds it into both front ends. Cargo builds the bundled static
+`fledge-host` embeds it into both front ends. Cargo builds the bundled static
 Capstone decoder with a C compiler, as it builds other native dependencies.
 These compilers are build requirements only. There is no runtime compilation.
 The decoder enables only the ARM architecture.
@@ -133,7 +133,7 @@ pairing activity animates four times per second.
 The CLI can patch a local stock executable without touching USB:
 
 ```sh
-unfr0zen nlclient /path/to/stock/nlclient --out build/nlclient-screen
+fledge nlclient /path/to/stock/nlclient --out build/nlclient-screen
 ```
 
 It writes the executable, `.json` discovery/build manifest and `.undo.gz`
@@ -144,10 +144,10 @@ string order and ARM ABS32/REL32/CALL/JUMP24 relocations, and rejects any
 unknown allocated section or relocation. It does not synthesize veneers.
 
 ```sh
-cargo test -p unfr0zen-core -p unfr0zen-host -p unfr0zen-cli
-NLCLIENT_REQUIRE_GOLDENS=1 cargo test -p unfr0zen-core --test nlclient_golden
+cargo test -p fledge-core -p fledge-host -p fledge-cli
+NLCLIENT_REQUIRE_GOLDENS=1 cargo test -p fledge-core --test nlclient_golden
 NLCLIENT_STOCK="$PWD/.work/firmware/nlclient-gen3-2025" \
-  cargo test -p unfr0zen-core native_screen_patch_is_automatic -- --ignored
+  cargo test -p fledge-core native_screen_patch_is_automatic -- --ignored
 ```
 
 Goldens from all three untouched dumps pin discovery, native API, planned
@@ -164,7 +164,7 @@ To exercise the builder directly during development without the host/USB
 crate, use the Rust example:
 
 ```sh
-cargo run -p unfr0zen-core --bin nlclient -- \
+cargo run -p fledge-core --bin nlclient -- \
   .work/firmware/nlclient-gen3-2025 build/custom-screen.o build/nlclient-screen
 ```
 
@@ -184,8 +184,8 @@ Copy the executable and `/etc/unfr0zen/nlclient.undo.gz` from the device.
 Reconstruct stock on the host:
 
 ```sh
-unfr0zen nlclient nlclient-from-unit --undo nlclient.undo.gz --out nlclient-stock
+fledge nlclient nlclient-from-unit --undo nlclient.undo.gz --out nlclient-stock
 ```
 
 Both hashes are checked. Install stock with nlclient stopped, then restart
-it. A later recovery rebuilds the UNFR0ZEN screen from that executable.
+it. A later recovery rebuilds the Fledge screen from that executable.

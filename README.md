@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/screens/cards.png" width="100%" alt="Five of the thermostat's screens: a room's lights, another heating zone that is heating, a speaker's album art and progress, and a lamp's warmth and colour dials.">
+  <img src="assets/screens/cards.png" width="100%" alt="Five of the thermostat's screens: the device chooser on a reading lamp's card, the lamp's warmth dial, another heating zone that is heating, a speaker's album art and progress, and the lamp's colour dial.">
 </p>
 
 The Nest's ring is the best physical control in the house. Fledge keeps it, and
@@ -128,7 +128,7 @@ same one-time udev setup below; neither requests elevated privileges. Keep the
 `uaccess` to grant the active local user USB access.
 
 ```sh
-sudo tee /etc/udev/rules.d/70-unfr0zen.rules > /dev/null <<'EOF'
+sudo tee /etc/udev/rules.d/70-fledge.rules > /dev/null <<'EOF'
 # i.MX ROM serial download, recovery U-Boot
 ATTRS{idVendor}=="15a2", ATTRS{idProduct}=="0071", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
 ATTRS{idVendor}=="18d1", ATTRS{idProduct}=="4ee0", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
@@ -148,7 +148,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 Reconnect the unit afterwards if it is already plugged in. The same rules cover
 both the USB device and its HID/serial interfaces as it switches recovery modes.
 
-Logs go to `~/.local/share/unfr0zen/logs/<timestamp>/unfr0zen.log` (or under
+Logs go to `~/.local/share/fledge/logs/<timestamp>/fledge.log` (or under
 `$XDG_DATA_HOME` when set).
 
 | Dependency | Why |
@@ -169,11 +169,11 @@ patched unit's USB root shell.
 
 **CLI (Linux and macOS):** the same executable, run with arguments, works from a
 terminal, over SSH or headless, with a few things the app doesn't have
-(`--nand-image`, `verify`, `uboot`, `nlclient`). The executable keeps its
-original name, `unfr0zen`; on macOS it is `Fledge.app/Contents/MacOS/unfr0zen`.
+(`--nand-image`, `verify`, `uboot`, `nlclient`). The executable is `fledge`; on
+macOS it is `Fledge.app/Contents/MacOS/fledge`.
 Windows has the app only.
 ```
-unfr0zen [OPTIONS] [COMMAND]
+fledge [OPTIONS] [COMMAND]
 
 Commands:
   backup    Back up the whole NAND to a file, checked with a second read
@@ -212,9 +212,9 @@ you turned on: Matter's pairing code and QR, Zigbee pairing, and Doom.
 
 ## Undo it
 - **Before the first run:** the app's Backups page, Back up unit (or
-  `unfr0zen backup`) saves the whole NAND to a file, checked with a second
-  read. `unfr0zen verify` compares a backup with the unit.
-- **To go back to stock:** Restore to unit (or `unfr0zen restore`) writes
+  `fledge backup`) saves the whole NAND to a file, checked with a second
+  read. `fledge verify` compares a backup with the unit.
+- **To go back to stock:** Restore to unit (or `fledge restore`) writes
   that backup back to the unit.
 - `--backup` also saves the original root volume before each patch.
 
@@ -261,10 +261,18 @@ Bundled third-party components keep their own licenses: U-Boot and its patches
 module (GPL-2.0). DOOM1.WAD is id Software's shareware episode, redistributed
 under its shareware terms.
 
+## Acknowledgements
+
+Fledge is a fork of **[unfr0zen](https://github.com/unfr0zen/unfr0zen)**, by
+willtm and its contributors, and stands on everything they built: getting into
+the thermostat over USB, patching it safely and reversibly, the backups, the
+app, and nestlocal with its MQTT, Matter and Zigbee. Fledge adds Home Assistant
+on the thermostat's screen and its own releases on top. Thank you to everyone
+who made unfr0zen: none of this would exist without it. If Fledge is useful to
+you, go and give [their repository](https://github.com/unfr0zen/unfr0zen) a star
+too.
+
 ## Credits
-Fledge grew from [unfr0zen](https://github.com/unfr0zen/unfr0zen), by willtm
-and its contributors, which does the hard part: rooting the thermostat, nestlocal,
-and its MQTT, Matter and Zigbee. Thank you.
 
 - U-Boot (i.MX) — [NXP](https://github.com/nxp-imx/uboot-imx)
 - BusyBox — [the BusyBox project](https://busybox.net)

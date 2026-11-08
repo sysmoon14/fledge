@@ -4,10 +4,10 @@
 
 This Rust 2021 workspace builds USB recovery tools for Nest thermostats:
 
-- `crates/unfr0zen-core`: firmware parsing, patching, and recovery logic.
-- `crates/unfr0zen-host`: USB workflows, embedded assets, and host orchestration.
-- Device-specific code sits in one module per device (`diamond3`, `j49`) in core and host, plus host's detection-only `onyx` (the Thermostat E); `unfr0zen-host::device` identifies the unit on USB by its identity in any mode and the run dispatches to its device's flow; the gen 1 and gen 2 share their boot ROM's identity, and in that mode the OMAP flow reads the generation from the NAND's U-Boot environment (`nlmodel`) once the flasher runs.
-- `crates/unfr0zen-gui` and `crates/unfr0zen-cli`: the `unfr0zen` executable (egui window) and the terminal interface, a library it runs when given arguments on Linux and macOS; Windows has the window only.
+- `crates/fledge-core`: firmware parsing, patching, and recovery logic.
+- `crates/fledge-host`: USB workflows, embedded assets, and host orchestration.
+- Device-specific code sits in one module per device (`diamond3`, `j49`) in core and host, plus host's detection-only `onyx` (the Thermostat E); `fledge-host::device` identifies the unit on USB by its identity in any mode and the run dispatches to its device's flow; the gen 1 and gen 2 share their boot ROM's identity, and in that mode the OMAP flow reads the generation from the NAND's U-Boot environment (`nlmodel`) once the flasher runs.
+- `crates/fledge-gui` and `crates/fledge-cli`: the `fledge` executable (egui window) and the terminal interface, a library it runs when given arguments on Linux and macOS; Windows has the window only.
 - `crates/nestlocal`: device service implementing MQTT, Matter, and Zigbee; startup scripts live in `rootfs/`.
 - `platform/`: what is built for and installed on the thermostat, by device:
   - `common/`: both generations. `nlclient/` (native settings screen, assets, binary discovery references, C tests), `radio/` (radio firmware, each radio's board, linker and OpenThread files in `em3581/` and `em357/`; OpenThread integration in `thread/`), `doom/` (doomgeneric submodule plus its platform layer).
@@ -20,7 +20,7 @@ This Rust 2021 workspace builds USB recovery tools for Nest thermostats:
 
 Generated outputs belong in ignored `build/`, `target/`, `dist/`, or `.work/` directories.
 
-User documentation for integrations and options (app and CLI) is the website's `integrations/index.html` (repository `unfr0zen/unfr0zen.com`); update it when an option, its app label, or integration behavior changes. The website's `protocols/index.html` documents nestlocal's MQTT topics, commands and state, Zigbee endpoints and clusters, and Matter endpoints for third-party integrations; update it when any of them changes.
+User documentation for the app, its options and integrations is README.md; update it when an option, its app label, or integration behavior changes. nestlocal's MQTT topics are documented in `crates/nestlocal/src/bridge.rs`; the home screen cards' protocol is `crates/nestlocal/src/ui/` with the Fledge integration (sysmoon14/fledge-homeassistant).
 
 ## Build, Test, and Development Commands
 
@@ -29,8 +29,8 @@ Run commands from the repository root:
 ```sh
 git submodule update --init
 utils/build-firmware.sh
-cargo build --release -p unfr0zen-gui
-cargo run -p unfr0zen-gui -- --help
+cargo build --release -p fledge-gui
+cargo run -p fledge-gui -- --help
 cargo test --workspace --locked
 sh utils/make_macos_app.sh
 ```
@@ -43,7 +43,7 @@ Match surrounding style and use four-space indentation in Rust. Use `snake_case`
 
 ## Testing Guidelines
 
-Rust tests use `#[test]` and integration tests under `crates/unfr0zen-core/tests/`. Name tests after observable behavior. CI also runs:
+Rust tests use `#[test]` and integration tests under `crates/fledge-core/tests/`. Name tests after observable behavior. CI also runs:
 
 ```sh
 clang -std=c11 -Wall -Wextra -Werror platform/common/nlclient/tests/custom_flow_test.c -o /tmp/custom-flow-test
@@ -62,7 +62,7 @@ Everything after the colon is **lowercase**. The subject fits in 72 columns, no 
 
 | Prefix | Area |
 |-|-|
-| `app:` | the unfr0zen application (GUI, CLI, self-update, host library) |
+| `app:` | the Fledge application (GUI, CLI, self-update, host library) |
 | `nestlocal:` | the on-device service; nest deeper with `nestlocal: thread:` |
 | `client-ng:` | the thermostat UI submodule |
 | `ci:` | CircleCI configs and build infrastructure |

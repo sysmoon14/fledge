@@ -3,7 +3,7 @@
 # gen 2 as one static ARMv7 binary, as nestlocal is: build/doom-armv7.
 # utils/build-firmware.sh runs it with the firmware; the app embeds the
 # binary and installs it for --doom. The WAD is the app's
-# (crates/unfr0zen-host/build.rs).
+# (crates/fledge-host/build.rs).
 #
 #     sh platform/common/doom/build.sh OUTPUT
 set -eu

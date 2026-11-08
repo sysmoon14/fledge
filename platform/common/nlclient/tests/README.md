@@ -16,7 +16,7 @@ committed. The corresponding private samples live in `.work/firmware/`:
 Each golden records discovery (including ABI fingerprints and the library
 calls each native makes), resolved native APIs, original size/program
 headers/factory bytes, settings ordering, linked symbols and payload hash,
-output hash, and decompressed undo-journal hash. `cargo run -p unfr0zen-core
+output hash, and decompressed undo-journal hash. `cargo run -p fledge-core
 --bin nlclient -- --golden STOCK build/custom-screen.o TOOLCHAIN` records a
 sample's golden from the build image's object.
 The 2025 reference was re-linked with `-O0`: only its payload/output stages
@@ -29,7 +29,7 @@ keep their PC-relative addressing. These are independent Python/lld
 reference results, recorded before deleting the Python implementation.
 
 ```sh
-NLCLIENT_REQUIRE_GOLDENS=1 cargo test -p unfr0zen-core --test nlclient_golden
+NLCLIENT_REQUIRE_GOLDENS=1 cargo test -p fledge-core --test nlclient_golden
 ```
 
 `NLCLIENT_FIRMWARE_DIR` changes the private sample directory;
@@ -66,7 +66,7 @@ build in the manifest and never block. Tests hold every reviewed build's
 imports to every other's on all but one native (five for 6.5-14, whose
 factories and event handlers call more), so that evidence stays what
 survives a recompile. A run on such a build keeps its stock nlclient beside
-the run log. `cargo run -p unfr0zen-core --bin nlclient -- --report STOCK`
-(or `unfr0zen nlclient --discover STOCK`) prints what discovery finds in a
+the run log. `cargo run -p fledge-core --bin nlclient -- --report STOCK`
+(or `fledge nlclient --discover STOCK`) prints what discovery finds in a
 sample: the first step of reviewing a new variant, whose fingerprints and
 imports it records.

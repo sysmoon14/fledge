@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Fledge
+Comment=Free your Nest thermostat
+Exec=fledge
+Icon=dev.fledge.app
+Terminal=false
+Categories=Utility;
+StartupWMClass=dev.fledge.app

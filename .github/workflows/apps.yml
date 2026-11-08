@@ -136,7 +136,7 @@ jobs:
           docker run --rm -v "$PWD:$PWD" -w "$PWD" -e PLATFORM -e TARGET -e BUILD -e TAG \
             -e CARGO_BUILD_JOBS=4 -e UNFR0ZEN_BUILD_VERSION="$TAG" "$IMAGE" sh -ec '
               git config --global --add safe.directory "$PWD"
-              $BUILD --release --locked --bin unfr0zen
+              $BUILD --release --locked --bin fledge
               out=target/$TARGET/release
               mkdir -p dist
               # Linux binaries in tarballs, which keep them executable; Windows
@@ -144,12 +144,12 @@ jobs:
               # compression or extra fields so every unzipper reads them.
               case $PLATFORM in
                 linux-*)
-                  tar czf dist/Fledge-$PLATFORM-$TAG.tar.gz -C "$out" unfr0zen ;;
+                  tar czf dist/Fledge-$PLATFORM-$TAG.tar.gz -C "$out" fledge ;;
                 windows-*)
-                  zip -0 -jqX dist/Fledge-$PLATFORM-$TAG.zip "$out/unfr0zen.exe" ;;
+                  zip -0 -jqX dist/Fledge-$PLATFORM-$TAG.zip "$out/fledge.exe" ;;
                 macos)
                   for arch in universal:universal2 arm64:aarch64 x86_64:x86_64; do
-                    UNFR0ZEN_BINARY="target/${arch#*:}-apple-darwin/release/unfr0zen" sh utils/make_macos_app.sh
+                    UNFR0ZEN_BINARY="target/${arch#*:}-apple-darwin/release/fledge" sh utils/make_macos_app.sh
                     (cd dist && zip -0 -qryX Fledge-macos-${arch%%:*}-$TAG.zip Fledge.app && rm -rf Fledge.app)
                   done ;;
               esac
