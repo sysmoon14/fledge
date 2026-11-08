@@ -10,5 +10,5 @@
   "issue_tracker": "https://github.com/sysmoon14/fledge/issues",
   "mqtt": ["nestlocal/+/availability"],
   "requirements": [],
-  "version": "0.4.2"
+  "version": "0.4.3"
 }
