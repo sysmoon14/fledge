@@ -359,6 +359,22 @@ impl Machine {
         }
     }
 
+    /// Home Assistant asks for the display: lit, if it isn't, and on what
+    /// it wakes to, unless something already shows.
+    pub fn wake_up(&mut self, now: Instant, lit: bool, out: &mut Vec<Effect>) {
+        if self.mode == Mode::Idle {
+            return;
+        }
+        if !lit {
+            out.push(Effect::WakeDisplay);
+            self.lighting = Some(now + LIGHTING);
+        }
+        if self.mode == Mode::Home {
+            self.last_input = now;
+            self.wake(out);
+        }
+    }
+
     /// The display lit: what Home Assistant chose shows, as it lights.
     fn wake(&mut self, out: &mut Vec<Effect>) {
         self.woke = true;
@@ -919,6 +935,22 @@ mod tests {
         rig.press();
         let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!() };
         assert_eq!(actions, vec![Action::Back, Action::Switch(false)], "a light with neither: neither");
+    }
+
+    #[test]
+    fn home_assistant_can_wake_it() {
+        let mut rig = Rig::new();
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        let mut out = vec![];
+        rig.machine.wake_up(rig.now, false, &mut out);
+        assert_eq!(out, vec![Effect::WakeDisplay, Effect::Own(true)]);
+        assert_eq!(rig.machine.mode, Mode::Chooser(0));
+        rig.lit = true;
+        rig.turn(CARD_STEP);
+        let mut out = vec![];
+        rig.machine.wake_up(rig.now, true, &mut out);
+        assert!(out.is_empty() && rig.machine.mode == Mode::Chooser(1), "showing already: left as it is");
     }
 
     #[test]

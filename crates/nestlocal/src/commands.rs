@@ -94,6 +94,16 @@ impl Bridge {
             }
             return;
         }
+        if name == "screen_on" {
+            let on = matches!(String::from_utf8_lossy(payload).trim().to_ascii_lowercase().as_str(), "on" | "1" | "true");
+            logf!("mqtt: screen_on: {}", if on { "kept on" } else { "as usual" });
+            self.ui.keep_on(on);
+            return;
+        }
+        if name == "screen_wake" {
+            self.ui.wake();
+            return;
+        }
         if let Some(entity) = name.strip_prefix("art/") {
             if let Err(e) = self.ui.set_art(entity, payload) {
                 logf!("mqtt: {name}: {e}");

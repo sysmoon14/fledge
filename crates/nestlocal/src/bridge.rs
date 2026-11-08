@@ -17,7 +17,10 @@
 //!                                      -update-repo (update.rs; retained)
 //!   <prefix>/<serial>/ui/protocol      what of the home screen cards this build
 //!                                      understands (ui::PROTOCOL; retained)
-//!   <prefix>/<serial>/set/<command>    Home Assistant's commands
+//!   <prefix>/<serial>/set/<command>    Home Assistant's commands; for the
+//!                                      home screen cards ui, art/<entity>,
+//!                                      screen_on (ON/OFF, retained) and
+//!                                      screen_wake
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
 

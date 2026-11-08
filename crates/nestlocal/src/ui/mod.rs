@@ -36,7 +36,10 @@ use crate::logf;
 /// What of the cards this build understands, for the Fledge integration to
 /// check (<base>/ui/protocol). Raise it with each addition Fledge relies on:
 ///   1  device cards (one light each), wake, album art (<base>/set/art/...)
-pub const PROTOCOL: u32 = 1;
+///   2  a light's warmth and colour (kelvin, kelvins, hues, hue; the
+///      color_temp and hue commands), a track's progress (position,
+///      position_at, duration), screen_on and screen_wake
+pub const PROTOCOL: u32 = 2;
 
 #[derive(Default)]
 pub struct Ui {
@@ -44,6 +47,10 @@ pub struct Ui {
     cards: Mutex<(u64, Cards)>,
     /// Media players' album art, by entity id.
     art: Mutex<HashMap<String, Arc<Art>>>,
+    /// Home Assistant's: keep the display lit (<base>/set/screen_on), and
+    /// how many times it asked to wake it (<base>/set/screen_wake).
+    keep_on: std::sync::atomic::AtomicBool,
+    wakes: std::sync::atomic::AtomicU64,
 }
 
 impl Ui {
@@ -72,6 +79,16 @@ impl Ui {
             self.cards.lock().unwrap().0 += 1;
         }
         Ok(())
+    }
+
+    /// Keeps the display lit (true) or leaves it to go out as it does.
+    pub fn keep_on(&self, on: bool) {
+        self.keep_on.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Wakes the display onto what it wakes to, as a turn would.
+    pub fn wake(&self) {
+        self.wakes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn generation(&self) -> u64 {
@@ -145,6 +162,10 @@ struct Runtime {
     /// were last looked at: a card is drawn again as its bar moves.
     progress: std::collections::HashMap<usize, u32>,
     progress_checked: Instant,
+    /// The wakes Home Assistant asked for that were done, and when the
+    /// display was last kept lit for it.
+    wakes: u64,
+    kept_on: Instant,
     /// How big the cards show (1 full size, zoom::ZOOMED while moving).
     zoom: f32,
     /// A frame to compose zoomed cards in.
@@ -189,7 +210,7 @@ impl Runtime {
             ui, sender, fonts, display, input, beeper: device::Beeper::open(), machine: Machine::new(now),
             generation: u64::MAX, saved: None, home: None, transition: Transition::Cut, view: None,
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
-            progress: Default::default(), progress_checked: Instant::now(),
+            progress: Default::default(), progress_checked: Instant::now(), wakes: 0, kept_on: Instant::now(),
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, dial: None, last_dial: now - Duration::from_secs(60),
@@ -248,6 +269,18 @@ impl Runtime {
                     _ => continue,
                 };
                 self.machine.input(input, now, lit, &mut effects);
+            }
+            let wakes = self.ui.wakes.load(std::sync::atomic::Ordering::Relaxed);
+            if wakes != self.wakes {
+                self.wakes = wakes;
+                logf!("ui: Home Assistant wakes the display");
+                self.machine.wake_up(now, lit, &mut effects);
+            }
+            if self.ui.keep_on.load(std::sync::atomic::Ordering::Relaxed)
+                && now.duration_since(self.kept_on) >= Duration::from_secs(4) {
+                // Kept on by Home Assistant: nlclient's display too.
+                self.kept_on = now;
+                device::wake_display();
             }
             if let Some((down, false, was_lit)) = self.pressed {
                 if now.duration_since(down) >= LONG_PRESS {
