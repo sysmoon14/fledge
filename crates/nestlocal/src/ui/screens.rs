@@ -74,32 +74,44 @@ fn icon(pixmap: &mut Pixmap, name: &str, entity: &str, cx: f32, cy: f32, size: f
     }
 }
 
-/// The ring's slice of each of `count` lights, two ticks apart.
-fn slice(i: usize, count: usize) -> Option<usize> {
-    let gap = 2;
-    let each = (TICKS + gap) / count.max(1);
-    let slice = i / each;
-    (i % each < each - gap.min(each - 1) && slice < count).then_some(slice)
+/// What a room's lights come to: the average brightness of those on, as
+/// Home Assistant averages a light group (on/off lights count as full), and
+/// their colours mixed in the same proportions.
+pub fn room(lights: &[Light]) -> Option<(u8, [u8; 3])> {
+    let on: Vec<(u32, [u8; 3])> = lights.iter().filter(|l| l.on)
+        .map(|l| (l.brightness.unwrap_or(100).max(1) as u32, l.colour())).collect();
+    if on.is_empty() {
+        return None;
+    }
+    let weight: u32 = on.iter().map(|(b, _)| b).sum();
+    let mix = |channel: usize| (on.iter().map(|(b, c)| b * c[channel] as u32).sum::<u32>() / weight) as u8;
+    let average = (weight as f32 / on.len() as f32).round() as u8;
+    Some((average, [mix(0), mix(1), mix(2)]))
 }
 
 fn lights_card(fonts: &Fonts, card: &LightsCard, at: Position) -> Pixmap {
     let mut p = paint::canvas(BLACK);
     let lights = &card.lights;
-    paint::ring(&mut p, |i| match slice(i, lights.len()) {
-        Some(n) if lights[n].on => colour(lights[n].colour()),
-        Some(_) => colour(DIM),
-        None => colour(BLACK),
+    let room = room(lights);
+    // One sweep, as a dimmer's: how bright the room is, in its lights' colour.
+    let top = room.map(|(level, _)| paint::tick_at(level as f32 / 100.0));
+    paint::ring(&mut p, |i| match (room, top) {
+        (Some((_, mixed)), Some(top)) if i <= top => colour(mixed),
+        _ => colour(DIM),
     }, &[]);
-    let on: Vec<&Light> = lights.iter().filter(|l| l.on).collect();
-    let accent = on.first().map_or(GREY, |l| l.colour());
+    let accent = room.map_or(GREY, |(_, mixed)| mixed);
     icon(&mut p, &card.icon, "lights", HALF, 132.0, 72.0, accent);
     label(&mut p, fonts, 214.0, &card.name, accent);
-    if on.is_empty() {
-        paint::text(&mut p, &fonts.regular, 96.0, HALF, 320.0, "Off", 0.0, WHITE);
-        line(&mut p, fonts, 366.0, &format!("{} lights", lights.len()), GREY);
-    } else {
-        paint::text(&mut p, &fonts.regular, 112.0, HALF, 322.0, &on.len().to_string(), 0.0, WHITE);
-        line(&mut p, fonts, 366.0, &format!("of {} on", lights.len()), GREY);
+    match room {
+        None => {
+            paint::text(&mut p, &fonts.regular, 96.0, HALF, 320.0, "Off", 0.0, WHITE);
+            line(&mut p, fonts, 366.0, &format!("{} lights", lights.len()), GREY);
+        }
+        Some((level, _)) => {
+            let on = lights.iter().filter(|l| l.on).count();
+            paint::text(&mut p, &fonts.regular, 112.0, HALF, 322.0, &on.to_string(), 0.0, WHITE);
+            line(&mut p, fonts, 366.0, &format!("of {} on · {level}%", lights.len()), GREY);
+        }
     }
     paint::dots(&mut p, at.count, at.index, WHITE);
     p
@@ -247,11 +259,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slices_share_the_ring_with_gaps() {
-        let owners: Vec<Option<usize>> = (0..TICKS).map(|i| slice(i, 3)).collect();
-        assert_eq!(owners[0], Some(0));
-        assert_eq!(owners[TICKS - 3], Some(2));
-        assert!(owners.iter().filter(|o| o.is_none()).count() >= 4);
-        assert!((0..TICKS).all(|i| slice(i, 1) == Some(0) || i >= TICKS - 2));
+    fn a_room_is_the_average_of_its_lights_that_are_on() {
+        let light = |on, brightness: Option<u8>, rgb| Light {
+            id: "light.x".into(), name: String::new(), icon: String::new(), on, dimmable: true, brightness, rgb: Some(rgb),
+        };
+        assert_eq!(room(&[light(false, None, [255, 0, 0])]), None);
+        let lights = [light(true, Some(60), [255, 0, 0]), light(false, None, [0, 255, 0]), light(true, Some(20), [0, 0, 255])];
+        assert_eq!(room(&lights), Some((40, [191, 0, 63])), "off lights don't count; brighter ones colour more");
+        assert_eq!(room(&[light(true, None, [255, 255, 255])]).unwrap().0, 100, "on/off lights are full");
     }
 }
