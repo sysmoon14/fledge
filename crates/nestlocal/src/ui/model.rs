@@ -47,6 +47,71 @@ pub enum Card {
     Lights(LightsCard),
     Climate(ClimateCard),
     Media(MediaCard),
+    /// A scene, script or button: pressed, it runs.
+    Action(ActionCard),
+    /// A camera's latest still: pressed, a new one.
+    Camera(CameraCard),
+    /// A kind from a newer Fledge: left out rather than failing the rest.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ActionCard {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CameraCard {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: String,
+    /// Its latest still, from <base>/set/art/<entity id>.
+    #[serde(skip)]
+    pub art: Option<Arc<Art>>,
+}
+
+/// A notification from Home Assistant (fledge.notify, on <base>/set/alert):
+/// over whatever shows, until pressed, dismissed or `timeout` seconds pass.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Alert {
+    /// Its tag, in what the thermostat says back of it.
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default = "alert_timeout")]
+    pub timeout: f64,
+    /// The key of its picture among the art (a camera's still), if any.
+    #[serde(default)]
+    pub picture: Option<String>,
+    /// Home Assistant took it back (fledge.dismiss).
+    #[serde(default)]
+    pub dismiss: bool,
+    #[serde(skip)]
+    pub art: Option<Arc<Art>>,
+}
+
+fn alert_timeout() -> f64 { 30.0 }
+
+impl Alert {
+    /// <base>/set/alert's payload.
+    pub fn parse(payload: &[u8]) -> Result<Alert, String> {
+        let alert: Alert = serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+        if alert.id.is_empty() {
+            return Err("an alert needs its id".into());
+        }
+        Ok(alert)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -167,7 +232,8 @@ pub struct Art {
     pub rgb: Vec<u8>,
 }
 
-pub const ART_MAX: u32 = 240;
+/// A camera's still fills the display.
+pub const ART_MAX: u32 = 480;
 
 impl Art {
     /// From a PNG, square and 8-bit RGB or RGBA (alpha dropped).
@@ -200,6 +266,7 @@ impl Cards {
         let mut cards: Cards = serde_json::from_slice(payload).map_err(|e| e.to_string())?;
         cards.cards.retain(|card| match card {
             Card::Lights(lights) => !lights.lights.is_empty(),
+            Card::Unknown => false,
             _ => true,
         });
         Ok(cards)
@@ -237,6 +304,14 @@ pub enum Command {
     Kelvin(String, u16),
     /// A light's colour, by hue (0..360).
     Hue(String, u16),
+    /// Runs a scene, script or button.
+    Run(String),
+    /// Asks for a camera's still, now.
+    Snapshot(String),
+    /// A notification, by its id: pressed, or dismissed (a long press, its
+    /// time up).
+    AlertPressed(String),
+    AlertDismissed(String),
 }
 
 impl Command {
@@ -250,6 +325,10 @@ impl Command {
             Command::PlayPause(id) => json!({"id": id, "action": "play_pause"}),
             Command::Kelvin(id, k) => json!({"id": id, "action": "color_temp", "value": k}),
             Command::Hue(id, h) => json!({"id": id, "action": "hue", "value": h}),
+            Command::Run(id) => json!({"id": id, "action": "run"}),
+            Command::Snapshot(id) => json!({"id": id, "action": "snapshot"}),
+            Command::AlertPressed(id) => json!({"id": id, "action": "alert_pressed"}),
+            Command::AlertDismissed(id) => json!({"id": id, "action": "alert_dismissed"}),
         }
     }
 }

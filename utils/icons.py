@@ -26,6 +26,7 @@ thermostat radiator heat fire snowflake air hvac boiler
 sofa bed home house power toggle switch outlet plug socket
 door doorbell bell cctv camera garage gate lock
 water coffee kettle blinds curtains window robot vacuum washing dishwasher
+night moon movie sleep party weather sun star
 """.split())
 
 # The cards' own: Nest settings, the lists' Back, a light's warmth and colour.

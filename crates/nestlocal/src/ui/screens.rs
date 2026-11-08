@@ -3,7 +3,7 @@
 
 
 use super::icons;
-use super::model::{ClimateCard, Light, LightsCard, MediaCard};
+use super::model::{ActionCard, Alert, CameraCard, ClimateCard, Light, LightsCard, MediaCard};
 use super::paint::{self, *};
 
 pub enum Screen<'a> {
@@ -12,6 +12,11 @@ pub enum Screen<'a> {
     /// `progress`: how far through its track (0..1), for its bar.
     MediaCard { card: &'a MediaCard, volume: Option<u8>, progress: Option<f32> },
     SettingsCard,
+    /// A scene, script or button; `done` just after it ran.
+    ActionCard { card: &'a ActionCard, done: bool },
+    CameraCard { card: &'a CameraCard },
+    /// A notification, over whatever showed.
+    Alert { alert: &'a Alert },
     /// The lights card pressed: its lights and Back, `selected` highlighted.
     LightList { card: &'a LightsCard, selected: usize },
     LightDim { light: &'a Light, on: bool, value: u8 },
@@ -37,6 +42,9 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         }
         Screen::MediaCard { card, volume, progress } => media_card(fonts, card, volume.or(card.volume), *progress),
         Screen::SettingsCard => settings_card(fonts),
+        Screen::ActionCard { card, done } => action_card(fonts, card, *done),
+        Screen::CameraCard { card } => camera_card(fonts, card),
+        Screen::Alert { alert } => alert_screen(fonts, alert),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         _ => {
             let mut p = still(fonts, screen);
@@ -292,6 +300,112 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, progress: Opt
     }
     let under = if card.artist.is_empty() { String::new() } else { card.artist.clone() };
     line(&mut p, fonts, below, &under, GREY);
+    p
+}
+
+/// Scenes' and scripts' accent: a warm gold.
+const ACTION: [u8; 3] = [255, 196, 87];
+
+fn action_card(fonts: &Fonts, card: &ActionCard, done: bool) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    paint::ring(&mut p, |_| if done { colour(ACTION) } else { colour(DIM) }, &[]);
+    // Its own icon if the thermostat has it, else a play button.
+    let found = icons::lookup(&card.icon, &card.id).or_else(|| icons::lookup("mdi:play-circle-outline", ""));
+    if let Some(found) = found {
+        paint::icon(&mut p, found, HALF, 178.0, 104.0, colour(if done { ACTION } else { WHITE }));
+    }
+    let name = paint::fit(&fonts.regular, 40.0, &card.name, 0.0, 330.0);
+    paint::text(&mut p, &fonts.regular, 40.0, HALF, 288.0, &name, 0.0, WHITE);
+    line(&mut p, fonts, 330.0, if done { "Done" } else { "Press to run" }, if done { ACTION } else { GREY });
+    p
+}
+
+/// A camera's latest still, the whole display, its name over it; before
+/// the first, its icon.
+fn camera_card(fonts: &Fonts, card: &CameraCard) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    match &card.art {
+        Some(art) => {
+            paint::picture(&mut p, &art.rgb, art.size, HALF, HALF, 0.0);
+            let name = paint::fit(&fonts.medium, 24.0, &card.name, 0.0, 280.0);
+            let width = paint::measure(&fonts.medium, 24.0, &name, 0.0) + 36.0;
+            paint::pill(&mut p, HALF - width / 2.0, 386.0, width, 40.0, alpha(BLACK, 0.6));
+            paint::text(&mut p, &fonts.medium, 24.0, HALF, 414.0, &name, 0.0, WHITE);
+        }
+        None => {
+            paint::ring(&mut p, |_| colour(DIM), &[]);
+            let icon_name = if card.icon.is_empty() { "mdi:cctv" } else { &card.icon };
+            icon(&mut p, icon_name, &card.id, HALF, 178.0, 96.0, WHITE);
+            let name = paint::fit(&fonts.regular, 36.0, &card.name, 0.0, 330.0);
+            paint::text(&mut p, &fonts.regular, 36.0, HALF, 286.0, &name, 0.0, WHITE);
+            line(&mut p, fonts, 328.0, "Press for a picture", GREY);
+        }
+    }
+    p
+}
+
+/// `text` in lines no wider than `width`, at most `lines` of them, the
+/// last cut short if it must be.
+fn wrap(font: &ab_glyph::FontArc, size: f32, text: &str, width: f32, lines: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let tried = if current.is_empty() { word.to_owned() } else { format!("{current} {word}") };
+        if paint::measure(font, size, &tried, 0.0) <= width || current.is_empty() {
+            current = tried;
+        } else {
+            out.push(std::mem::take(&mut current));
+            current = word.to_owned();
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.len() > lines {
+        let rest = out[lines - 1..].join(" ");
+        out.truncate(lines - 1);
+        out.push(rest);
+    }
+    out.into_iter().map(|line| paint::fit(font, size, &line, 0.0, width)).collect()
+}
+
+/// A notification: with a picture (a camera's), the picture and its title
+/// over it; else its icon, title and message on black. Press to answer it,
+/// hold to put it away.
+fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    let hint = "Press · hold to dismiss";
+    match &alert.art {
+        Some(art) => {
+            paint::picture(&mut p, &art.rgb, art.size, HALF, HALF, 0.0);
+            // The title over the picture, on a band, in up to two lines.
+            let title = if alert.title.is_empty() { &alert.message } else { &alert.title };
+            let lines = wrap(&fonts.medium, 26.0, title, 300.0, 2);
+            let width = lines.iter().map(|l| paint::measure(&fonts.medium, 26.0, l, 0.0)).fold(0.0, f32::max) + 44.0;
+            let height = 18.0 + 32.0 * lines.len() as f32;
+            let top = 412.0 - height;
+            paint::pill(&mut p, HALF - width / 2.0, top, width, height, alpha(BLACK, 0.65));
+            for (i, text) in lines.iter().enumerate() {
+                paint::text(&mut p, &fonts.medium, 26.0, HALF, top + 34.0 + 32.0 * i as f32, text, 0.0, WHITE);
+            }
+        }
+        None => {
+            paint::ring(&mut p, |_| colour(ACTION), &[]);
+            let icon_name = if alert.icon.is_empty() { "mdi:bell-ring" } else { &alert.icon };
+            icon(&mut p, icon_name, "alert", HALF, 132.0, 80.0, ACTION);
+            let mut y = 222.0;
+            if !alert.title.is_empty() {
+                let title = paint::fit(&fonts.medium, 34.0, &alert.title, 0.0, 340.0);
+                paint::text(&mut p, &fonts.medium, 34.0, HALF, y, &title, 0.0, WHITE);
+                y += 44.0;
+            }
+            for text in wrap(&fonts.regular, 24.0, &alert.message, 330.0, 3) {
+                paint::text(&mut p, &fonts.regular, 24.0, HALF, y, &text, 0.0, [220, 223, 228]);
+                y += 32.0;
+            }
+            line(&mut p, fonts, 372.0, hint, GREY);
+        }
+    }
     p
 }
 

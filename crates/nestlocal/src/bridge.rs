@@ -19,8 +19,8 @@
 //!                                      understands (ui::PROTOCOL; retained)
 //!   <prefix>/<serial>/set/<command>    Home Assistant's commands; for the
 //!                                      home screen cards ui, art/<entity>,
-//!                                      screen_on (ON/OFF, retained) and
-//!                                      screen_wake
+//!                                      screen_on (ON/OFF, retained),
+//!                                      screen_wake and alert (notifications)
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
 

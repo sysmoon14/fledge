@@ -61,6 +61,16 @@ impl Beeper {
         Beeper(node(BEEPER).map_err(|e| crate::logf!("ui: {e}: no clicks")).ok())
     }
 
+    /// A notification's chime: two short rising notes.
+    pub fn chime(&mut self) {
+        let Some(file) = &mut self.0 else { return };
+        for (tone, ms) in [(1568, 90), (0, 40), (2093, 150)] {
+            let _ = file.write_all(&[encode(EV_SND, SND_TONE, tone), encode(0, 0, 0)].concat());
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+        let _ = file.write_all(&[encode(EV_SND, SND_TONE, 0), encode(0, 0, 0)].concat());
+    }
+
     pub fn click(&mut self) {
         let Some(file) = &mut self.0 else { return };
         let _ = file.write_all(&[encode(EV_SND, SND_TONE, 2000), encode(0, 0, 0)].concat());

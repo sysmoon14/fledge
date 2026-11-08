@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::model::{Card, Cards, Command, Wake};
+use super::model::{Alert, Card, Cards, Command, Wake};
 use crate::logf;
 
 /// Ring counts per step, by what a step moves: a card, a list row, a value.
@@ -26,6 +26,8 @@ const GESTURE: Duration = Duration::from_millis(400);
 const TURN_KEPT: Duration = Duration::from_millis(1500);
 /// Between cards, a turn that stops this long settles: on the next card if
 /// it went past halfway, else back where it was.
+/// How long a scene's card says it ran.
+pub const RAN_SHOWN: Duration = Duration::from_secs(2);
 /// A step of a light's warmth dial, in kelvin, and of its colour's, in degrees.
 pub const KELVIN_STEP: i32 = 50;
 pub const HUE_STEP: i32 = 4;
@@ -87,6 +89,8 @@ pub enum Mode {
     LightHue { slot: usize, light: usize, value: u16 },
     ClimateSet { slot: usize, target: f64 },
     Volume { slot: usize, value: u8 },
+    /// A notification over `back`, which shows again once it goes.
+    Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
     Menu { view: Box<Mode>, actions: Vec<Action>, selected: usize },
 }
@@ -139,6 +143,8 @@ pub enum Effect {
     KeepAwake,
     /// A press for nlclient, once it has its frame back.
     PressNlclient,
+    /// A notification's chime.
+    Chime,
     Send(Command),
 }
 
@@ -163,6 +169,12 @@ pub struct Machine {
     held: bool,
     /// Until when the display, just woken, may still be dark.
     lighting: Option<Instant>,
+    /// The notification showing, and until when.
+    pub alert: Option<Alert>,
+    alert_until: Option<Instant>,
+    /// A scene or script just run from its card, and when: its card says
+    /// so for a moment.
+    pub ran: Option<(usize, Instant)>,
     /// Whether the display was lit at the last tick: lighting by itself
     /// (someone coming near) wakes to the cards as a turn would.
     was_lit: Option<bool>,
@@ -173,7 +185,7 @@ impl Machine {
         Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
-            lighting: None, was_lit: None,
+            lighting: None, was_lit: None, alert: None, alert_until: None, ran: None,
         }
     }
 
@@ -289,6 +301,20 @@ impl Machine {
         self.last_input = now;
         match (&self.mode, input) {
             (Mode::Idle, _) => return,
+            // A notification: a press answers it, a long press puts it away.
+            (Mode::Alert { id, .. }, Input::Press) => {
+                let id = id.clone();
+                out.push(Effect::Click);
+                self.end_alert(Some(Command::AlertPressed(id)), out);
+                return;
+            }
+            (Mode::Alert { id, .. }, Input::LongPress) => {
+                let id = id.clone();
+                out.push(Effect::Click);
+                self.end_alert(Some(Command::AlertDismissed(id)), out);
+                return;
+            }
+            (Mode::Alert { .. }, _) => return,
             // The thermostat opened: nlclient has the ring; its menu's Back,
             // or a long press, brings the cards back.
             (Mode::Native, Input::LongPress) => {
@@ -384,8 +410,53 @@ impl Machine {
                 self.go(Mode::Chooser(0), out);
             }
             Wake::Thermostat => self.go(Mode::Native, out),
+            // A scene or a camera isn't opened: that would run it.
+            Wake::Card(slot) if matches!(self.card(slot), Some(Card::Action(_) | Card::Camera(_))) => {
+                self.go(Mode::Chooser(slot + 1), out);
+            }
             Wake::Card(slot) => self.open(slot + 1, out),
         }
+    }
+
+    /// A notification from Home Assistant: over whatever shows, the display
+    /// woken for it, with a chime; one already showing gives way to it.
+    pub fn show_alert(&mut self, alert: Alert, now: Instant, lit: bool, out: &mut Vec<Effect>) {
+        if self.mode == Mode::Idle {
+            return;
+        }
+        if alert.dismiss {
+            if matches!(&self.mode, Mode::Alert { id, .. } if *id == alert.id) {
+                self.end_alert(None, out);
+            }
+            return;
+        }
+        if !lit {
+            out.push(Effect::WakeDisplay);
+            self.lighting = Some(now + LIGHTING);
+        }
+        out.push(Effect::Chime);
+        let back = match self.mode.clone() {
+            Mode::Alert { back, .. } => back,
+            Mode::Native | Mode::Home => Box::new(Mode::Home),
+            mode => Box::new(mode),
+        };
+        self.alert_until = Some(now + Duration::from_secs_f64(alert.timeout.clamp(3.0, 3600.0)));
+        self.last_input = now;
+        let id = alert.id.clone();
+        self.alert = Some(alert);
+        self.go(Mode::Alert { id, back }, out);
+    }
+
+    /// The notification goes, saying why (`said`: pressed or dismissed; None
+    /// when Home Assistant took it back), and what it covered shows again.
+    fn end_alert(&mut self, said: Option<Command>, out: &mut Vec<Effect>) {
+        let Mode::Alert { back, .. } = self.mode.clone() else { return };
+        if let Some(command) = said {
+            out.push(Effect::Send(command));
+        }
+        self.alert = None;
+        self.alert_until = None;
+        self.go(*back, out);
     }
 
     fn turned(&mut self, steps: i32, out: &mut Vec<Effect>) {
@@ -452,7 +523,7 @@ impl Machine {
                 let selected = (selected as i32 + steps).clamp(0, actions.len() as i32 - 1) as usize;
                 self.mode = Mode::Menu { view, actions, selected };
             }
-            Mode::Idle | Mode::Native => {}
+            Mode::Idle | Mode::Native | Mode::Alert { .. } => {}
         }
         self.dirty = true;
     }
@@ -485,7 +556,19 @@ impl Machine {
                         Mode::ClimateSet { slot, target: card.target.unwrap_or((card.min + card.max) / 2.0) }
                     }
                     Some(Card::Media(card)) => Mode::Volume { slot, value: card.volume.unwrap_or(30) },
-                    None => return,
+                    // A scene, script or button runs; a camera takes a new
+                    // still. Both stay on the cards.
+                    Some(Card::Action(card)) => {
+                        out.push(Effect::Send(Command::Run(card.id.clone())));
+                        self.ran = Some((slot, self.last_input));
+                        self.dirty = true;
+                        return;
+                    }
+                    Some(Card::Camera(card)) => {
+                        out.push(Effect::Send(Command::Snapshot(card.id.clone())));
+                        return;
+                    }
+                    Some(Card::Unknown) | None => return,
                 };
                 self.go(mode, out);
             }
@@ -536,7 +619,7 @@ impl Machine {
             }
             Mode::ClimateSet { slot, .. } => self.go(Mode::Chooser(slot + 1), out),
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
-            Mode::Idle | Mode::Native => {}
+            Mode::Idle | Mode::Native | Mode::Alert { .. } => {}
         }
         self.dirty = true;
     }
@@ -666,6 +749,17 @@ impl Machine {
     /// awake under a card, sending what turning asked for. `home_dial` says
     /// whether nlclient shows its home dial (only asked for when it matters).
     pub fn tick(&mut self, now: Instant, lit: bool, home_dial: &mut dyn FnMut() -> bool, out: &mut Vec<Effect>) {
+        if let Mode::Alert { id, .. } = &self.mode {
+            let dark = !lit && !self.lighting.is_some_and(|until| now < until);
+            if dark || self.alert_until.is_some_and(|until| now >= until) {
+                let id = id.clone();
+                self.end_alert(Some(Command::AlertDismissed(id)), out);
+            }
+        }
+        if self.ran.is_some_and(|(_, at)| now.duration_since(at) >= RAN_SHOWN) {
+            self.ran = None;
+            self.dirty = true;
+        }
         let idle = now.duration_since(self.last_input);
         if self.was_lit.replace(lit) == Some(false) && lit && self.mode == Mode::Home {
             // Lit by itself, as someone came near: wake as a turn would.
@@ -951,6 +1045,64 @@ mod tests {
         let mut out = vec![];
         rig.machine.wake_up(rig.now, true, &mut out);
         assert!(out.is_empty() && rig.machine.mode == Mode::Chooser(1), "showing already: left as it is");
+    }
+
+    fn alert(id: &str, timeout: f64) -> Alert {
+        Alert { id: id.into(), title: "Front door".into(), timeout, ..Default::default() }
+    }
+
+    #[test]
+    fn a_notification_shows_over_anything_and_goes() {
+        let mut rig = Rig::new();
+        rig.lit = false;
+        let mut out = vec![];
+        rig.machine.show_alert(alert("door", 30.0), rig.now, false, &mut out);
+        assert_eq!(out, vec![Effect::WakeDisplay, Effect::Chime, Effect::Own(true)], "dark: woken, with a chime");
+        rig.lit = true;
+        rig.turn(CARD_STEP * 3);
+        assert!(matches!(rig.machine.mode, Mode::Alert { .. }), "turning doesn't move it");
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::AlertPressed("door".into())], "a press answers it");
+        assert_eq!(rig.machine.mode, Mode::Home, "and what was there shows again");
+
+        let mut rig = Rig::woken();
+        rig.turn(CARD_STEP);
+        rig.press();
+        let dimmer = rig.machine.mode.clone();
+        let mut out = vec![];
+        rig.machine.show_alert(alert("wash", 10.0), rig.now, true, &mut out);
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::AlertDismissed("wash".into())], "held: put away");
+        assert_eq!(rig.machine.mode, dimmer, "back to the dimmer it covered");
+
+        rig.machine.show_alert(alert("wash", 10.0), rig.now, true, &mut vec![]);
+        assert_eq!(Rig::sends(&rig.wait(Duration::from_secs(11))), vec![Command::AlertDismissed("wash".into())],
+                   "its time up");
+        rig.machine.show_alert(alert("door", 30.0), rig.now, true, &mut vec![]);
+        let mut gone = alert("door", 30.0);
+        gone.dismiss = true;
+        let mut out = vec![];
+        rig.machine.show_alert(gone, rig.now, true, &mut out);
+        assert!(Rig::sends(&out).is_empty() && rig.machine.mode == dimmer, "Home Assistant took it back");
+    }
+
+    #[test]
+    fn a_scene_runs_and_a_camera_takes_a_picture_from_their_cards() {
+        let mut rig = Rig::with(Cards::parse(br#"{"cards":[
+            {"kind":"action","id":"scene.goodnight","name":"Goodnight"},
+            {"kind":"camera","id":"camera.front_door","name":"Front door"},
+            {"kind":"doorbell_from_the_future","id":"x"}],"wake":0}"#).unwrap());
+        assert_eq!(rig.machine.cards.cards.len(), 2, "a kind it doesn't know is left out");
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "woken to a scene: shown, not run");
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Run("scene.goodnight".into())]);
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "it stays on the cards");
+        assert!(rig.machine.ran.is_some_and(|(slot, _)| slot == 0), "its card says so");
+        rig.wait(RAN_SHOWN);
+        assert_eq!(rig.machine.ran, None, "for a moment");
+        rig.turn(CARD_STEP);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Snapshot("camera.front_door".into())]);
+        assert_eq!(rig.machine.mode, Mode::Chooser(2));
     }
 
     #[test]

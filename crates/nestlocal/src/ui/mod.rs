@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 pub use model::Command;
 use machine::{Action, Effect, Input, Machine, Mode, Slot};
-use model::{Art, Card, Cards};
+use model::{Alert, Art, Card, Cards};
 use screens::Screen;
 
 use crate::logf;
@@ -39,7 +39,10 @@ use crate::logf;
 ///   2  a light's warmth and colour (kelvin, kelvins, hues, hue; the
 ///      color_temp and hue commands), a track's progress (position,
 ///      position_at, duration), screen_on and screen_wake
-pub const PROTOCOL: u32 = 2;
+///   3  action (scene, script, button) and camera cards (run, snapshot),
+///      notifications (<base>/set/alert; alert_pressed, alert_dismissed),
+///      pictures up to 480 wide
+pub const PROTOCOL: u32 = 3;
 
 #[derive(Default)]
 pub struct Ui {
@@ -51,6 +54,8 @@ pub struct Ui {
     /// how many times it asked to wake it (<base>/set/screen_wake).
     keep_on: std::sync::atomic::AtomicBool,
     wakes: std::sync::atomic::AtomicU64,
+    /// Home Assistant's latest notification (<base>/set/alert), counted.
+    alert: Mutex<(u64, Option<Alert>)>,
 }
 
 impl Ui {
@@ -100,11 +105,27 @@ impl Ui {
         let (generation, mut cards) = self.cards.lock().unwrap().clone();
         let art = self.art.lock().unwrap();
         for card in &mut cards.cards {
-            if let Card::Media(media) = card {
-                media.art = art.get(&media.id).cloned();
+            match card {
+                Card::Media(media) => media.art = art.get(&media.id).cloned(),
+                Card::Camera(camera) => camera.art = art.get(&camera.id).cloned(),
+                _ => {}
             }
         }
         (generation, cards)
+    }
+
+    /// Takes a notification (<base>/set/alert), or Home Assistant taking
+    /// one back.
+    pub fn set_alert(&self, payload: &[u8]) -> Result<(), String> {
+        let alert = Alert::parse(payload)?;
+        let mut held = self.alert.lock().unwrap();
+        *held = (held.0 + 1, Some(alert));
+        Ok(())
+    }
+
+    /// A picture by its key among the art (a notification's).
+    fn art(&self, key: &str) -> Option<Arc<Art>> {
+        self.art.lock().unwrap().get(key).cloned()
     }
 }
 
@@ -166,6 +187,9 @@ struct Runtime {
     /// display was last kept lit for it.
     wakes: u64,
     kept_on: Instant,
+    /// The notifications taken, and the scene last shown as run.
+    alerts: u64,
+    ran: Option<(usize, Instant)>,
     /// How big the cards show (1 full size, zoom::ZOOMED while moving).
     zoom: f32,
     /// A frame to compose zoomed cards in.
@@ -211,6 +235,7 @@ impl Runtime {
             generation: u64::MAX, saved: None, home: None, transition: Transition::Cut, view: None,
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             progress: Default::default(), progress_checked: Instant::now(), wakes: 0, kept_on: Instant::now(),
+            alerts: 0, ran: None,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, dial: None, last_dial: now - Duration::from_secs(60),
@@ -236,6 +261,11 @@ impl Runtime {
                 self.machine.set_cards(cards, &mut effects);
                 self.cards.clear();
                 self.shrunk.clear();
+                // A notification's picture may come after it.
+                let key = self.machine.alert.as_ref().and_then(|a| a.picture.clone());
+                if let (Some(alert), Some(key)) = (&mut self.machine.alert, key) {
+                    alert.art = self.ui.art(&key);
+                }
             }
             self.machine.set_active(self.nlclient, now, &mut effects);
             let lit = device::lit();
@@ -269,6 +299,23 @@ impl Runtime {
                     _ => continue,
                 };
                 self.machine.input(input, now, lit, &mut effects);
+            }
+            let (alerts, alert) = self.ui.alert.lock().unwrap().clone();
+            if alerts != self.alerts {
+                self.alerts = alerts;
+                if let Some(mut alert) = alert {
+                    alert.art = alert.picture.as_deref().and_then(|key| self.ui.art(key));
+                    logf!("ui: notification {}", alert.id);
+                    self.machine.show_alert(alert, now, lit, &mut effects);
+                }
+            }
+            if self.machine.ran != self.ran {
+                // A scene's card says it ran, then goes back.
+                for (slot, _) in [self.ran, self.machine.ran].into_iter().flatten() {
+                    self.cards.remove(&(slot + 1));
+                    self.shrunk.remove(&(slot + 1));
+                }
+                self.ran = self.machine.ran;
             }
             let wakes = self.ui.wakes.load(std::sync::atomic::Ordering::Relaxed);
             if wakes != self.wakes {
@@ -554,7 +601,9 @@ impl Runtime {
                 Some(Card::Lights(card)) => card.name.clone(),
                 Some(Card::Climate(card)) => card.name.clone(),
                 Some(Card::Media(card)) => card.name.clone(),
-                None => String::new(),
+                Some(Card::Action(card)) => card.name.clone(),
+                Some(Card::Camera(card)) => card.name.clone(),
+                Some(Card::Unknown) | None => String::new(),
             },
             None => String::new(),
         }
@@ -592,7 +641,11 @@ impl Runtime {
                 Some(Card::Lights(card)) => Screen::LightsCard { card },
                 Some(Card::Climate(card)) => Screen::ClimateCard { card, target: None },
                 Some(Card::Media(card)) => Screen::MediaCard { card, volume: None, progress: card.progress(unix_now()) },
-                None => return,
+                Some(Card::Action(card)) => {
+                    Screen::ActionCard { card, done: self.machine.ran.is_some_and(|(ran, _)| ran == slot) }
+                }
+                Some(Card::Camera(card)) => Screen::CameraCard { card },
+                Some(Card::Unknown) | None => return,
             },
             _ => Screen::SettingsCard,
         };
@@ -718,6 +771,11 @@ impl Runtime {
                     self.beeper.click();
                 }
             }
+            Effect::Chime => {
+                if self.sender.clicks() {
+                    self.beeper.chime();
+                }
+            }
             Effect::KeepAwake => crate::wake::keep_awake_for(30),
             Effect::PressNlclient => {
                 // Once nlclient has its frame back on the display.
@@ -777,6 +835,7 @@ impl Runtime {
                 Card::Media(card) => Screen::Volume { card, value: *value },
                 _ => return None,
             },
+            Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
             _ => return None,
         })
     }
@@ -952,7 +1011,7 @@ mod tests {
         assert_eq!(card.art.as_deref(), Some(&Art { size: 4, rgb: [10, 20, 30].repeat(16) }), "alpha dropped");
         ui.set_art("media_player.speaker", &png(4, png::ColorType::Rgba, &[10, 20, 30, 255])).unwrap();
         assert_eq!(ui.snapshot().0, after, "the same art: nothing to redraw");
-        assert!(ui.set_art("media_player.speaker", &png(300, png::ColorType::Rgb, &[0, 0, 0])).is_err(), "too big");
+        assert!(ui.set_art("media_player.speaker", &png(600, png::ColorType::Rgb, &[0, 0, 0])).is_err(), "too big");
         assert!(ui.set_art("media_player.speaker", b"not a png").is_err());
         ui.set_art("media_player.speaker", b"").unwrap();
         let (_, cards) = ui.snapshot();
@@ -1058,6 +1117,21 @@ mod shots {
         save(&menu, &format!("{out}/9-menu.png"));
         let lamp = model::LightsCard { name: "Reading Lamp".into(), icon: String::new(), lights: vec![lights.lights[0].clone()] };
         save(&screens::draw(&fonts, &Screen::LightsCard { card: &lamp }, None), &format!("{out}/1b-lamp.png"));
+        let scene = model::ActionCard { id: "scene.goodnight".into(), name: "Goodnight".into(), icon: "mdi:weather-night".into() };
+        save(&screens::draw(&fonts, &Screen::ActionCard { card: &scene, done: false }, None), &format!("{out}/a1-scene.png"));
+        save(&screens::draw(&fonts, &Screen::ActionCard { card: &scene, done: true }, None), &format!("{out}/a2-scene-done.png"));
+        let size = 480;
+        let still = Arc::new(Art { size, rgb: (0..size * size).flat_map(|i| {
+            let (x, y) = (i % size, i / size);
+            [(60 + x / 6) as u8, (70 + y / 5) as u8, (90 + (x + y) / 12) as u8]
+        }).collect() });
+        let camera = model::CameraCard { id: "camera.front_door".into(), name: "Front door".into(), icon: String::new(), art: Some(still.clone()) };
+        save(&screens::draw(&fonts, &Screen::CameraCard { card: &camera }, None), &format!("{out}/a3-camera.png"));
+        let note = model::Alert { id: "wash".into(), title: "Washing's done".into(),
+            message: "The washing machine finished at 21:40. Hang it out before bed.".into(), icon: "mdi:washing-machine".into(), ..Default::default() };
+        save(&screens::draw(&fonts, &Screen::Alert { alert: &note }, None), &format!("{out}/a4-alert.png"));
+        let ring = model::Alert { id: "door".into(), title: "Someone's at the front door".into(), art: Some(still), ..Default::default() };
+        save(&screens::draw(&fonts, &Screen::Alert { alert: &ring }, None), &format!("{out}/a5-doorbell.png"));
         let mut tunable = lights.lights[0].clone();
         (tunable.kelvin, tunable.kelvins, tunable.hues, tunable.hue) = (Some(2700), Some([2200, 6500]), true, Some(200));
         save(&screens::draw(&fonts, &Screen::LightWarmth { light: &tunable, value: 2700 }, None), &format!("{out}/9b-warmth.png"));

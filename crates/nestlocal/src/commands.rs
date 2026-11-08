@@ -100,6 +100,12 @@ impl Bridge {
             self.ui.keep_on(on);
             return;
         }
+        if name == "alert" {
+            if let Err(e) = self.ui.set_alert(payload) {
+                logf!("mqtt: alert: {e}");
+            }
+            return;
+        }
         if name == "screen_wake" {
             self.ui.wake();
             return;
