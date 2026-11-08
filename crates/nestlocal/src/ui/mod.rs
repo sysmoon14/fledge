@@ -209,9 +209,10 @@ struct Runtime {
     /// button went down, and since when the press has waited for its dial.
     back_chosen: bool,
     back_since: Option<Instant>,
-    /// In nlclient's Settings, opened from the cards: since when, whether
-    /// it has been away from its dial, and when that was last looked at.
-    settings: Option<(Instant, bool, Instant)>,
+    /// In nlclient's Settings, opened from the cards: since its last press
+    /// there (or since it opened), and when its dial was last looked for.
+    settings: Option<Instant>,
+    settings_checked: Instant,
     /// nlclient's dial as it last showed lit, and when: the thermostat's
     /// card when the display wakes, its own page dark until nlclient draws.
     dial: Option<device::Frame>,
@@ -241,7 +242,7 @@ impl Runtime {
             alerts: 0, ran: None,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
-            pressed: None, back_chosen: false, back_since: None, settings: None, dial: None, last_dial: now - Duration::from_secs(60),
+            pressed: None, back_chosen: false, back_since: None, settings: None, settings_checked: now, dial: None, last_dial: now - Duration::from_secs(60),
         }
     }
 
@@ -250,7 +251,8 @@ impl Runtime {
         hold_state(false);
         loop {
             // A frame each 8 ms while anything moves; otherwise input or time.
-            let wait = if self.animating() || self.pressed.is_some() || self.back_since.is_some() { 8 } else { 50 };
+            let settling = self.settings.is_some_and(|since| since.elapsed() < Duration::from_millis(1500));
+            let wait = if self.animating() || self.pressed.is_some() || self.back_since.is_some() || settling { 8 } else { 50 };
             let events = self.input.wait(Duration::from_millis(wait));
             let now = Instant::now();
             let mut effects = Vec::new();
@@ -293,6 +295,10 @@ impl Runtime {
                         Some((_, false, was_lit)) => {
                             if self.machine.mode == Mode::Native && std::mem::take(&mut self.back_chosen) {
                                 self.back_since = Some(now);
+                            } else if self.machine.mode == Mode::Native && self.settings.is_some() {
+                                // A press in nlclient's Settings: if it was its
+                                // Done, the dial shows next.
+                                self.settings = Some(now);
                             }
                             self.machine.input(Input::Press, now, was_lit, &mut effects);
                             continue;
@@ -338,19 +344,23 @@ impl Runtime {
                     self.machine.input(Input::LongPress, now, was_lit, &mut effects);
                 }
             }
-            if let Some((since, away, checked)) = self.settings {
-                // In nlclient's Settings: once it's back on its dial (Done),
-                // the cards. Looked at four times a second.
-                if self.machine.mode != Mode::Native || now.duration_since(since) > Duration::from_secs(900) {
+            if let Some(since) = self.settings {
+                // In nlclient's Settings opened from the cards: a press there
+                // followed by its dial was Done, and brings the cards.
+                if self.machine.mode != Mode::Native {
                     self.settings = None;
                     self.machine.settings_open = false;
-                } else if now.duration_since(checked) >= Duration::from_millis(250) {
-                    let home = home_dial(&mut self.display);
-                    if home && away {
-                        self.settings = None;
-                        self.machine.input(Input::SettingsDone, now, lit, &mut effects);
-                    } else {
-                        self.settings = Some((since, away || !home, now));
+                } else {
+                    let waited = now.duration_since(since);
+                    if waited > Duration::from_millis(250) && waited < Duration::from_millis(1500)
+                        && now.duration_since(self.settings_checked) >= Duration::from_millis(100) {
+                        self.settings_checked = now;
+                        let page = self.display.save();
+                        // Its dial, not a tile of its Settings (which looks it).
+                        if dial(&page) && !settings_tile(&page) {
+                            self.settings = None;
+                            self.machine.input(Input::SettingsDone, now, lit, &mut effects);
+                        }
                     }
                 }
             }
@@ -810,12 +820,15 @@ impl Runtime {
                     }
                     std::thread::sleep(Duration::from_millis(40));
                 }
-                // Settings is the next item anticlockwise (counts up).
+                // Once the menu has finished opening (it takes no turn while
+                // it animates), Settings is the next item anticlockwise.
+                std::thread::sleep(Duration::from_millis(600));
                 self.input.hand_turn(40, 13);
                 std::thread::sleep(Duration::from_millis(450));
                 if settings_chosen(&self.display.save()) {
                     self.input.press();
-                    self.settings = Some((Instant::now(), false, Instant::now()));
+                    // Its opening press is long past by its first look.
+                    self.settings = Some(Instant::now() - Duration::from_secs(10));
                     logf!("ui: nlclient's Settings");
                 } else {
                     logf!("ui: nlclient's menu didn't show Settings: left at the menu");
@@ -1081,6 +1094,38 @@ fn hold_state(hold: bool) {
 /// Whether nlclient shows its home dial: its ring lit around the edge.
 fn home_dial(display: &mut device::Display) -> bool {
     dial(&display.save())
+}
+
+/// Whether a frame is a tile of nlclient's Settings: a blue disc in the
+/// middle, black near the edge above and below it (a cooling dial is blue
+/// all over).
+fn settings_tile(page: &[u8]) -> bool {
+    let stride = page.len() / 480;
+    let blue = |x: f32, y: f32| {
+        let (x, y) = (x.round() as usize, y.round() as usize);
+        let at = x * stride + (479 - y) * 4;
+        let (b, r) = (page[at] as i32, page[at + 2] as i32);
+        b > 150 && b > r + 80
+    };
+    let (mut middle, mut middle_blue) = (0, 0);
+    for r in (0..70).step_by(6) {
+        for i in 0..24 {
+            let a = i as f32 * std::f32::consts::PI / 12.0;
+            middle += 1;
+            middle_blue += blue(240.0 + r as f32 * a.cos(), 240.0 + r as f32 * a.sin()) as u32;
+        }
+    }
+    let (mut edge, mut edge_blue) = (0, 0);
+    for r in (175..196).step_by(5) {
+        for d in (-30..=30).step_by(6) {
+            let a = (d as f32).to_radians();
+            for side in [1.0, -1.0] {
+                edge += 1;
+                edge_blue += blue(240.0 + r as f32 * a.sin(), 240.0 - r as f32 * a.cos() * side) as u32;
+            }
+        }
+    }
+    middle_blue * 2 > middle && edge_blue * 5 < edge
 }
 
 /// Whether nlclient's menu shows with Back chosen: its arrow, lower left,

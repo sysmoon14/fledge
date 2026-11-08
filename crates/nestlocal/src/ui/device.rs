@@ -415,12 +415,12 @@ impl Input {
     }
 
     /// A turn of the ring for nlclient, as a hand makes one: `reports`
-    /// reports of `raw` counts, 15 ms apart (its menus take no other).
+    /// reports of `raw` counts, 25 ms apart (its menus take no other).
     pub fn hand_turn(&mut self, raw: i32, reports: usize) {
         let report: Vec<u8> = [encode(EV_REL, REL_DIAL, raw), encode(0, 0, 0)].concat();
         for _ in 0..reports {
             self.send(true, &report);
-            std::thread::sleep(Duration::from_millis(15));
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 
