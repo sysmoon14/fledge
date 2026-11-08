@@ -66,6 +66,7 @@ pub fn for_panel() {
 /// turned a quarter anticlockwise in BGRX, as the panel shows the
 /// framebuffer turned a quarter clockwise. Otherwise (previews) it holds
 /// the picture upright in RGBA.
+#[derive(Clone)]
 pub struct Canvas {
     pub pixmap: Pixmap,
     panel: bool,
@@ -89,6 +90,29 @@ impl Canvas {
     /// The byte of upright pixel (x, y), which must be on the canvas.
     fn at(&self, x: u32, y: u32) -> usize {
         4 * if self.panel { x * SIZE + (SIZE - 1 - y) } else { y * SIZE + x } as usize
+    }
+
+    /// Puts back the upright rectangle (x, y, w, h) from `still`.
+    fn restore(&mut self, still: &Canvas, x: i32, y: i32, w: usize, h: usize) {
+        let (x0, y0) = (x.max(0) as u32, y.max(0) as u32);
+        let (x1, y1) = ((x + w as i32).clamp(0, SIZE as i32) as u32, (y + h as i32).clamp(0, SIZE as i32) as u32);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let from = still.pixmap.data();
+        let to = self.pixmap.data_mut();
+        if self.panel {
+            // An upright column is a framebuffer row.
+            for column in x0..x1 {
+                let (a, b) = (4 * (column * SIZE + (SIZE - y1)) as usize, 4 * (column * SIZE + (SIZE - y0)) as usize);
+                to[a..b].copy_from_slice(&from[a..b]);
+            }
+        } else {
+            for row in y0..y1 {
+                let (a, b) = (4 * (row * SIZE + x0) as usize, 4 * (row * SIZE + x1) as usize);
+                to[a..b].copy_from_slice(&from[a..b]);
+            }
+        }
     }
 
     fn fill_path(&mut self, path: &tiny_skia::Path, c: Color) {
@@ -157,6 +181,92 @@ pub fn ring(canvas: &mut Canvas, of: impl Fn(usize) -> Color, marks: &[usize]) {
     }
 }
 
+/// A value screen kept between frames, so a frame redraws only what
+/// changed: ticks whose colour changed, and the number when it changed,
+/// over the screen's still part.
+pub struct Live {
+    still: Canvas,
+    drawn: [[u16; 4]; TICKS],
+    marked: [bool; TICKS],
+    fresh: bool,
+    number: String,
+    /// The old number's glyphs, (x, y, width, height), upright.
+    glyphs: Vec<(i32, i32, usize, usize)>,
+    /// The upright columns (the panel's rows) this frame changed.
+    pub columns: Option<(u32, u32)>,
+}
+
+impl Live {
+    pub fn new(still: &Canvas) -> Live {
+        Live { still: still.clone(), drawn: [[0; 4]; TICKS], marked: [false; TICKS], fresh: true,
+               number: String::new(), glyphs: Vec::new(), columns: None }
+    }
+
+    fn changed(&mut self, from: u32, to: u32) {
+        let (a, b) = self.columns.unwrap_or((from, to));
+        self.columns = Some((a.min(from), b.max(to)));
+    }
+}
+
+/// The ring as ring() draws it, on a Live screen: only ticks that changed.
+pub fn ring_live(canvas: &mut Canvas, live: &mut Live, of: impl Fn(usize) -> Color, marks: &[usize]) {
+    let panel = canvas.panel;
+    for tick in 0..TICKS {
+        let marked = marks.contains(&tick);
+        let u = canvas.colour(if marked { colour(WHITE) } else { of(tick) }).to_color_u8();
+        let colour = [u.red() as u16, u.green() as u16, u.blue() as u16, u.alpha() as u16];
+        if !live.fresh && live.drawn[tick] == colour && live.marked[tick] == marked {
+            continue;
+        }
+        (live.drawn[tick], live.marked[tick]) = (colour, marked);
+        let [r, g, b, a] = colour;
+        let still = live.still.pixmap.data();
+        let data = canvas.pixmap.data_mut();
+        let (mut low, mut high) = (u32::MAX, 0);
+        for p in tick_pixels(tick) {
+            let at = 4 * if panel { p.panel } else { p.upright } as usize;
+            let cover = if marked { p.long } else { p.short } as u16 * a / 255;
+            let blend = |d: u8, s: u16| ((s * cover + d as u16 * (255 - cover)) / 255) as u8;
+            data[at] = blend(still[at], r);
+            data[at + 1] = blend(still[at + 1], g);
+            data[at + 2] = blend(still[at + 2], b);
+            let column = p.upright % SIZE;
+            (low, high) = (low.min(column), high.max(column));
+        }
+        if low <= high {
+            live.changed(low, high);
+        }
+    }
+}
+
+/// Draws `text` as text_at does on a Live screen, the same text again
+/// drawing nothing: the old text's glyphs go back to the still part first.
+#[allow(clippy::too_many_arguments)]
+pub fn number_live(canvas: &mut Canvas, live: &mut Live, parts: &[(&FontArc, f32, f32, f32, &str, f32)], c: [u8; 3]) {
+    let key = parts.iter().map(|(_, size, x, y, text, _)| format!("{size}/{x}/{y}/{text}")).collect::<Vec<_>>().join("|");
+    if !live.fresh && key == live.number {
+        return;
+    }
+    for (x, y, w, h) in std::mem::take(&mut live.glyphs) {
+        canvas.restore(&live.still, x, y, w, h);
+        live.changed(x.max(0) as u32, (x + w as i32).clamp(0, SIZE as i32) as u32);
+    }
+    for &(font, size, x, y, text, spacing) in parts {
+        let mut glyphs = Vec::new();
+        text_with(canvas, font, size, x, y, text, spacing, c, 1.0, &mut glyphs);
+        for &(gx, _, gw, _) in &glyphs {
+            live.changed(gx.max(0) as u32, (gx + gw as i32).clamp(0, SIZE as i32) as u32);
+        }
+        live.glyphs.extend(glyphs);
+    }
+    live.number = key;
+}
+
+/// Marks a Live screen drawn: from now on only what changes is.
+pub fn settle(live: &mut Live) {
+    live.fresh = false;
+}
+
 struct RingPixel {
     /// The pixel in each layout (Canvas).
     upright: u32,
@@ -169,8 +279,33 @@ struct RingPixel {
 }
 
 fn ring_pixels() -> &'static [RingPixel] {
-    static PIXELS: std::sync::OnceLock<Vec<RingPixel>> = std::sync::OnceLock::new();
-    PIXELS.get_or_init(|| {
+    &ring_geometry().0
+}
+
+/// Each tick's pixels in ring_pixels.
+fn tick_pixels(tick: usize) -> &'static [RingPixel] {
+    let (pixels, starts) = ring_geometry();
+    &pixels[starts[tick]..starts[tick + 1]]
+}
+
+fn ring_geometry() -> &'static (Vec<RingPixel>, Vec<usize>) {
+    static GEOMETRY: std::sync::OnceLock<(Vec<RingPixel>, Vec<usize>)> = std::sync::OnceLock::new();
+    GEOMETRY.get_or_init(|| {
+        let mut pixels = ring_pixels_unsorted();
+        pixels.sort_by_key(|p| p.tick);
+        let mut starts = vec![0; TICKS + 1];
+        for p in &pixels {
+            starts[p.tick as usize + 1] += 1;
+        }
+        for i in 0..TICKS {
+            starts[i + 1] += starts[i];
+        }
+        (pixels, starts)
+    })
+}
+
+fn ring_pixels_unsorted() -> Vec<RingPixel> {
+    {
         let mut pixels = Vec::new();
         let (inner, outer) = (RING - MARK - 1.0, RING + 1.0);
         let cover = |distance: f32, radius: f32, half: f32, length: f32| {
@@ -199,7 +334,7 @@ fn ring_pixels() -> &'static [RingPixel] {
             }
         }
         pixels
-    })
+    }
 }
 
 /// The tick that shows `fraction` (0..1) of the ring.
@@ -323,6 +458,13 @@ fn blend_mask(canvas: &mut Canvas, x: i32, y: i32, width: usize, mask: &[u8], c:
 #[allow(clippy::too_many_arguments)] // a drawing primitive: where, what, how
 pub fn text_at(canvas: &mut Canvas, font: &FontArc, size: f32, x: f32, y: f32, text: &str, spacing: f32,
                c: [u8; 3], opacity: f32) -> f32 {
+    text_with(canvas, font, size, x, y, text, spacing, c, opacity, &mut Vec::new())
+}
+
+/// text_at, noting each glyph's rectangle (x, y, width, height).
+#[allow(clippy::too_many_arguments)]
+fn text_with(canvas: &mut Canvas, font: &FontArc, size: f32, x: f32, y: f32, text: &str, spacing: f32,
+             c: [u8; 3], opacity: f32, glyphs: &mut Vec<(i32, i32, usize, usize)>) -> f32 {
     let scaled = font.as_scaled(PxScale::from(size));
     let mut x = x;
     let mut previous = None;
@@ -335,7 +477,11 @@ pub fn text_at(canvas: &mut Canvas, font: &FontArc, size: f32, x: f32, y: f32, t
         let whole = x.floor();
         let quarter = ((x - whole) * 4.0) as u8;
         let g = glyph(font, id, size, quarter);
-        blend_mask(canvas, whole as i32 + g.left, baseline + g.top, g.width, &g.coverage, c, opacity);
+        let (gx, gy) = (whole as i32 + g.left, baseline + g.top);
+        blend_mask(canvas, gx, gy, g.width, &g.coverage, c, opacity);
+        if g.width > 0 {
+            glyphs.push((gx, gy, g.width, g.coverage.len() / g.width));
+        }
         x += scaled.h_advance(id);
         previous = Some(id);
     }
@@ -454,5 +600,26 @@ mod tests {
         // tiny-skia samples edges finer along one axis than the other.
         assert!(worst <= 16, "differs by up to {worst} (antialiasing of turned paths)");
         assert_eq!(&p[panel.at(0, 0)..panel.at(0, 0) + 3], &[30, 20, 10]);
+    }
+
+    /// A Live ring drawn through a sweep ends as a ring drawn whole.
+    #[test]
+    fn a_live_ring_ends_as_a_whole_one() {
+        let lit = |top: usize| move |i: usize| if i <= top { colour([255, 169, 87]) } else { colour(DIM) };
+        for panel in [false, true] {
+            let still = canvas_for(BLACK, panel);
+            let (mut canvas, mut live) = (still.clone(), Live::new(&still));
+            for top in [40, 41, 45, 90, 60, 61] {
+                live.columns = None;
+                ring_live(&mut canvas, &mut live, lit(top), &[top]);
+                settle(&mut live);
+            }
+            let mut whole = still.clone();
+            ring(&mut whole, lit(61), &[61]);
+            assert!(canvas.pixmap.data() == whole.pixmap.data(), "panel {panel}");
+            live.columns = None;
+            ring_live(&mut canvas, &mut live, lit(61), &[61]);
+            assert_eq!(live.columns, None, "nothing changed, nothing drawn");
+        }
     }
 }

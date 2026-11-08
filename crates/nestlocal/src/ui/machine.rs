@@ -17,6 +17,9 @@ pub const CLIMATE_STEP: i32 = 90;
 /// towards the next step.
 const GESTURE: Duration = Duration::from_millis(400);
 const TURN_KEPT: Duration = Duration::from_millis(1500);
+/// Between cards, a turn that stops this long settles: on the next card if
+/// it went past halfway, else back where it was.
+pub const SNAP: Duration = Duration::from_millis(250);
 /// How long each view waits, untouched, before going back a level.
 pub const CONTROL_IDLE: Duration = Duration::from_secs(8);
 pub const LIST_IDLE: Duration = Duration::from_secs(12);
@@ -99,13 +102,16 @@ pub struct Machine {
     movement: i32,
     pending: Option<Command>,
     last_sent: Instant,
+    /// What was last said of the display and the ring (Effect::Own, Hold).
+    owned: bool,
+    held: bool,
 }
 
 impl Machine {
     pub fn new(now: Instant) -> Machine {
         Machine {
             mode: Mode::Idle, cards: Cards::default(), dirty: false, last_input: now, last_keep: None,
-            turn: 0, movement: 0, pending: None, last_sent: now,
+            turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
         }
     }
 
@@ -161,28 +167,54 @@ impl Machine {
         self.cards.cards.get(slot)
     }
 
-    /// Moves to `mode`, handing the display and the ring over as it needs.
+    /// Whether the UI shows on the display: its own screens, and the cards
+    /// while a turn from the thermostat is under way.
+    pub fn owns(&self) -> bool {
+        self.mode.owning() || (self.mode == Mode::Home && self.turn != 0)
+    }
+
+    /// Where the cards are as the ring turns: the card's place in the deck,
+    /// plus how far the turn has gone towards the next (-1..1). None off
+    /// the cards.
+    pub fn position(&self) -> Option<f32> {
+        let partial = self.turn as f32 / CARD_STEP as f32;
+        match self.mode {
+            Mode::Home => Some(partial),
+            Mode::Card(index) => Some(index as f32 + partial),
+            _ => None,
+        }
+    }
+
+    /// Moves to `mode`.
     fn go(&mut self, mode: Mode, out: &mut Vec<Effect>) {
-        let (was, will) = (self.mode.owning(), mode.owning());
-        let (held, hold) = (self.mode.holding(), mode.holding());
-        if will != was || hold != held {
-            logf!("ui: {} the ring, {} the display", if hold { "holds" } else { "leaves nlclient" },
-                  if will { "owns" } else { "nlclient has" });
-        }
-        if will != was {
-            out.push(Effect::Own(will));
-        }
-        if hold != held {
-            out.push(Effect::Hold(hold));
-        }
-        if will && !was {
-            self.last_keep = None;
-        }
         if let Some(command) = self.pending.take() {
             out.push(Effect::Send(command));
         }
+        if !matches!(mode, Mode::Home | Mode::Card(_)) {
+            self.turn = 0;
+        }
         self.mode = mode;
         self.dirty = true;
+        self.sync(out);
+    }
+
+    /// Hands the display and the ring over as what the UI shows now needs.
+    fn sync(&mut self, out: &mut Vec<Effect>) {
+        let (own, hold) = (self.owns(), self.mode.holding());
+        if own != self.owned || hold != self.held {
+            logf!("ui: {} the ring, {} the display", if hold { "holds" } else { "leaves nlclient" },
+                  if own { "owns" } else { "nlclient has" });
+        }
+        if own != self.owned {
+            out.push(Effect::Own(own));
+            if own {
+                self.last_keep = None;
+            }
+        }
+        if hold != self.held {
+            out.push(Effect::Hold(hold));
+        }
+        (self.owned, self.held) = (own, hold);
     }
 
     pub fn input(&mut self, input: Input, now: Instant, lit: bool, out: &mut Vec<Effect>) {
@@ -205,8 +237,11 @@ impl Machine {
                     logf!("ui: turned {} counts", self.movement);
                     self.movement = 0;
                 }
-                // A slow turn keeps what it has, until it stops or reverses.
-                if pause > TURN_KEPT || (self.turn != 0 && value.signum() != self.turn.signum()) {
+                // A slow turn keeps what it has, until it stops or reverses;
+                // between cards, which follow the hand, it runs on both ways.
+                let cards = matches!(self.mode, Mode::Home | Mode::Card(_));
+                let reversed = self.turn != 0 && value.signum() != self.turn.signum();
+                if pause > TURN_KEPT || (reversed && !cards) {
                     self.turn = 0;
                 }
                 self.turn += value;
@@ -222,6 +257,8 @@ impl Machine {
                     self.turn -= steps * step;
                     self.turned(steps, out);
                 }
+                self.dirty = true;
+                self.sync(out);
             }
         }
     }
@@ -341,6 +378,15 @@ impl Machine {
     /// whether nlclient shows its home dial (only asked for when it matters).
     pub fn tick(&mut self, now: Instant, lit: bool, home_dial: &mut dyn FnMut() -> bool, out: &mut Vec<Effect>) {
         let idle = now.duration_since(self.last_input);
+        if matches!(self.mode, Mode::Home | Mode::Card(_)) && self.turn != 0 && idle >= SNAP {
+            let (past_half, sign) = (self.turn.abs() * 2 >= CARD_STEP, self.turn.signum());
+            self.turn = 0;
+            if past_half {
+                self.turned(sign, out);
+            }
+            self.dirty = true;
+            self.sync(out);
+        }
         match self.mode.clone() {
             Mode::Native => {
                 // Back to the cards once nlclient is home: dark, or its dial.
@@ -503,18 +549,20 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_turn_adds_up_and_a_reversal_starts_again() {
+    fn cards_follow_a_turn_and_settle_on_the_nearest() {
         let mut rig = Rig::new();
-        for _ in 0..4 {
-            rig.turn(CARD_STEP / 5);
-            rig.wait(Duration::from_millis(600));
-        }
-        assert_eq!(rig.machine.mode, Mode::Home);
+        assert_eq!(rig.turn(CARD_STEP / 5), vec![Effect::Own(true)], "a turn shows the cards at once");
+        assert_eq!(rig.machine.position(), Some(0.2));
+        assert_eq!(rig.wait(SNAP * 2), vec![Effect::Own(false)], "short of halfway: back to the thermostat");
+        assert_eq!((rig.machine.mode.clone(), rig.machine.position()), (Mode::Home, Some(0.0)));
+        rig.turn(CARD_STEP * 3 / 5);
+        rig.wait(SNAP * 2);
+        assert_eq!(rig.machine.mode, Mode::Card(1), "past halfway: on to the next card");
+        assert_eq!(rig.machine.position(), Some(1.0));
+        rig.turn(-CARD_STEP * 2 / 5);
+        assert!((rig.machine.position().unwrap() - 0.6).abs() < 1e-6, "backwards, towards the thermostat");
         rig.turn(CARD_STEP / 5);
-        assert_eq!(rig.machine.mode, Mode::Card(1), "pauses under 1.5 s keep the turn");
-        rig.turn(CARD_STEP * 4 / 5);
-        rig.turn(-CARD_STEP * 4 / 5);
-        assert_eq!(rig.machine.mode, Mode::Card(1), "a reversal drops what was turned");
+        assert!((rig.machine.position().unwrap() - 0.8).abs() < 1e-6, "and back again, smoothly");
     }
 
     #[test]

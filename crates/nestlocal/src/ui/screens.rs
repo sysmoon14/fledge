@@ -32,13 +32,56 @@ const HALF: f32 = 240.0;
 pub fn draw(fonts: &Fonts, screen: &Screen, at: Position, sweep: Option<f32>) -> Canvas {
     match screen {
         Screen::LightsCard { card } => lights_card(fonts, card, at),
-        Screen::ClimateCard { card, target } => climate(fonts, card, target.or(card.target), Some(at), false, None),
+        Screen::ClimateCard { card, target } => {
+            let target = target.or(card.target);
+            let mut p = climate_still(fonts, card, target, Some(at), false);
+            climate_moving(&mut p, None, fonts, card, target, None);
+            p
+        }
         Screen::MediaCard { card, volume } => media_card(fonts, card, volume.or(card.volume), at),
         Screen::SettingsCard => settings_card(fonts, at),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
-        Screen::LightDim { light, on, value } => light_dim(fonts, light, *on, *value, sweep),
-        Screen::ClimateSet { card, target } => climate(fonts, card, Some(*target), None, true, sweep),
-        Screen::Volume { card, value } => volume(fonts, card, *value, sweep),
+        _ => {
+            let mut p = still(fonts, screen, at);
+            moving(&mut p, fonts, screen, sweep, None);
+            p
+        }
+    }
+}
+
+/// A screen with a value on its ring, without the ring and the value: what
+/// stays put while the ring turns, so a frame only draws what moves. Any
+/// other screen whole.
+pub fn still(fonts: &Fonts, screen: &Screen, at: Position) -> Canvas {
+    match screen {
+        Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on),
+        Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), None, true),
+        Screen::Volume { card, .. } => volume_still(fonts, card),
+        _ => draw(fonts, screen, at, None),
+    }
+}
+
+/// What still() left out: the ring, `sweep` of the way round, and the value.
+/// On a Live screen (`live`), only what changed since its last frame.
+pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>, mut live: Option<&mut paint::Live>) {
+    match screen {
+        Screen::LightDim { light, on, value } => light_dim_moving(p, live.as_deref_mut(), fonts, light, *on, *value, sweep),
+        Screen::ClimateSet { card, target } => climate_moving(p, live.as_deref_mut(), fonts, card, Some(*target), sweep),
+        Screen::Volume { value, .. } => volume_moving(p, live.as_deref_mut(), fonts, *value, sweep),
+        _ => {}
+    }
+    if let Some(live) = live {
+        paint::settle(live);
+    }
+}
+
+/// What still() draws a screen from, to know when it can be kept.
+pub fn still_key(screen: &Screen) -> Option<String> {
+    match screen {
+        Screen::LightDim { light, on, .. } => Some(format!("dim {light:?} {on}")),
+        Screen::ClimateSet { card, .. } => Some(format!("set {card:?}")),
+        Screen::Volume { card, .. } => Some(format!("volume {card:?}")),
+        _ => None,
     }
 }
 
@@ -54,7 +97,10 @@ fn line(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
 
 /// A large number as the Nest's dial shows a temperature: 21, or 21 with a
 /// small raised 5 for the half.
-fn big_number(pixmap: &mut Canvas, fonts: &Fonts, value: f64, half: bool, unit: &str, c: [u8; 3]) {
+/// big_number, on a Live screen when there is one.
+#[allow(clippy::too_many_arguments)]
+fn big_number_on(pixmap: &mut Canvas, live: Option<&mut paint::Live>, fonts: &Fonts, value: f64, half: bool, unit: &str,
+                 c: [u8; 3]) {
     let size = 168.0;
     let whole = if half { value.floor() as i64 } else { value.round() as i64 };
     let digits = whole.to_string();
@@ -62,10 +108,27 @@ fn big_number(pixmap: &mut Canvas, fonts: &Fonts, value: f64, half: bool, unit: 
     let width = paint::measure(&fonts.regular, size, &digits, -4.0);
     let small_width = if small.is_empty() { 0.0 } else { paint::measure(&fonts.regular, 52.0, small, 0.0) + 6.0 };
     let x = HALF - (width + small_width) / 2.0;
-    let end = paint::text_at(pixmap, &fonts.regular, size, x, 318.0, &digits, -4.0, c, 1.0);
+    // Top-aligned with the digits, as the Nest's dial sets its half degree.
+    let small_x = x + width + 4.0;
+    let mut parts = vec![(&fonts.regular, size, x, 318.0, digits.as_str(), -4.0)];
     if !small.is_empty() {
-        // Top-aligned with the digits, as the Nest's dial sets its half degree.
-        paint::text_at(pixmap, &fonts.regular, 52.0, end + 4.0, 236.0, small, 0.0, c, 1.0);
+        parts.push((&fonts.regular, 52.0, small_x, 236.0, small, 0.0));
+    }
+    match live {
+        Some(live) => paint::number_live(pixmap, live, &parts, c),
+        None => {
+            for (font, size, x, y, text, spacing) in parts {
+                paint::text_at(pixmap, font, size, x, y, text, spacing, c, 1.0);
+            }
+        }
+    }
+}
+
+/// paint::ring, on a Live screen when there is one.
+fn ring_on(p: &mut Canvas, live: Option<&mut paint::Live>, of: impl Fn(usize) -> tiny_skia::Color, marks: &[usize]) {
+    match live {
+        Some(live) => paint::ring_live(p, live, of, marks),
+        None => paint::ring(p, of, marks),
     }
 }
 
@@ -118,25 +181,21 @@ fn lights_card(fonts: &Fonts, card: &LightsCard, at: Position) -> Canvas {
     p
 }
 
-fn climate(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Option<Position>, setting: bool,
-           sweep: Option<f32>) -> Canvas {
-    let (background, active) = match card.action.as_str() {
+fn climate_colours(card: &ClimateCard) -> ([u8; 3], bool) {
+    match card.action.as_str() {
         "heating" | "preheating" => (HEAT, true),
         "cooling" => (COOL, true),
         _ => (BLACK, false),
-    };
+    }
+}
+
+fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Option<Position>, setting: bool) -> Canvas {
+    let (background, active) = climate_colours(card);
     let mut p = paint::canvas(background);
-    let fraction = |t: f64| ((t - card.min) / (card.max - card.min).max(0.5)) as f32;
-    let marks: Vec<usize> = target.map(|t| vec![paint::tick_at(sweep.unwrap_or(fraction(t)))]).unwrap_or_default();
-    let now = card.current.map(|t| paint::tick_at(fraction(t)));
-    paint::ring(&mut p, |i| {
-        if Some(i) == now { alpha(WHITE, 0.9) } else if active { alpha(WHITE, 0.4) } else { colour(DIM) }
-    }, &marks);
     let text_colour = if active { WHITE } else { GREY };
     label(&mut p, fonts, 150.0, &card.name, text_colour);
-    match target {
-        Some(t) if card.mode != "off" => big_number(&mut p, fonts, t, card.step < 1.0, "", WHITE),
-        _ => paint::text(&mut p, &fonts.regular, 96.0, HALF, 300.0, "OFF", 0.0, WHITE),
+    if target.is_none() || card.mode == "off" {
+        paint::text(&mut p, &fonts.regular, 96.0, HALF, 300.0, "OFF", 0.0, WHITE);
     }
     let bottom = if setting {
         "Press when done".to_owned()
@@ -153,6 +212,20 @@ fn climate(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Option<Po
         paint::dots(&mut p, at.count, at.index, WHITE);
     }
     p
+}
+
+fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, card: &ClimateCard,
+                  target: Option<f64>, sweep: Option<f32>) {
+    let (_, active) = climate_colours(card);
+    let fraction = |t: f64| ((t - card.min) / (card.max - card.min).max(0.5)) as f32;
+    let marks: Vec<usize> = target.map(|t| vec![paint::tick_at(sweep.unwrap_or(fraction(t)))]).unwrap_or_default();
+    let now = card.current.map(|t| paint::tick_at(fraction(t)));
+    ring_on(p, live.as_deref_mut(), |i| {
+        if Some(i) == now { alpha(WHITE, 0.9) } else if active { alpha(WHITE, 0.4) } else { colour(DIM) }
+    }, &marks);
+    if let Some(t) = target.filter(|_| card.mode != "off") {
+        big_number_on(p, live, fonts, t, card.step < 1.0, "", WHITE);
+    }
 }
 
 fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, at: Position) -> Canvas {
@@ -224,31 +297,42 @@ fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Canvas {
     p
 }
 
-fn light_dim(fonts: &Fonts, light: &Light, on: bool, value: u8, sweep: Option<f32>) -> Canvas {
+fn light_dim_still(fonts: &Fonts, light: &Light, on: bool) -> Canvas {
     let mut p = paint::canvas(BLACK);
     let accent = if on { light.colour() } else { GREY };
-    let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
-    paint::ring(&mut p, |i| if on && i <= top { colour(accent) } else { colour(DIM) }, &if on { vec![top] } else { vec![] });
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, accent);
     label(&mut p, fonts, 150.0, &light.name, accent);
-    if on {
-        big_number(&mut p, fonts, value as f64, false, "%", WHITE);
-    } else {
+    if !on {
         paint::text(&mut p, &fonts.regular, 96.0, HALF, 300.0, "Off", 0.0, WHITE);
     }
     line(&mut p, fonts, 366.0, if on { "Press to turn off" } else { "Press to turn on" }, GREY);
     p
 }
 
-fn volume(fonts: &Fonts, card: &MediaCard, value: u8, sweep: Option<f32>) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+#[allow(clippy::too_many_arguments)]
+fn light_dim_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, light: &Light, on: bool,
+                    value: u8, sweep: Option<f32>) {
+    let accent = if on { light.colour() } else { GREY };
     let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
-    paint::ring(&mut p, |i| if i <= top { colour(MEDIA) } else { colour(DIM) }, &[top]);
+    ring_on(p, live.as_deref_mut(), |i| if on && i <= top { colour(accent) } else { colour(DIM) },
+            &if on { vec![top] } else { vec![] });
+    if on {
+        big_number_on(p, live, fonts, value as f64, false, "%", WHITE);
+    }
+}
+
+fn volume_still(fonts: &Fonts, card: &MediaCard) -> Canvas {
+    let mut p = paint::canvas(BLACK);
     label(&mut p, fonts, 150.0, &card.name, MEDIA);
-    big_number(&mut p, fonts, value as f64, false, "", WHITE);
     let action = if card.state == "playing" { "Volume · press to pause" } else { "Volume · press to play" };
     line(&mut p, fonts, 366.0, action, GREY);
     p
+}
+
+fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, value: u8, sweep: Option<f32>) {
+    let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
+    ring_on(p, live.as_deref_mut(), |i| if i <= top { colour(MEDIA) } else { colour(DIM) }, &[top]);
+    big_number_on(p, live, fonts, value as f64, false, "", WHITE);
 }
 
 fn capitalise(text: &str) -> String {

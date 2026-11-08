@@ -139,6 +139,15 @@ impl Display {
         self.rows(|y, row| row.copy_from_slice(&frame[y * ROW..(y + 1) * ROW]));
     }
 
+    /// Shows rows `first` to `last` of a Frame: what changed.
+    pub fn show_rows(&mut self, frame: &[u8], first: usize, last: usize) {
+        let (start, stride) = (self.page(), self.stride);
+        let page = &mut self.bytes()[start..];
+        for y in first..=last.min(SIDE - 1) {
+            page[y * stride..y * stride + ROW].copy_from_slice(&frame[y * ROW..(y + 1) * ROW]);
+        }
+    }
+
     /// `from` sliding out and `to` in by `by` pixels of 480, sideways as the
     /// display stands: the framebuffer's rows, as it is mounted turned.
     pub fn slide(&mut self, from: &[u8], to: &[u8], by: usize, clockwise: bool) {
