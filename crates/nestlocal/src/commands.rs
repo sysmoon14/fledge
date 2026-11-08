@@ -111,9 +111,8 @@ impl Bridge {
             return;
         }
         if name == "lights" {
-            if let Err(e) = self.lights.configure(payload) {
-                logf!("mqtt: lights: {e}");
-            }
+            // The settings page's old lights list, retired for the home
+            // screen cards: an old automation may still send it.
             return;
         }
         let arg = String::from_utf8_lossy(payload).trim().to_string();

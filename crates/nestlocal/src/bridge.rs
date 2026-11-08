@@ -59,8 +59,6 @@ pub struct Bridge {
     time_ok: mpsc::Sender<()>,             // Home Assistant answered in time
     time_ok_rx: Mutex<Option<mpsc::Receiver<()>>>,
     sensors: std::sync::atomic::AtomicBool, // motion.rs follows nlclient's log
-    /// Home Assistant's lights, for the UNFR0ZEN screen (lights.rs).
-    pub lights: crate::lights::Lights,
     /// Home Assistant's home screen cards (ui/).
     pub ui: Arc<crate::ui::Ui>,
     /// The releases the update entity offers, with -update-repo (update.rs).
@@ -88,7 +86,6 @@ impl Bridge {
             time_ok,
             time_ok_rx: Mutex::new(Some(time_ok_rx)),
             sensors: std::sync::atomic::AtomicBool::new(false),
-            lights: Default::default(),
             ui: Default::default(),
             updates: OnceLock::new(),
             me: me.clone(),
@@ -268,7 +265,6 @@ impl Bridge {
             live.on_change(move |alive| bridge.publish_availability(alive));
         }
         tokio::spawn(self.clone().keep_time());
-        tokio::spawn(self.clone().serve_lights());
         if let Some(version) = crate::update::pending() {
             tokio::spawn(self.clone().commit_update(version));
         }
@@ -367,23 +363,6 @@ impl Bridge {
     fn publish_availability(&self, alive: bool) {
         if let Some(c) = self.mqtt.get() {
             c.publish(&format!("{}/availability", self.base), if alive { "online" } else { "offline" }.as_bytes(), 1, true);
-        }
-    }
-
-    /// Sends the screen's light requests on to Home Assistant (lights.rs).
-    async fn serve_lights(self: Arc<Self>) {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let Some(request) = crate::settings_ui::take_request_text("lights") else {
-                continue;
-            };
-            match self.lights.command(&request) {
-                Ok(command) => {
-                    logf!("lights: {command}");
-                    self.publish(&format!("{}/lights/command", self.base), false, command.to_string().as_bytes());
-                }
-                Err(e) => logf!("lights: {e}"),
-            }
         }
     }
 
