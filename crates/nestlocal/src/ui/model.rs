@@ -1,5 +1,8 @@
-//! Home Assistant's cards, as its nest_ui blueprint keeps them retained on
-//! <base>/set/ui, and the commands the cards send back on <base>/ui/command.
+//! Home Assistant's cards, as the Fledge integration keeps them retained on
+//! <base>/set/ui, a media player's album art on <base>/set/art/<entity id>,
+//! and the commands the cards send back on <base>/ui/command.
+
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -120,6 +123,39 @@ pub struct MediaCard {
     /// Percent.
     #[serde(default)]
     pub volume: Option<u8>,
+    /// Its album art, from its own topic.
+    #[serde(skip)]
+    pub art: Option<Arc<Art>>,
+}
+
+/// Album art: a square picture, RGB, at most ART_MAX wide.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Art {
+    pub size: u32,
+    pub rgb: Vec<u8>,
+}
+
+pub const ART_MAX: u32 = 240;
+
+impl Art {
+    /// From a PNG, square and 8-bit RGB or RGBA (alpha dropped).
+    pub fn decode(png_data: &[u8]) -> Result<Art, String> {
+        let mut reader = png::Decoder::new(png_data).read_info().map_err(|e| format!("art: {e}"))?;
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buffer).map_err(|e| format!("art: {e}"))?;
+        if info.width != info.height || info.width == 0 || info.width > ART_MAX
+            || info.bit_depth != png::BitDepth::Eight {
+            return Err(format!("art: {}x{} at {:?} bits: wants square 8-bit, at most {ART_MAX}",
+                               info.width, info.height, info.bit_depth));
+        }
+        let pixels = &buffer[..info.buffer_size()];
+        let rgb = match info.color_type {
+            png::ColorType::Rgb => pixels.to_vec(),
+            png::ColorType::Rgba => pixels.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(),
+            other => return Err(format!("art: {other:?}: wants RGB")),
+        };
+        Ok(Art { size: info.width, rgb })
+    }
 }
 
 impl Cards {

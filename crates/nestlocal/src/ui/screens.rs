@@ -253,13 +253,23 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>) -> Canvas {
         _ => colour(DIM),
     }, &[]);
     let accent = if playing { MEDIA } else { GREY };
-    label(&mut p, fonts, 124.0, &card.name, accent);
-    icon(&mut p, &card.icon, &card.id, HALF, 210.0, 92.0, accent);
+    // With album art, the art in place of the name and icon.
+    let top = match &card.art {
+        Some(art) => {
+            paint::picture(&mut p, &art.rgb, art.size, HALF, 194.0, 14.0);
+            194.0 + art.size as f32 / 2.0
+        }
+        None => {
+            label(&mut p, fonts, 124.0, &card.name, accent);
+            icon(&mut p, &card.icon, &card.id, HALF, 210.0, 92.0, accent);
+            270.0
+        }
+    };
     let title = if card.title.is_empty() { capitalise(&card.state) } else { card.title.clone() };
-    let title = paint::fit(&fonts.medium, 28.0, &title, 0.0, 320.0);
-    paint::text(&mut p, &fonts.medium, 28.0, HALF, 312.0, &title, 0.0, WHITE);
+    let title = paint::fit(&fonts.medium, 28.0, &title, 0.0, 300.0);
+    paint::text(&mut p, &fonts.medium, 28.0, HALF, top + 42.0, &title, 0.0, WHITE);
     let under = if card.artist.is_empty() { String::new() } else { card.artist.clone() };
-    line(&mut p, fonts, 348.0, &under, GREY);
+    line(&mut p, fonts, top + 76.0, &under, GREY);
     p
 }
 

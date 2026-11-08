@@ -342,6 +342,39 @@ pub fn tick_at(fraction: f32) -> usize {
     ((fraction.clamp(0.0, 1.0) * (TICKS - 1) as f32).round()) as usize
 }
 
+/// A square RGB picture `size` wide, centred on (cx, cy), its corners
+/// rounded to `radius`.
+pub fn picture(canvas: &mut Canvas, rgb: &[u8], size: u32, cx: f32, cy: f32, radius: f32) {
+    let (x0, y0) = ((cx - size as f32 / 2.0).round() as i32, (cy - size as f32 / 2.0).round() as i32);
+    let edge = size as f32 - radius;
+    for y in 0..size {
+        let (py, fy) = (y0 + y as i32, y as f32 + 0.5);
+        if !(0..SIZE as i32).contains(&py) {
+            continue;
+        }
+        for x in 0..size {
+            let (px, fx) = (x0 + x as i32, x as f32 + 0.5);
+            if !(0..SIZE as i32).contains(&px) {
+                continue;
+            }
+            // How much of the pixel is inside the rounded corners.
+            let (ex, ey) = ((radius - fx).max(fx - edge).max(0.0), (radius - fy).max(fy - edge).max(0.0));
+            let cover = if ex > 0.0 && ey > 0.0 { (radius - (ex * ex + ey * ey).sqrt() + 0.5).clamp(0.0, 1.0) } else { 1.0 };
+            if cover <= 0.0 {
+                continue;
+            }
+            let from = 3 * (y * size + x) as usize;
+            let colour = canvas.rgb([rgb[from], rgb[from + 1], rgb[from + 2]]);
+            let at = canvas.at(px as u32, py as u32);
+            let data = canvas.pixmap.data_mut();
+            for (channel, value) in colour.into_iter().enumerate() {
+                let old = data[at + channel] as f32;
+                data[at + channel] = (old + (value as f32 - old) * cover).round() as u8;
+            }
+        }
+    }
+}
+
 pub fn circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, c: Color) {
     if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
         canvas.fill_path(&path, c);

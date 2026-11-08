@@ -1,19 +1,18 @@
 //! The Nest's home screen cards: Home Assistant on the thermostat.
 //!
-//! Turning the ring moves from the thermostat to a card for each thing Home
-//! Assistant's nest_ui blueprint chose (lights, other thermostats, media
-//! players) and on to Nest settings; pressing controls the card. The
-//! thermostat itself is nlclient's own screen, untouched: a press there hands
-//! the ring to nlclient, which sets the temperature as it always has, and Nest
-//! settings opens nlclient's menus. nlclient keeps the heating, learning and
-//! everything else throughout.
+//! Waking shows the thermostat among a card for each device the Fledge
+//! integration chose (lights, other thermostats, media players) and Nest
+//! settings, zoomed out: turning browses, pressing opens. The thermostat
+//! itself is nlclient's own screen, untouched: opening it hands the ring to
+//! nlclient, which sets the temperature as it always has, and Nest settings
+//! opens nlclient's menus. nlclient keeps the heating, learning and everything
+//! else throughout.
 //!
 //! nestlocal holds the ring and button (grabbed) while the thermostat's own
 //! screen shows, so a turn moves to the cards rather than the temperature.
-//! On a card it owns the display (device.rs) and keeps nlclient's display
-//! awake with nudges. Left alone, the cards go back to the thermostat; a
-//! display that went dark wakes onto the thermostat, as before. With no cards
-//! from Home Assistant, or no nlclient (Doom), it leaves everything alone.
+//! On a card it owns the display (device.rs), which nlclient keeps awake.
+//! Left alone, the cards go back to the thermostat. With no cards from Home
+//! Assistant, or no nlclient (Doom), it leaves everything alone.
 
 mod device;
 mod icons;
@@ -23,12 +22,13 @@ mod paint;
 mod screens;
 mod zoom;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use model::Command;
 use machine::{Action, Effect, Input, Machine, Mode, Slot};
-use model::{Card, Cards};
+use model::{Art, Card, Cards};
 use screens::Screen;
 
 use crate::logf;
@@ -37,6 +37,8 @@ use crate::logf;
 pub struct Ui {
     /// Home Assistant's cards and a count of their changes.
     cards: Mutex<(u64, Cards)>,
+    /// Media players' album art, by entity id.
+    art: Mutex<HashMap<String, Arc<Art>>>,
 }
 
 impl Ui {
@@ -51,12 +53,36 @@ impl Ui {
         Ok(())
     }
 
+    /// Takes a media player's album art (<base>/set/art/<entity id>): a
+    /// PNG, or nothing for none.
+    pub fn set_art(&self, entity: &str, payload: &[u8]) -> Result<(), String> {
+        let art = if payload.is_empty() { None } else { Some(Arc::new(Art::decode(payload)?)) };
+        let mut held = self.art.lock().unwrap();
+        let changed = match art {
+            Some(art) => held.insert(entity.to_owned(), art.clone()).is_none_or(|old| old != art),
+            None => held.remove(entity).is_some(),
+        };
+        drop(held);
+        if changed {
+            self.cards.lock().unwrap().0 += 1;
+        }
+        Ok(())
+    }
+
     fn generation(&self) -> u64 {
         self.cards.lock().unwrap().0
     }
 
+    /// The cards, each media player's with its art.
     fn snapshot(&self) -> (u64, Cards) {
-        self.cards.lock().unwrap().clone()
+        let (generation, mut cards) = self.cards.lock().unwrap().clone();
+        let art = self.art.lock().unwrap();
+        for card in &mut cards.cards {
+            if let Card::Media(media) = card {
+                media.art = art.get(&media.id).cloned();
+            }
+        }
+        (generation, cards)
     }
 }
 
@@ -803,6 +829,35 @@ mod tests {
         assert_eq!(transition(&Mode::Chooser(4), &Mode::Native, true), Transition::Cut, "nlclient's menu");
         assert_eq!(transition(&list, &Mode::LightList { slot: 0, selected: 1 }, true), Transition::Cut);
     }
+
+    fn png(size: u32, colour: png::ColorType, pixel: &[u8]) -> Vec<u8> {
+        let mut data = Vec::new();
+        let mut encoder = png::Encoder::new(&mut data, size, size);
+        encoder.set_color(colour);
+        encoder.set_depth(png::BitDepth::Eight);
+        let pixels: Vec<u8> = (0..size * size).flat_map(|_| pixel.iter().copied()).collect();
+        encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+        data
+    }
+
+    #[test]
+    fn a_media_player_s_art_joins_its_card() {
+        let ui = Ui::default();
+        ui.configure(br#"{"cards":[{"kind":"media","id":"media_player.speaker","name":"Speaker"}]}"#).unwrap();
+        let (before, _) = ui.snapshot();
+        ui.set_art("media_player.speaker", &png(4, png::ColorType::Rgba, &[10, 20, 30, 255])).unwrap();
+        let (after, cards) = ui.snapshot();
+        assert!(after > before, "new art redraws");
+        let Card::Media(card) = &cards.cards[0] else { panic!() };
+        assert_eq!(card.art.as_deref(), Some(&Art { size: 4, rgb: [10, 20, 30].repeat(16) }), "alpha dropped");
+        ui.set_art("media_player.speaker", &png(4, png::ColorType::Rgba, &[10, 20, 30, 255])).unwrap();
+        assert_eq!(ui.snapshot().0, after, "the same art: nothing to redraw");
+        assert!(ui.set_art("media_player.speaker", &png(300, png::ColorType::Rgb, &[0, 0, 0])).is_err(), "too big");
+        assert!(ui.set_art("media_player.speaker", b"not a png").is_err());
+        ui.set_art("media_player.speaker", b"").unwrap();
+        let (_, cards) = ui.snapshot();
+        assert!(matches!(&cards.cards[0], Card::Media(card) if card.art.is_none()), "empty: none");
+    }
 }
 
 /// Whether the ring is held, for tools that drive the unit's screen
@@ -901,5 +956,10 @@ mod shots {
         let mut menu = screens::draw(&fonts, &Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, None);
         screens::menu(&mut menu, &fonts, "Reading Lamp", &[("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off")], 0);
         save(&menu, &format!("{out}/9-menu.png"));
+        let mut with_art = media.clone();
+        let size = model::ART_MAX * 7 / 10;
+        let rgb = (0..size * size).flat_map(|i| [(i % size * 255 / size) as u8, (i / size * 255 / size) as u8, 160]);
+        with_art.art = Some(Arc::new(Art { size, rgb: rgb.collect() }));
+        save(&screens::draw(&fonts, &Screen::MediaCard { card: &with_art, volume: None }, None), &format!("{out}/3b-art.png"));
     }
 }

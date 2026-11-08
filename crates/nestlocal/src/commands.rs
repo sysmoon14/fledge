@@ -94,6 +94,12 @@ impl Bridge {
             }
             return;
         }
+        if let Some(entity) = name.strip_prefix("art/") {
+            if let Err(e) = self.ui.set_art(entity, payload) {
+                logf!("mqtt: {name}: {e}");
+            }
+            return;
+        }
         if name == "lights" {
             if let Err(e) = self.lights.configure(payload) {
                 logf!("mqtt: lights: {e}");

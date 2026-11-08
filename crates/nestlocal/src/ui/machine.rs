@@ -479,19 +479,64 @@ impl Machine {
                 self.mode = Mode::LightDim { slot, light, on, value };
             }
             (Action::Play(_), Mode::Volume { slot, value }) => {
-                if let Some(Card::Media(card)) = self.cards.cards.get_mut(slot) {
-                    out.push(Effect::Send(Command::PlayPause(card.id.clone())));
-                    card.state = if card.state == "playing" { "paused".into() } else { "playing".into() };
-                }
+                self.toggle(slot, None, out);
                 self.mode = Mode::Volume { slot, value };
             }
             (_, view) => self.mode = view,
         }
     }
 
-    /// A long press: out of a ring of actions to its device, out of a
-    /// device to the cards, and from the cards to the thermostat.
+    /// Switches a card's device the way it has: a light (`light`, or all of
+    /// a card's lights, off if any is on) on or off, a media player played
+    /// or paused. False if it has no such way (a thermostat, Back).
+    fn toggle(&mut self, slot: usize, light: Option<usize>, out: &mut Vec<Effect>) -> bool {
+        match self.cards.cards.get_mut(slot) {
+            Some(Card::Lights(card)) => {
+                let (lights, on) = match light {
+                    Some(index) if index < card.lights.len() => (index..index + 1, !card.lights[index].on),
+                    Some(_) => return false,
+                    None => (0..card.lights.len(), !card.lights.iter().any(|l| l.on)),
+                };
+                let changing: Vec<usize> = lights.filter(|&i| card.lights[i].on != on).collect();
+                for index in changing {
+                    self.switch_light(slot, index, on, out);
+                }
+                true
+            }
+            Some(Card::Media(card)) => {
+                out.push(Effect::Send(Command::PlayPause(card.id.clone())));
+                card.state = if card.state == "playing" { "paused".into() } else { "playing".into() };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A long press: a device's on/off or play/pause, from its card or its
+    /// own screen. Otherwise back: out of a ring of actions to its device,
+    /// out of a device to the cards, and from the cards to the thermostat.
     fn back(&mut self, out: &mut Vec<Effect>) {
+        let toggled = match self.mode.clone() {
+            Mode::Chooser(index) => match self.deck().get(index) {
+                Some(&Slot::Card(slot)) => self.toggle(slot, None, out),
+                _ => false,
+            },
+            Mode::LightList { slot, selected } => self.toggle(slot, Some(selected), out),
+            Mode::LightDim { slot, light, value, .. } => {
+                let toggled = self.toggle(slot, Some(light), out);
+                if let Some(Card::Lights(card)) = self.card(slot) {
+                    self.mode = Mode::LightDim { slot, light, on: card.lights[light].on, value };
+                }
+                toggled
+            }
+            Mode::Volume { slot, .. } => self.toggle(slot, None, out),
+            _ => false,
+        };
+        if toggled {
+            out.push(Effect::Click);
+            self.dirty = true;
+            return;
+        }
         let back = match self.mode.clone() {
             Mode::Menu { view, .. } => {
                 out.push(Effect::Click);
@@ -973,19 +1018,41 @@ mod tests {
     }
 
     #[test]
-    fn a_long_press_goes_back_a_level() {
+    fn a_long_press_switches_a_device_or_goes_back_a_level() {
         let mut rig = Rig::new();
         assert!(rig.long().is_empty(), "nothing above the thermostat");
         let mut rig = Rig::woken();
         rig.turn(CARD_STEP);
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::Off("light.lamp".into())], "a card: off, as one is on");
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::On("light.lamp".into()), Command::On("switch.fan".into())],
+                   "then all on");
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "still on the cards");
         rig.press();
         rig.press();
         rig.turn(VALUE_STEP * 3);
-        let sent = Rig::sends(&rig.long());
-        assert_eq!(sent, vec![Command::Brightness("light.lamp".into(), 63)], "what was turned is sent on the way out");
-        assert_eq!(rig.machine.mode, Mode::Chooser(1), "out to the cards, not the list");
-        assert_eq!(rig.long(), vec![Effect::Own(false)]);
-        assert_eq!(rig.machine.mode, Mode::Home);
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::Off("light.lamp".into())],
+                   "on its dimmer: off, what was turned dropped");
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: false, value: 63 });
+        rig.press();
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "the menu's Back");
+        rig.press();
+        rig.turn(ROW_STEP * 5);
+        rig.long();
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "the list's Back row, long: back");
+        rig.turn(CARD_STEP);
+        rig.long();
+        assert_eq!(rig.machine.mode, Mode::Home, "a thermostat's card has no switch: back to the dial");
+        rig.lit = false;
+        rig.wait(Duration::from_secs(1));
+        rig.press();
+        rig.lit = true;
+        rig.turn(CARD_STEP * 3);
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::PlayPause("media_player.speaker".into())]);
+        rig.press();
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::PlayPause("media_player.speaker".into())],
+                   "and on its own screen");
+        assert!(matches!(&rig.machine.cards.cards[2], Card::Media(m) if m.state == "playing"));
     }
 
     #[test]
