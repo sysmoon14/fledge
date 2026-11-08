@@ -18,31 +18,24 @@ pub enum Screen<'a> {
     Volume { card: &'a MediaCard, value: u8 },
 }
 
-/// Where a card is among them all, for the dots.
-#[derive(Clone, Copy)]
-pub struct Position {
-    pub index: usize,
-    pub count: usize,
-}
-
 const HALF: f32 = 240.0;
 
 /// Draws `screen`; `sweep`, where it has a value on its ring, is how far the
 /// ring shows (0..1): the value itself, or on its way there.
-pub fn draw(fonts: &Fonts, screen: &Screen, at: Position, sweep: Option<f32>) -> Canvas {
+pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
     match screen {
-        Screen::LightsCard { card } => lights_card(fonts, card, at),
+        Screen::LightsCard { card } => lights_card(fonts, card),
         Screen::ClimateCard { card, target } => {
             let target = target.or(card.target);
-            let mut p = climate_still(fonts, card, target, Some(at), false);
+            let mut p = climate_still(fonts, card, target, false);
             climate_moving(&mut p, None, fonts, card, target, None);
             p
         }
-        Screen::MediaCard { card, volume } => media_card(fonts, card, volume.or(card.volume), at),
-        Screen::SettingsCard => settings_card(fonts, at),
+        Screen::MediaCard { card, volume } => media_card(fonts, card, volume.or(card.volume)),
+        Screen::SettingsCard => settings_card(fonts),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         _ => {
-            let mut p = still(fonts, screen, at);
+            let mut p = still(fonts, screen);
             moving(&mut p, fonts, screen, sweep, None);
             p
         }
@@ -52,12 +45,12 @@ pub fn draw(fonts: &Fonts, screen: &Screen, at: Position, sweep: Option<f32>) ->
 /// A screen with a value on its ring, without the ring and the value: what
 /// stays put while the ring turns, so a frame only draws what moves. Any
 /// other screen whole.
-pub fn still(fonts: &Fonts, screen: &Screen, at: Position) -> Canvas {
+pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
     match screen {
         Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on),
-        Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), None, true),
+        Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), true),
         Screen::Volume { card, .. } => volume_still(fonts, card),
-        _ => draw(fonts, screen, at, None),
+        _ => draw(fonts, screen, None),
     }
 }
 
@@ -153,7 +146,10 @@ pub fn room(lights: &[Light]) -> Option<(u8, [u8; 3])> {
     Some((average, [mix(0), mix(1), mix(2)]))
 }
 
-fn lights_card(fonts: &Fonts, card: &LightsCard, at: Position) -> Canvas {
+fn lights_card(fonts: &Fonts, card: &LightsCard) -> Canvas {
+    if let [light] = &card.lights[..] {
+        return light_card(fonts, card, light);
+    }
     let mut p = paint::canvas(BLACK);
     let lights = &card.lights;
     let room = room(lights);
@@ -177,7 +173,29 @@ fn lights_card(fonts: &Fonts, card: &LightsCard, at: Position) -> Canvas {
             line(&mut p, fonts, 366.0, &format!("of {} on · {level}%", lights.len()), GREY);
         }
     }
-    paint::dots(&mut p, at.count, at.index, WHITE);
+    p
+}
+
+/// A card of one light: its brightness on the ring and in the middle.
+fn light_card(fonts: &Fonts, card: &LightsCard, light: &Light) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    let tint = light.colour();
+    let level = light.on.then(|| light.brightness.unwrap_or(100));
+    let top = level.map(|level| paint::tick_at(level as f32 / 100.0));
+    paint::ring(&mut p, |i| match top {
+        Some(top) if i <= top => colour(tint),
+        _ => colour(DIM),
+    }, &[]);
+    let accent = if light.on { tint } else { GREY };
+    let icon_name = if light.icon.is_empty() { &card.icon } else { &light.icon };
+    icon(&mut p, icon_name, &light.id, HALF, 132.0, 72.0, accent);
+    label(&mut p, fonts, 214.0, &card.name, accent);
+    let middle = match (light.on, light.dimmable) {
+        (false, _) => "Off".to_owned(),
+        (true, true) => format!("{}%", level.unwrap_or(100)),
+        (true, false) => "On".to_owned(),
+    };
+    paint::text(&mut p, &fonts.regular, 96.0, HALF, 320.0, &middle, 0.0, WHITE);
     p
 }
 
@@ -189,7 +207,7 @@ fn climate_colours(card: &ClimateCard) -> ([u8; 3], bool) {
     }
 }
 
-fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Option<Position>, setting: bool) -> Canvas {
+fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, setting: bool) -> Canvas {
     let (background, active) = climate_colours(card);
     let mut p = paint::canvas(background);
     let text_colour = if active { WHITE } else { GREY };
@@ -208,9 +226,6 @@ fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, at: Opt
         [now, state].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
     };
     line(&mut p, fonts, 366.0, &bottom, if active { [255, 225, 205] } else { GREY });
-    if let Some(at) = at {
-        paint::dots(&mut p, at.count, at.index, WHITE);
-    }
     p
 }
 
@@ -228,7 +243,7 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
     }
 }
 
-fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, at: Position) -> Canvas {
+fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>) -> Canvas {
     let mut p = paint::canvas(BLACK);
     let playing = card.state == "playing";
     let lit = volume.map(|v| paint::tick_at(v as f32 / 100.0));
@@ -245,17 +260,15 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, at: Position)
     paint::text(&mut p, &fonts.medium, 28.0, HALF, 312.0, &title, 0.0, WHITE);
     let under = if card.artist.is_empty() { String::new() } else { card.artist.clone() };
     line(&mut p, fonts, 348.0, &under, GREY);
-    paint::dots(&mut p, at.count, at.index, WHITE);
     p
 }
 
-fn settings_card(fonts: &Fonts, at: Position) -> Canvas {
+fn settings_card(fonts: &Fonts) -> Canvas {
     let mut p = paint::canvas(BLACK);
     paint::ring(&mut p, |_| colour(DIM), &[]);
     icon(&mut p, "mdi:cog", "settings", HALF, 168.0, 96.0, WHITE);
     paint::text(&mut p, &fonts.regular, 40.0, HALF, 278.0, "Nest settings", 0.0, WHITE);
     line(&mut p, fonts, 316.0, "Schedule · Eco · Energy · System", GREY);
-    paint::dots(&mut p, at.count, at.index, WHITE);
     p
 }
 

@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 pub use model::Command;
 use machine::{Action, Effect, Input, Machine, Mode, Slot};
 use model::{Card, Cards};
-use screens::{Position, Screen};
+use screens::Screen;
 
 use crate::logf;
 
@@ -450,10 +450,32 @@ impl Runtime {
             }
         };
         zoom::compose(&mut self.scratch, at, z, if shrunk { zoom::ZOOMED } else { 1.0 }, get);
+        // The chosen card's name above and the dots under, as they zoom
+        // out; the name fades out and in between cards.
+        let fade = ((1.0 - self.zoom) / (1.0 - zoom::ZOOMED)).clamp(0.0, 1.0);
+        let nearest = at.round().rem_euclid(count as f32) as usize;
+        let title = fade * (1.0 - 2.0 * (at - at.round()).abs()).clamp(0.0, 1.0);
+        let name = self.name(nearest);
+        paint::around_cards(&mut self.scratch, &self.fonts, &name, title, count as usize, nearest, fade);
         if self.machine.hint {
             paint::hint(&mut self.scratch, &self.fonts, "Turn to browse · press to open");
         }
         self.display.show(&self.scratch);
+    }
+
+    /// What the card at `index` in the deck is called, above it.
+    fn name(&self, index: usize) -> String {
+        match self.machine.deck().get(index) {
+            Some(Slot::Thermostat) => "Thermostat".into(),
+            Some(Slot::Settings) => "Settings".into(),
+            Some(&Slot::Card(slot)) => match self.machine.cards.cards.get(slot) {
+                Some(Card::Lights(card)) => card.name.clone(),
+                Some(Card::Climate(card)) => card.name.clone(),
+                Some(Card::Media(card)) => card.name.clone(),
+                None => String::new(),
+            },
+            None => String::new(),
+        }
     }
 
     /// Draws card `at` (wrapping round the deck) if it isn't yet.
@@ -463,7 +485,6 @@ impl Runtime {
         if index == 0 || self.cards.contains_key(&index) {
             return;
         }
-        let position = Position { index, count: deck.len() };
         let card = |slot: usize| self.machine.cards.cards.get(slot);
         let screen = match deck[index] {
             Slot::Card(slot) => match card(slot) {
@@ -474,7 +495,7 @@ impl Runtime {
             },
             _ => Screen::SettingsCard,
         };
-        let mut frame = device::frame(screens::draw(&self.fonts, &screen, position, None));
+        let mut frame = device::frame(screens::draw(&self.fonts, &screen, None));
         zoom::round(&mut frame);
         self.cards.insert(index, frame);
     }
@@ -536,7 +557,7 @@ impl Runtime {
                 // lights), else use the dial as it last showed.
                 let mut page = self.display.save();
                 let waiting = Instant::now();
-                while !dial(&page) && waiting.elapsed() < Duration::from_millis(1200) {
+                while !dial(&page) && blank(&page) && waiting.elapsed() < Duration::from_millis(1200) {
                     std::thread::sleep(Duration::from_millis(40));
                     page = self.display.save();
                 }
@@ -619,27 +640,24 @@ impl Runtime {
         }
     }
 
-    /// A device's own screen for `mode`, and its card's place in the deck.
-    fn screen<'a>(machine: &'a Machine, mode: &Mode) -> Option<(Screen<'a>, Position)> {
-        let deck = machine.deck().len();
-        let position = |slot: usize| Position { index: slot + 1, count: deck };
+    /// A device's own screen for `mode`.
+    fn screen<'a>(machine: &'a Machine, mode: &Mode) -> Option<Screen<'a>> {
         let card = |slot: usize| machine.cards.cards.get(slot);
         Some(match mode {
             Mode::LightList { slot, selected } => match card(*slot)? {
-                Card::Lights(card) => (Screen::LightList { card, selected: *selected }, position(*slot)),
+                Card::Lights(card) => Screen::LightList { card, selected: *selected },
                 _ => return None,
             },
             Mode::LightDim { slot, light, on, value } => match card(*slot)? {
-                Card::Lights(card) => (Screen::LightDim { light: card.lights.get(*light)?, on: *on, value: *value },
-                                       position(*slot)),
+                Card::Lights(card) => Screen::LightDim { light: card.lights.get(*light)?, on: *on, value: *value },
                 _ => return None,
             },
             Mode::ClimateSet { slot, target } => match card(*slot)? {
-                Card::Climate(card) => (Screen::ClimateSet { card, target: *target }, position(*slot)),
+                Card::Climate(card) => Screen::ClimateSet { card, target: *target },
                 _ => return None,
             },
             Mode::Volume { slot, value } => match card(*slot)? {
-                Card::Media(card) => (Screen::Volume { card, value: *value }, position(*slot)),
+                Card::Media(card) => Screen::Volume { card, value: *value },
                 _ => return None,
             },
             _ => return None,
@@ -648,13 +666,13 @@ impl Runtime {
 
     /// A device's ring of actions, over its dimmed screen.
     fn draw_menu(&mut self, view: &Mode, actions: &[Action], selected: usize) {
-        let Some((screen, at)) = Self::screen(&self.machine, view) else { return };
+        let Some(screen) = Self::screen(&self.machine, view) else { return };
         let title = match &screen {
             Screen::LightDim { light, .. } => light.name.clone(),
             Screen::Volume { card, .. } => card.name.clone(),
             _ => String::new(),
         };
-        let mut canvas = screens::draw(&self.fonts, &screen, at, None);
+        let mut canvas = screens::draw(&self.fonts, &screen, None);
         let items: Vec<(&str, &str)> = actions.iter().map(|action| match action {
             Action::Back => ("mdi:arrow-left", "Back to devices"),
             Action::Switch(true) => ("mdi:power", "Turn on"),
@@ -678,7 +696,7 @@ impl Runtime {
             return self.draw_menu(&view, &actions, selected);
         }
         let mode = self.machine.mode.clone();
-        let Some((screen, at)) = Self::screen(&self.machine, &mode) else { return };
+        let Some(screen) = Self::screen(&self.machine, &mode) else { return };
         let sweep = self.sweep.as_ref().map(|(_, shown)| *shown);
         let fade = self.transition == Transition::Fade;
         self.transition = Transition::Cut;
@@ -686,7 +704,7 @@ impl Runtime {
         if let Some(key) = screens::still_key(&screen) {
             let fresh = !matches!(&self.live, Some((kept, ..)) if *kept == key);
             if fresh {
-                let still = screens::still(&self.fonts, &screen, at);
+                let still = screens::still(&self.fonts, &screen);
                 let live = paint::Live::new(&still);
                 self.live = Some((key, still, live));
             }
@@ -707,7 +725,7 @@ impl Runtime {
             return;
         }
         self.live = None;
-        let frame = device::frame(screens::draw(&self.fonts, &screen, at, sweep));
+        let frame = device::frame(screens::draw(&self.fonts, &screen, sweep));
         if fade {
             let from = self.display.save();
             self.animate(&from, &frame, Transition::Fade);
@@ -814,6 +832,12 @@ fn back_chosen(page: &[u8]) -> bool {
     blue > 300
 }
 
+/// Whether a frame is (nearly) all black: nlclient's page, the display
+/// just woken, before nlclient draws.
+fn blank(page: &[u8]) -> bool {
+    page.as_chunks::<4>().0.iter().step_by(97).filter(|px| px[..3].iter().any(|&c| c > 24)).count() < 20
+}
+
 /// Whether a frame shows nlclient's home dial: its ring lit around the edge.
 fn dial(page: &[u8]) -> bool {
     let stride = page.len() / 480;
@@ -861,21 +885,20 @@ mod shots {
             {"kind":"climate","id":"climate.living","name":"Living room","icon":"","mode":"heat","action":"heating","target":21.5,"current":19.5,"min":7,"max":30,"step":0.5},
             {"kind":"media","id":"media_player.kitchen","name":"Bedroom speaker","icon":"","state":"playing","title":"Sunday Morning Mix","artist":"Various artists","volume":35}]}"#).unwrap();
         let [Card::Lights(lights), Card::Climate(climate), Card::Media(media)] = &cards.cards[..] else { panic!() };
-        let at = |index| Position { index, count: 5 };
         let shots = [
-            ("1-lights", Screen::LightsCard { card: lights }, at(1)),
-            ("2-climate", Screen::ClimateCard { card: climate, target: None }, at(2)),
-            ("3-media", Screen::MediaCard { card: media, volume: None }, at(3)),
-            ("4-settings", Screen::SettingsCard, at(4)),
-            ("5-list", Screen::LightList { card: lights, selected: 0 }, at(1)),
-            ("6-dim", Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, at(1)),
-            ("7-climate-set", Screen::ClimateSet { card: climate, target: 22.0 }, at(2)),
-            ("8-volume", Screen::Volume { card: media, value: 35 }, at(3)),
+            ("1-lights", Screen::LightsCard { card: lights }),
+            ("2-climate", Screen::ClimateCard { card: climate, target: None }),
+            ("3-media", Screen::MediaCard { card: media, volume: None }),
+            ("4-settings", Screen::SettingsCard),
+            ("5-list", Screen::LightList { card: lights, selected: 0 }),
+            ("6-dim", Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }),
+            ("7-climate-set", Screen::ClimateSet { card: climate, target: 22.0 }),
+            ("8-volume", Screen::Volume { card: media, value: 35 }),
         ];
-        for (name, screen, at) in shots {
-            save(&screens::draw(&fonts, &screen, at, None), &format!("{out}/{name}.png"));
+        for (name, screen) in shots {
+            save(&screens::draw(&fonts, &screen, None), &format!("{out}/{name}.png"));
         }
-        let mut menu = screens::draw(&fonts, &Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, at(1), None);
+        let mut menu = screens::draw(&fonts, &Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, None);
         screens::menu(&mut menu, &fonts, "Reading Lamp", &[("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off")], 0);
         save(&menu, &format!("{out}/9-menu.png"));
     }

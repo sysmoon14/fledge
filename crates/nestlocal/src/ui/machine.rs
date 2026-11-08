@@ -150,6 +150,9 @@ pub struct Machine {
     held: bool,
     /// Until when the display, just woken, may still be dark.
     lighting: Option<Instant>,
+    /// Whether the display was lit at the last tick: lighting by itself
+    /// (someone coming near) wakes to the cards as a turn would.
+    was_lit: Option<bool>,
 }
 
 impl Machine {
@@ -157,7 +160,7 @@ impl Machine {
         Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
-            lighting: None,
+            lighting: None, was_lit: None,
         }
     }
 
@@ -289,16 +292,8 @@ impl Machine {
                 // Dark: the turn or press wakes the display, onto what
                 // Home Assistant chose.
                 out.push(Effect::WakeDisplay);
-                self.woke = true;
                 self.lighting = Some(now + LIGHTING);
-                match self.cards.wake() {
-                    Wake::Chooser => {
-                        self.hint = true;
-                        self.go(Mode::Chooser(0), out);
-                    }
-                    Wake::Thermostat => self.go(Mode::Native, out),
-                    Wake::Card(slot) => self.open(slot + 1, out),
-                }
+                self.wake(out);
                 return;
             }
             _ => {}
@@ -337,6 +332,19 @@ impl Machine {
                 self.dirty = true;
                 self.sync(out);
             }
+        }
+    }
+
+    /// The display lit: what Home Assistant chose shows, as it lights.
+    fn wake(&mut self, out: &mut Vec<Effect>) {
+        self.woke = true;
+        match self.cards.wake() {
+            Wake::Chooser => {
+                self.hint = true;
+                self.go(Mode::Chooser(0), out);
+            }
+            Wake::Thermostat => self.go(Mode::Native, out),
+            Wake::Card(slot) => self.open(slot + 1, out),
         }
     }
 
@@ -399,6 +407,17 @@ impl Machine {
             }
             Some(&Slot::Card(slot)) => {
                 let mode = match self.card(slot) {
+                    // One light: its dimmer, or switched where it is.
+                    Some(Card::Lights(card)) if card.lights.len() == 1 => {
+                        let light = &card.lights[0];
+                        if !light.dimmable {
+                            let on = !light.on;
+                            self.switch_light(slot, 0, on, out);
+                            self.dirty = true;
+                            return;
+                        }
+                        Mode::LightDim { slot, light: 0, on: light.on, value: light.brightness.unwrap_or(100) }
+                    }
                     Some(Card::Lights(_)) => Mode::LightList { slot, selected: 0 },
                     Some(Card::Climate(card)) => {
                         Mode::ClimateSet { slot, target: card.target.unwrap_or((card.min + card.max) / 2.0) }
@@ -505,6 +524,12 @@ impl Machine {
     /// whether nlclient shows its home dial (only asked for when it matters).
     pub fn tick(&mut self, now: Instant, lit: bool, home_dial: &mut dyn FnMut() -> bool, out: &mut Vec<Effect>) {
         let idle = now.duration_since(self.last_input);
+        if self.was_lit.replace(lit) == Some(false) && lit && self.mode == Mode::Home {
+            // Lit by itself, as someone came near: wake as a turn would.
+            self.last_input = now;
+            self.wake(out);
+            return;
+        }
         // Dark, unless the display was just woken and is still lighting.
         let dark = !lit && !self.lighting.is_some_and(|until| now < until);
         if matches!(self.mode, Mode::Home | Mode::Chooser(_)) && self.turn != 0 && idle >= SNAP {
@@ -539,7 +564,10 @@ impl Machine {
         let back = match self.mode.clone() {
             Mode::Chooser(_) if idle >= CARD_IDLE => Some(Mode::Home),
             Mode::LightList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(slot + 1)),
-            Mode::LightDim { slot, light, .. } if idle >= CONTROL_IDLE => Some(Mode::LightList { slot, selected: light }),
+            Mode::LightDim { slot, light, .. } if idle >= CONTROL_IDLE => Some(match self.card(slot) {
+                Some(Card::Lights(card)) if card.lights.len() > 1 => Mode::LightList { slot, selected: light },
+                _ => Mode::Chooser(slot + 1),
+            }),
             Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
             Mode::Menu { view, .. } if idle >= CONTROL_IDLE => Some(*view),
             _ => None,
@@ -697,6 +725,44 @@ mod tests {
         rig.turn(CARD_STEP);
         assert_eq!(rig.machine.mode, Mode::Chooser(1));
         assert!(!rig.machine.hint, "the hint goes with the first turn");
+    }
+
+    #[test]
+    fn a_card_of_one_light_dims_it_or_switches_it() {
+        let mut rig = Rig::with(Cards::parse(br#"{"cards":[
+            {"kind":"lights","name":"Lamp","icon":"","lights":[
+                {"id":"light.lamp","name":"Lamp","on":true,"dimmable":true,"brightness":60}]},
+            {"kind":"lights","name":"Fan","icon":"","lights":[
+                {"id":"switch.fan","name":"Fan","on":false,"dimmable":false}]}]}"#).unwrap());
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 60 }, "straight to its dimmer");
+        rig.wait(CONTROL_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "left: back to the cards, no list");
+        rig.turn(CARD_STEP);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::On("switch.fan".into())], "switched where it is");
+        assert_eq!(rig.machine.mode, Mode::Chooser(2));
+    }
+
+    #[test]
+    fn lighting_by_itself_wakes_to_the_cards_too() {
+        let mut rig = Rig::new();
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        assert_eq!(rig.machine.mode, Mode::Home);
+        // Someone comes near: the Nest lights its display itself.
+        rig.lit = true;
+        let out = rig.tick();
+        assert_eq!(out, vec![Effect::Own(true)], "no wake asked for: it is lit");
+        assert_eq!(rig.machine.mode, Mode::Chooser(0));
+        assert!(rig.machine.woke && rig.machine.hint);
+        rig.wait(CARD_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Home, "left, back to the dial");
+        rig.wait(Duration::from_secs(5));
+        assert_eq!(rig.machine.mode, Mode::Home, "and it stays there while lit");
     }
 
     #[test]

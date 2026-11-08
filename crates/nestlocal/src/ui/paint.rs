@@ -581,17 +581,36 @@ pub fn hint(frame: &mut Vec<u8>, fonts: &Fonts, text: &str) {
     *frame = canvas.pixmap.take();
 }
 
-/// Where the cards are: a dot each along the bottom, `active` white.
-pub fn dots(canvas: &mut Canvas, count: usize, active: usize, on: [u8; 3]) {
+/// Where the cards are: a dot each at height `y`, `active` white, all at
+/// `fade` of their brightness.
+pub fn dots(canvas: &mut Canvas, count: usize, active: usize, y: f32, fade: f32) {
     if count < 2 {
         return;
     }
-    let gap = 18.0;
+    let gap = 15.0;
     let start = CENTRE - gap * (count - 1) as f32 / 2.0;
     for i in 0..count {
-        let c = if i == active { colour(on) } else { alpha(on, 0.35) };
-        circle(canvas, start + gap * i as f32, 440.0, 4.5, c);
+        let a = if i == active { 1.0 } else { 0.35 };
+        circle(canvas, start + gap * i as f32, y, 4.0, alpha(WHITE, a * fade.clamp(0.0, 1.0)));
     }
+}
+
+/// Around the cards zoomed out, on a frame for the panel (device::Frame):
+/// the chosen one's name above at `title` of full opacity, and the dots
+/// under them at `fade`.
+pub fn around_cards(frame: &mut Vec<u8>, fonts: &Fonts, name: &str, title: f32, count: usize, active: usize,
+                    fade: f32) {
+    let Some(pixmap) = Pixmap::from_vec(std::mem::take(frame), tiny_skia::IntSize::from_wh(SIZE, SIZE).expect("480")) else {
+        return;
+    };
+    let mut canvas = Canvas { pixmap, panel: true };
+    if title > 0.01 {
+        let name = fit(&fonts.medium, 28.0, name, 0.0, 230.0);
+        let width = measure(&fonts.medium, 28.0, &name, 0.0);
+        text_at(&mut canvas, &fonts.medium, 28.0, CENTRE - width / 2.0, 38.0, &name, 0.0, WHITE, title.min(1.0));
+    }
+    dots(&mut canvas, count, active, 455.0, fade);
+    *frame = canvas.pixmap.take();
 }
 
 #[cfg(test)]
@@ -605,7 +624,7 @@ mod tests {
         let draw = |canvas: &mut Canvas| {
             ring(canvas, |i| if i < 60 { colour([255, 169, 87]) } else { colour(DIM) }, &[60]);
             pill(canvas, 62.0, 128.0, 356.0, 54.0, colour(SELECT));
-            dots(canvas, 5, 1, WHITE);
+            dots(canvas, 5, 1, 440.0, 1.0);
         };
         let (mut upright, mut panel) = (canvas_for([10, 20, 30], false), canvas_for([10, 20, 30], true));
         draw(&mut upright);
