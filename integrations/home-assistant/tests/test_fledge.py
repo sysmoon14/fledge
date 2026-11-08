@@ -37,30 +37,31 @@ def test_a_light_as_the_thermostat_lists_it():
     assert cards.light(faint)["brightness"] == 1, "on is at least 1%"
 
 
-def test_the_thermostat_wakes_to_what_was_chosen():
-    rooms = [cards.LightsCard("Bedroom", "mdi:bed", ["light.lamp"], "area:bedroom"),
-             cards.LightsCard("Hall", "mdi:door", ["light.gone"], "area:hall")]
-    states = {"light.lamp": State("light.lamp", "on"), "climate.utility": State("climate.utility", "heat")}
-    wake = lambda w: cards.cards(rooms, ["climate.utility"], [], states.get, w)["wake"]
-    assert wake("chooser") == "chooser" and wake("thermostat") == "thermostat"
-    assert wake("area:bedroom") == 0 and wake("entity:climate.utility") == 1, "by its place among the cards"
-    assert wake("area:hall") == "chooser", "a card that isn't there: the chooser"
-
-
-def test_a_room_with_no_known_lights_has_no_card():
-    rooms = [cards.LightsCard("Bedroom", "mdi:bed", ["light.gone"]),
-             cards.LightsCard("Kitchen", "mdi:knife", ["light.kitchen"])]
-    states = {"light.kitchen": State("light.kitchen", "off"),
+def test_each_device_is_a_card_in_the_order_chosen():
+    states = {"switch.fan": State("switch.fan", "off", friendly_name="Fan"),
+              "light.lamp": State("light.lamp", "on", friendly_name="Lamp", brightness=255,
+                                  supported_color_modes=["brightness"]),
               "climate.utility": State("climate.utility", "heat", temperature=21, hvac_action="idle"),
               "media_player.speaker": State("media_player.speaker", "playing", volume_level=0.35)}
-    out = cards.cards(rooms, ["climate.utility"], ["media_player.speaker"], states.get)["cards"]
-    assert [c["kind"] for c in out] == ["lights", "climate", "media"]
-    assert out[0]["name"] == "Kitchen" and out[1]["target"] == 21 and out[2]["volume"] == 35
+    out = cards.cards(["climate.utility", "light.gone", "light.lamp", "media_player.speaker", "switch.fan"],
+                      states.get)["cards"]
+    assert [c["kind"] for c in out] == ["climate", "lights", "media", "lights"], "a device Home Assistant lost: no card"
+    assert out[0]["target"] == 21 and out[2]["volume"] == 35
+    assert out[1]["name"] == "Lamp" and [l["brightness"] for l in out[1]["lights"]] == [100]
+    assert out[3]["lights"][0]["dimmable"] is False
+
+
+def test_the_thermostat_wakes_to_what_was_chosen():
+    states = {"light.lamp": State("light.lamp", "on"), "climate.utility": State("climate.utility", "heat")}
+    wake = lambda w, device=None: cards.cards(["light.lamp", "climate.utility"], states.get, w, device)["wake"]
+    assert wake("chooser") == "chooser" and wake("thermostat") == "thermostat"
+    assert wake("chooser", "climate.utility") == 1 and wake("thermostat", "light.lamp") == 0, "by its place"
+    assert wake("thermostat", "light.hall") == "thermostat", "a device that isn't a card: as chosen"
 
 
 def test_commands_reach_only_what_was_chosen_only_as_allowed():
-    lights, climates, players = ["light.lamp", "switch.fan"], ["climate.utility"], ["media_player.speaker"]
-    command = lambda payload: cards.command(payload, lights, climates, players)
+    chosen = ["light.lamp", "switch.fan", "climate.utility", "media_player.speaker"]
+    command = lambda payload: cards.command(payload, chosen)
     assert command({"id": "light.lamp", "action": "brightness", "value": 40}) == \
         cards.Call("light", "turn_on", "light.lamp", {"brightness_pct": 40})
     assert command({"id": "switch.fan", "action": "on"}) == cards.Call("homeassistant", "turn_on", "switch.fan", {})
@@ -70,7 +71,9 @@ def test_commands_reach_only_what_was_chosen_only_as_allowed():
         {"id": "light.other", "action": "on"},
         {"id": "light.lamp", "action": "temperature", "value": 20},
         {"id": "switch.fan", "action": "brightness", "value": 50},
+        {"id": "climate.utility", "action": "on"},
         {"id": "climate.utility", "action": "temperature", "value": 90},
+        {"id": "media_player.speaker", "action": "off"},
         {"id": "light.lamp", "action": "brightness", "value": "lots"},
         {"id": ["light.lamp"], "action": "on"},
         {"action": "on"},
@@ -95,20 +98,22 @@ async def test_choosing_the_thermostat_and_its_cards(hass: HomeAssistant, mqtt_m
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "user"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"serial": SERIAL})
     assert result["step_id"] == "cards"
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"climates": [], "media": []})
-    assert result["step_id"] == "wake"
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"wake": "thermostat"})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"entities": ["light.lamp", "climate.utility"], "wake": "thermostat"})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == f"Nest Thermostat ({SERIAL})"
     assert result["data"] == {"serial": SERIAL}
-    assert result["options"]["wake"] == "thermostat"
+    assert result["options"] == {"entities": ["light.lamp", "climate.utility"], "wake": "thermostat"}
 
     entry = hass.config_entries.async_entries(DOMAIN)[0]
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {"climates": [], "media": []})
-    assert result["step_id"] == "wake"
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {"wake": "chooser"})
-    assert result["type"] is FlowResultType.CREATE_ENTRY and entry.options["wake"] == "chooser"
+    assert result["step_id"] == "init", "one page"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"entities": ["climate.utility", "light.lamp"], "wake": "chooser",
+                            "wake_device": "light.lamp"})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {"entities": ["climate.utility", "light.lamp"], "wake": "chooser",
+                             "wake_device": "light.lamp"}
 
 
 async def test_without_a_thermostat_there_is_nothing_to_set_up(hass: HomeAssistant, mqtt_mock) -> None:
@@ -122,7 +127,6 @@ async def test_a_thermostat_coming_online_is_offered(hass: HomeAssistant, mqtt_m
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_MQTT},
                                                        data=info)
     assert result["step_id"] == "confirm"
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY and result["data"] == {"serial": SERIAL}
@@ -141,34 +145,26 @@ def _published(mqtt_mock) -> list:
     return [c.args for c in mqtt_mock.async_publish.call_args_list if c.args[0] == CARDS]
 
 
-async def test_a_room_s_lights_are_kept_on_the_thermostat(hass: HomeAssistant, mqtt_mock) -> None:
-    bedroom = ar.async_get(hass).async_create("Bedroom", icon="mdi:bed")
-    entities = er.async_get(hass)
-    for name in ("lamp", "ceiling", "screen"):
-        entities.async_get_or_create("light", "test", name, suggested_object_id=name)
-        entities.async_update_entity(f"light.{name}", area_id=bedroom.id)
-    # A light group hidden from dashboards is still a room's light.
-    entities.async_update_entity("light.ceiling", hidden_by=er.RegistryEntryHider.USER)
+async def test_the_chosen_devices_are_kept_on_the_thermostat(hass: HomeAssistant, mqtt_mock) -> None:
     hass.states.async_set("light.lamp", "on", {"friendly_name": "Lamp", "brightness": 255,
                                                "supported_color_modes": ["brightness"]})
-    hass.states.async_set("light.ceiling", "off", {"friendly_name": "Ceiling"})
+    hass.states.async_set("switch.fan", "off", {"friendly_name": "Fan"})
     entry = MockConfigEntry(domain=DOMAIN, unique_id=SERIAL, data={"serial": SERIAL},
-                            options={"areas": [bedroom.id], "exclude": ["light.screen"], "climates": [], "media": []})
+                            options={"entities": ["switch.fan", "light.lamp"], "wake": "chooser",
+                                     "wake_device": "light.lamp"})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
     topic, payload, qos, retain = _published(mqtt_mock)[-1]
-    card = json.loads(payload)["cards"][0]
-    assert json.loads(payload)["wake"] == "chooser"
-    assert retain and card["name"] == "Bedroom" and card["icon"] == "mdi:bed"
-    assert [(l["name"], l["on"], l["brightness"]) for l in card["lights"]] == [("Ceiling", False, None),
-                                                                                ("Lamp", True, 100)]
+    published = json.loads(payload)
+    assert retain and published["wake"] == 1
+    assert [(c["name"], c["lights"][0]["on"]) for c in published["cards"]] == [("Fan", False), ("Lamp", True)]
 
-    hass.states.async_set("light.ceiling", "on", {"friendly_name": "Ceiling"})
+    hass.states.async_set("switch.fan", "on", {"friendly_name": "Fan"})
     await hass.async_block_till_done()
     card = json.loads(_published(mqtt_mock)[-1][1])["cards"][0]
-    assert card["lights"][0]["on"], "a light switched elsewhere shows on the thermostat"
+    assert card["lights"][0]["on"], "switched elsewhere: shows on the thermostat"
 
     turn_on = async_mock_service(hass, "light", "turn_on")
     async_fire_mqtt_message(hass, COMMANDS, json.dumps({"id": "light.lamp", "action": "brightness", "value": 30}))
@@ -180,3 +176,26 @@ async def test_a_room_s_lights_are_kept_on_the_thermostat(hass: HomeAssistant, m
     await hass.config_entries.async_remove(entry.entry_id)
     await hass.async_block_till_done()
     assert _published(mqtt_mock)[-1] == (CARDS, "", 0, True), "removed: the thermostat back as it was"
+
+
+async def test_rooms_become_a_card_a_light(hass: HomeAssistant, mqtt_mock) -> None:
+    bedroom = ar.async_get(hass).async_create("Bedroom", icon="mdi:bed")
+    entities = er.async_get(hass)
+    for name in ("lamp", "ceiling", "screen"):
+        entities.async_get_or_create("light", "test", name, suggested_object_id=name)
+        entities.async_update_entity(f"light.{name}", area_id=bedroom.id)
+    # A light group hidden from dashboards is still a room's light.
+    entities.async_update_entity("light.ceiling", hidden_by=er.RegistryEntryHider.USER)
+    for name in ("lamp", "ceiling"):
+        hass.states.async_set(f"light.{name}", "off", {"friendly_name": name.title()})
+    hass.states.async_set("climate.utility", "heat", {"temperature": 21})
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=SERIAL, data={"serial": SERIAL},
+                            options={"areas": [bedroom.id], "exclude": ["light.screen"],
+                                     "climates": ["climate.utility"], "media": [], "wake": f"area:{bedroom.id}"})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.options == {"entities": ["light.ceiling", "light.lamp", "climate.utility"], "wake": "chooser",
+                             "wake_device": "light.ceiling"}
+    published = json.loads(_published(mqtt_mock)[-1][1])
+    assert [c["name"] for c in published["cards"]] == ["Ceiling", "Lamp", "climate.utility"] and published["wake"] == 0

@@ -15,25 +15,16 @@
       },
       "cards": {
         "title": "What the thermostat shows",
-        "description": "Turning the ring moves from the thermostat to these cards: one for each room's lights, then each other thermostat and media player. Change them any time from Configure.",
+        "description": "Each device is a card on the thermostat, in this order (drag to reorder). Turn the ring to browse them, press to open one: a light dims, a switch switches, a thermostat sets its temperature, a speaker its volume.",
         "data": {
-          "areas": "Rooms whose lights it shows",
-          "climates": "Other thermostats",
-          "media": "Media players",
-          "exclude": "Lights to leave out"
+          "entities": "Devices",
+          "wake": "When the thermostat wakes",
+          "wake_device": "Or open this device"
         },
         "data_description": {
-          "areas": "Each room becomes a lights card with the room's lights.",
-          "climates": "Heating zones or other thermostats to set from this one.",
-          "media": "Speakers whose volume the ring sets.",
-          "exclude": "Lights in those rooms not to list, such as a screen's backlight."
-        }
-      },
-      "wake": {
-        "title": "When the thermostat wakes",
-        "description": "What a turn or press shows when the thermostat's screen is dark. The device chooser shows the thermostat among your devices, zoomed out: turn to browse, press to open. Or open one device straight away.",
-        "data": {
-          "wake": "Show"
+          "entities": "Lights (a light group works for a whole room), switches, fans, other thermostats and media players.",
+          "wake": "What shows when you walk up to it, turn the ring or press it while its screen is dark.",
+          "wake_device": "Wake straight into one of the devices above instead."
         }
       }
     },
@@ -47,26 +38,25 @@
     "step": {
       "init": {
         "title": "What the thermostat shows",
-        "description": "Turning the ring moves from the thermostat to these cards: one for each room's lights, then each other thermostat and media player.",
+        "description": "Each device is a card on the thermostat, in this order (drag to reorder). Turn the ring to browse them, press to open one: a light dims, a switch switches, a thermostat sets its temperature, a speaker its volume.",
         "data": {
-          "areas": "Rooms whose lights it shows",
-          "climates": "Other thermostats",
-          "media": "Media players",
-          "exclude": "Lights to leave out"
+          "entities": "Devices",
+          "wake": "When the thermostat wakes",
+          "wake_device": "Or open this device"
         },
         "data_description": {
-          "areas": "Each room becomes a lights card with the room's lights.",
-          "climates": "Heating zones or other thermostats to set from this one.",
-          "media": "Speakers whose volume the ring sets.",
-          "exclude": "Lights in those rooms not to list, such as a screen's backlight."
+          "entities": "Lights (a light group works for a whole room), switches, fans, other thermostats and media players.",
+          "wake": "What shows when you walk up to it, turn the ring or press it while its screen is dark.",
+          "wake_device": "Wake straight into one of the devices above instead."
         }
-      },
-      "wake": {
-        "title": "When the thermostat wakes",
-        "description": "What a turn or press shows when the thermostat's screen is dark. The device chooser shows the thermostat among your devices, zoomed out: turn to browse, press to open. Or open one device straight away.",
-        "data": {
-          "wake": "Show"
-        }
+      }
+    }
+  },
+  "selector": {
+    "wake": {
+      "options": {
+        "chooser": "The device chooser: the thermostat among your devices, zoomed out",
+        "thermostat": "The thermostat, as the Nest always did"
       }
     }
   }

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
 
-from .const import MAX_LIGHTS
+from .const import SWITCHED
 
 
 class State(Protocol):
@@ -22,17 +22,6 @@ class State(Protocol):
     entity_id: str
     state: str
     attributes: Mapping[str, Any]
-
-
-@dataclass
-class LightsCard:
-    """A room's lights: an area's name and icon, and its lights."""
-
-    name: str
-    icon: str
-    lights: Sequence[str]
-    # What the wake option calls this card: "area:<id>".
-    key: str = ""
 
 
 def _name(state: State) -> str:
@@ -91,34 +80,33 @@ def media(state: State) -> dict[str, Any]:
     }
 
 
-def cards(
-    rooms: Sequence[LightsCard],
-    climates: Sequence[str],
-    players: Sequence[str],
-    get: Any,
-    wake: str = "chooser",
-) -> dict[str, Any]:
-    """The cards, from the chosen rooms, thermostats and media players, each
-    entity's state from `get` (None: unknown to Home Assistant, left out),
-    and what the thermostat wakes to: "chooser", "thermostat", or the place
-    among the cards of the one `wake` names ("area:<id>", "entity:<id>"),
-    the chooser if it isn't there."""
-    out: list[dict[str, Any]] = []
-    keys: list[str] = []
-    for room in rooms:
-        lights = [light(s) for s in map(get, room.lights) if s is not None][:MAX_LIGHTS]
-        if lights:
-            out.append({"kind": "lights", "name": room.name, "icon": room.icon, "lights": lights})
-            keys.append(room.key)
-    for build, entities in ((climate, climates), (media, players)):
-        for state in map(get, entities):
-            if state is not None:
-                out.append(build(state))
-                keys.append(f"entity:{state.entity_id}")
+def _domain(entity_id: str) -> str:
+    return entity_id.partition(".")[0]
+
+
+def card(state: State) -> dict[str, Any]:
+    """One device's card: a thermostat's, a media player's, or one light's
+    (or switch's), which the thermostat dims or switches straight away."""
+    domain = _domain(state.entity_id)
+    if domain == "climate":
+        return climate(state)
+    if domain == "media_player":
+        return media(state)
+    one = light(state)
+    return {"kind": "lights", "name": one["name"], "icon": one["icon"], "lights": [one]}
+
+
+def cards(entities: Sequence[str], get: Any, wake: str = "chooser", device: str | None = None) -> dict[str, Any]:
+    """The cards, a device each in the order chosen, each entity's state
+    from `get` (None: unknown to Home Assistant, left out), and what the
+    thermostat wakes to: `device`'s place among the cards, else "chooser"
+    or "thermostat" as `wake` says."""
+    shown = [state for state in map(get, entities) if state is not None]
+    ids = [state.entity_id for state in shown]
     woken: Any = "thermostat" if wake == "thermostat" else "chooser"
-    if wake in keys:
-        woken = keys.index(wake)
-    return {"cards": out, "wake": woken}
+    if device in ids:
+        woken = ids.index(device)
+    return {"cards": [card(state) for state in shown], "wake": woken}
 
 
 @dataclass
@@ -131,28 +119,28 @@ class Call:
     data: dict[str, Any]
 
 
-def command(payload: Mapping[str, Any], lights: Sequence[str], climates: Sequence[str],
-            players: Sequence[str]) -> Call | None:
+def command(payload: Mapping[str, Any], entities: Sequence[str]) -> Call | None:
     """What a command from the thermostat does, or None if it isn't one it
-    may give: only the chosen entities, only these ways."""
+    may give: only the chosen entities, only the ways each kind allows."""
     entity = payload.get("id")
     what = payload.get("action")
     try:
         value = float(payload.get("value", 0))
     except (TypeError, ValueError):
         return None
-    if not isinstance(entity, str):
+    if not isinstance(entity, str) or entity not in entities:
         return None
-    if entity in lights:
+    domain = _domain(entity)
+    if domain in SWITCHED:
         if what == "off":
             return Call("homeassistant", "turn_off", entity, {})
         if what == "on":
             return Call("homeassistant", "turn_on", entity, {})
-        if what == "brightness" and entity.startswith("light.") and 1 <= value <= 100:
+        if what == "brightness" and domain == "light" and 1 <= value <= 100:
             return Call("light", "turn_on", entity, {"brightness_pct": round(value)})
-    if entity in climates and what == "temperature" and 5 <= value <= 35:
+    if domain == "climate" and what == "temperature" and 5 <= value <= 35:
         return Call("climate", "set_temperature", entity, {"temperature": value})
-    if entity in players:
+    if domain == "media_player":
         if what == "volume" and 0 <= value <= 100:
             return Call("media_player", "volume_set", entity, {"volume_level": value / 100})
         if what == "play_pause":
