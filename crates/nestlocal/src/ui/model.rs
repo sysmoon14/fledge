@@ -160,7 +160,7 @@ mod tests {
     fn parses_the_blueprints_cards() {
         let payload = br#"{"cards":[
             {"kind":"lights","name":"Bedroom","icon":"mdi:lightbulb-group","lights":[
-                {"id":"light.ben_s_lamp","name":"Ben's Lamp","icon":"m3s:table-lamp","on":true,
+                {"id":"light.reading_lamp","name":"Reading Lamp","icon":"m3s:table-lamp","on":true,
                  "dimmable":true,"brightness":60,"rgb":[255,169,87]},
                 {"id":"switch.fan","name":"Fan","icon":"","on":false,"dimmable":false,"brightness":null,"rgb":null}]},
             {"kind":"climate","id":"climate.living","name":"Living room","icon":"","mode":"heat",

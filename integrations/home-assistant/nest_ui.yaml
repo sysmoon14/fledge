@@ -7,7 +7,7 @@ blueprint:
     card. Icons and light colours come from Home Assistant. Change any of it
     here, with no new build for the thermostat.
   domain: automation
-  source_url: https://github.com/sysmoon14/fledge/blob/ben/integrations/home-assistant/nest_ui.yaml
+  source_url: https://github.com/sysmoon14/fledge/blob/main/integrations/home-assistant/nest_ui.yaml
   input:
     thermostat:
       name: Thermostat

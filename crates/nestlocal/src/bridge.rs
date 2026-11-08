@@ -1013,7 +1013,7 @@ pub mod tests {
         assert!(!configs.keys().any(|t| t.contains("update")));
 
         let b = test_bridge();
-        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/unfr0zen", None)).is_ok());
+        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/fledge", None)).is_ok());
         b.announce(&dev, &sh);
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let update: Value = serde_json::from_str(&configs["homeassistant/update/nestlocal_s/nestlocal/config"]).unwrap();
@@ -1024,7 +1024,7 @@ pub mod tests {
         assert_eq!(check["command_topic"], json!("nestlocal/S/set/check_update"));
 
         let b = test_bridge();
-        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/unfr0zen", Some([7; 32]))).is_ok());
+        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/fledge", Some([7; 32]))).is_ok());
         b.announce(&dev, &sh);
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let update: Value = serde_json::from_str(&configs["homeassistant/update/nestlocal_s/nestlocal/config"]).unwrap();

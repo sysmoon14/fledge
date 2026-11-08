@@ -9,8 +9,8 @@
 #   --init-key  make the signing key (Ed25519, kept on this machine only) and
 #               print its public key, the value for nestlocal's -update-key
 #   --key FILE  the signing key (default ~/.config/unfr0zen/release-signing.pem)
-#   --tag TAG   the release's tag (default: the upstream release this commit is
-#               built on, with -ben.N after it: v0.3.2-ben.1, v0.3.2-ben.2, ...)
+#   --tag TAG   the release's tag (default: the latest vX.Y.Z tag, its patch
+#               number one more: v0.4.0, then v0.4.1, ...)
 #   --dry-run   build, check and sign, then publish nothing (the tag is removed)
 #
 # The commit must be clean and pushed. It is tagged first, so nestlocal reports
@@ -67,13 +67,13 @@ git fetch -q origin "$branch" || fail "cannot fetch origin $branch"
 repo=$(git remote get-url origin | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')
 case $repo in */*) ;; *) fail "origin is not a GitHub repository: $(git remote get-url origin)" ;; esac
 for existing in $(git tag --points-at HEAD); do
-    case $existing in *-ben.*) fail "this commit is already released as $existing" ;; esac
+    case $existing in v[0-9]*) fail "this commit is already released as $existing" ;; esac
 done
-base=$(git describe --tags --abbrev=0 --exclude '*-ben.*' 2>/dev/null) || fail "no upstream release tag below this commit"
-previous=$(git describe --tags --abbrev=0 --match "$base-ben.*" 2>/dev/null || echo "$base")
+previous=$(git describe --tags --abbrev=0 2>/dev/null) || fail "no release tag below this commit"
 if [ -z "$tag" ]; then
-    n=$(git tag -l "$base-ben.*" | sed "s/^$base-ben\\.//" | grep -E '^[0-9]+$' | sort -n | tail -n 1)
-    tag=$base-ben.$(( ${n:-0} + 1 ))
+    latest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+    [ -n "$latest" ] || fail "no vX.Y.Z tag to follow: give --tag"
+    tag=$(echo "$latest" | awk -F. '{ printf "%s.%s.%d", $1, $2, $3 + 1 }')
 fi
 git rev-parse -q --verify "refs/tags/$tag" > /dev/null && fail "tag $tag exists"
 git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null 2>&1 && fail "origin has tag $tag"

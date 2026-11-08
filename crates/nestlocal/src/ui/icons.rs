@@ -64,7 +64,7 @@ mod tests {
     fn finds_home_assistants_names_and_falls_back_by_domain() {
         let group = lookup("mdi:lightbulb-group", "light.bedroom").unwrap();
         assert_eq!(group.box_size, 24.0);
-        let lamp = lookup("m3s:table-lamp", "light.ben_s_lamp").unwrap();
+        let lamp = lookup("m3s:table-lamp", "light.reading_lamp").unwrap();
         assert_eq!(lamp.box_size, 960.0);
         assert!(lookup("m3sf:table-lamp", "light.x").is_some());
         assert_eq!(lookup("mdi:no-such-icon", "light.x"), lookup("mdi:lightbulb", ""));

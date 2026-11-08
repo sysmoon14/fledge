@@ -90,8 +90,9 @@ pub fn parse_release(body: &[u8]) -> Result<Release, String> {
     Ok(Release { tag, url: text("html_url"), notes: text("body"), assets })
 }
 
-/// What orders versions: vX.Y.Z, then -ben.N (utils/release-nestlocal.sh),
-/// then git describe's -K-gHASH commits after it. -dirty is ignored.
+/// What orders versions: vX.Y.Z, then a release counter -NAME.N after it
+/// (the fork's earlier releases numbered so), then git describe's -K-gHASH
+/// commits after it. -dirty is ignored.
 fn version_key(version: &str) -> Option<(u32, u32, u32, u32, u32)> {
     let rest = version.strip_prefix('v')?;
     let (core, mut rest) = rest.split_once('-').unwrap_or((rest, ""));
@@ -100,11 +101,13 @@ fn version_key(version: &str) -> Option<(u32, u32, u32, u32, u32)> {
     if parts.next().is_some() {
         return None;
     }
-    let mut ben = 0;
-    if let Some(after) = rest.strip_prefix("ben.") {
-        let (n, tail) = after.split_once('-').unwrap_or((after, ""));
-        ben = n.parse().ok()?;
-        rest = tail;
+    let mut counter = 0;
+    if let Some((name, after)) = rest.split_once('.') {
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase()) {
+            let (n, tail) = after.split_once('-').unwrap_or((after, ""));
+            counter = n.parse().ok()?;
+            rest = tail;
+        }
     }
     let mut commits = 0;
     if let Some((k, hash)) = rest.split_once('-') {
@@ -112,7 +115,7 @@ fn version_key(version: &str) -> Option<(u32, u32, u32, u32, u32)> {
             commits = k.parse().ok()?;
         }
     }
-    Some((major, minor, patch, ben, commits))
+    Some((major, minor, patch, counter, commits))
 }
 
 /// The release a build is on: git describe without -K-gHASH and -dirty.
@@ -319,7 +322,7 @@ pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>
         let tag = if failed == Some(r.tag.as_str()) { VERSION } else { r.tag.as_str() };
         state["latest_version"] = offered(VERSION, tag).into();
         // Home Assistant ranks a development build's -K-gHASH above a plain
-        // -ben.N, so it would not offer a newer release: show it the release
+        // -NAME.N, so it would not offer a newer release: show it the release
         // the build is on (the title keeps the build).
         if newer(tag, VERSION) {
             let base = release_of(VERSION);
@@ -511,8 +514,8 @@ mod tests {
         assert_eq!(parse_release(body).unwrap(), Release {
             tag: "v0.3.2".into(), url: "https://github.com/o/r/releases/tag/v0.3.2".into(), notes: "Fixes".into(),
             assets: vec![] });
-        let body = br#"{"tag_name":"v0.3.2-ben.2","assets":[{"name":"nestlocal-armv7",
-            "browser_download_url":"https://github.com/o/r/releases/download/v0.3.2-ben.2/nestlocal-armv7","digest":"sha256:ab"}]}"#;
+        let body = br#"{"tag_name":"v0.3.2-rc.2","assets":[{"name":"nestlocal-armv7",
+            "browser_download_url":"https://github.com/o/r/releases/download/v0.3.2-rc.2/nestlocal-armv7","digest":"sha256:ab"}]}"#;
         let release = parse_release(body).unwrap();
         assert_eq!(release.asset(ASSET).unwrap().digest, "sha256:ab");
         assert!(release.asset(SIGNATURE).is_err());
@@ -532,7 +535,7 @@ mod tests {
 
     #[test]
     fn only_owner_slash_name_is_a_repository() {
-        assert!(valid_repo("sysmoon14/unfr0zen"));
+        assert!(valid_repo("sysmoon14/fledge"));
         assert!(valid_repo("a-b/c.d_e"));
         for repo in ["", "unfr0zen", "a/b/c", "/r", "o/", "o/..", "o/r?x=1", "o/r#x", "o r/x"] {
             assert!(!valid_repo(repo), "{repo}");
@@ -566,9 +569,9 @@ mod tests {
         let s = state(None, &Progress::Downloading(40), None);
         assert_eq!((s["in_progress"].clone(), s["update_percentage"].clone()), (true.into(), 40.into()));
         assert_eq!(state(None, &Progress::Restarting, None)["in_progress"], true);
-        let s = state(None, &Progress::Idle, Some("v9.9.9-ben.1"));
+        let s = state(None, &Progress::Idle, Some("v9.9.9-rc.1"));
         assert_eq!(s["in_progress"], false);
-        assert!(s["title"].as_str().unwrap().contains("v9.9.9-ben.1 did not start"));
+        assert!(s["title"].as_str().unwrap().contains("v9.9.9-rc.1 did not start"));
         assert!(state(None, &Progress::Failed("no room".into()), None)["title"].as_str().unwrap().contains("no room"));
     }
 
@@ -590,45 +593,46 @@ mod tests {
 
     #[test]
     fn a_release_that_was_rolled_back_is_not_offered_again() {
-        let r = Release { tag: "v99.0.0-ben.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
-        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-ben.1"));
+        let r = Release { tag: "v99.0.0-rc.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
+        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"));
         assert_eq!(s["latest_version"], s["installed_version"]);
-        assert!(s["title"].as_str().unwrap().contains("v99.0.0-ben.1 did not start"));
+        assert!(s["title"].as_str().unwrap().contains("v99.0.0-rc.1 did not start"));
         // A newer one than that is.
-        let r = Release { tag: "v99.0.0-ben.2".into(), ..r };
-        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-ben.1"));
-        assert_eq!(s["latest_version"], "v99.0.0-ben.2");
+        let r = Release { tag: "v99.0.0-rc.2".into(), ..r };
+        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"));
+        assert_eq!(s["latest_version"], "v99.0.0-rc.2");
         assert!(s["title"].as_str().unwrap().contains("rolled back"));
     }
 
     #[test]
     fn a_build_s_release_is_its_tag() {
-        assert_eq!(release_of("v0.3.2-ben.1-1-g51fc988"), "v0.3.2-ben.1");
+        assert_eq!(release_of("v0.3.2-rc.1-1-g51fc988"), "v0.3.2-rc.1");
         assert_eq!(release_of("v0.3.2-16-gffb3d93-dirty"), "v0.3.2");
-        assert_eq!(release_of("v0.3.2-ben.2"), "v0.3.2-ben.2");
+        assert_eq!(release_of("v0.3.2-rc.2"), "v0.3.2-rc.2");
         assert_eq!(release_of("f290a39"), "f290a39");
     }
 
     #[test]
     fn home_assistant_sees_a_development_build_as_its_release_when_one_is_newer() {
-        let r = Release { tag: "v99.0.0-ben.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
+        let r = Release { tag: "v99.0.0-rc.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
         let s = state(Some(&r), &Progress::Idle, None);
         assert_eq!(s["installed_version"], release_of(VERSION));
-        assert_eq!(s["latest_version"], "v99.0.0-ben.1");
+        assert_eq!(s["latest_version"], "v99.0.0-rc.1");
         assert_eq!(state(None, &Progress::Idle, None)["title"], "Fledge");
     }
 
     #[test]
     fn versions_order_by_release_then_fork_release_then_commits() {
-        assert!(newer("v0.3.2-ben.2", "v0.3.2-ben.1"));
-        assert!(newer("v0.3.2-ben.2", "v0.3.2-ben.1-5-gabc1234"));
-        assert!(newer("v0.3.3", "v0.3.2-ben.9"));
-        assert!(newer("v0.3.3-ben.1", "v0.3.2-16-gffb3d93"));
+        assert!(newer("v0.3.2-rc.2", "v0.3.2-rc.1"));
+        assert!(newer("v0.3.2-rc.2", "v0.3.2-rc.1-5-gabc1234"));
+        assert!(newer("v0.3.3", "v0.3.2-rc.9"));
+        assert!(newer("v0.4.0", "v0.3.2-old.7"), "past the fork's old numbering");
+        assert!(newer("v0.3.3-rc.1", "v0.3.2-16-gffb3d93"));
         assert!(newer("v0.10.0", "v0.9.9"));
-        assert!(!newer("v0.3.2-ben.1", "v0.3.2-ben.1"));
-        assert!(!newer("v0.3.2-ben.1", "v0.3.2-ben.1-1-gabc1234-dirty"));
-        assert!(!newer("v0.3.2-ben.1", "v0.3.2-ben.2"));
-        assert!(!newer("v0.3.1", "v0.3.2-ben.1"));
+        assert!(!newer("v0.3.2-rc.1", "v0.3.2-rc.1"));
+        assert!(!newer("v0.3.2-rc.1", "v0.3.2-rc.1-1-gabc1234-dirty"));
+        assert!(!newer("v0.3.2-rc.1", "v0.3.2-rc.2"));
+        assert!(!newer("v0.3.1", "v0.3.2-rc.1"));
         // Unreadable either side: never newer.
         assert!(!newer("latest", "v0.3.2"));
         assert!(!newer("v0.3.3", "f290a39"));
@@ -671,15 +675,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let paths = Paths { daemon: dir.join("nestlocal"), pending: dir.join("update.pending") };
         std::fs::write(&paths.daemon, b"old").unwrap();
-        paths.install(b"new", "v0.3.2-ben.2").unwrap();
+        paths.install(b"new", "v0.3.2-rc.2").unwrap();
         assert_eq!(std::fs::read(&paths.daemon).unwrap(), b"new");
         assert_eq!(std::fs::read(dir.join("nestlocal.prev")).unwrap(), b"old");
         assert!(!dir.join("nestlocal.new").exists());
-        assert_eq!(std::fs::read_to_string(&paths.pending).unwrap(), "0\nv0.3.2-ben.2\n");
+        assert_eq!(std::fs::read_to_string(&paths.pending).unwrap(), "0\nv0.3.2-rc.2\n");
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&paths.daemon).unwrap().permissions().mode() & 0o777, 0o755);
         // Not over a build still pending.
-        assert!(paths.install(b"newer", "v0.3.2-ben.3").is_err());
+        assert!(paths.install(b"newer", "v0.3.2-rc.3").is_err());
         assert_eq!(std::fs::read(&paths.daemon).unwrap(), b"new");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -701,7 +705,7 @@ mod tests {
         exe(&dir.join("nestlocal"), "#!/bin/sh\n# new\nexit 0\n");
         exe(&dir.join("nestlocal.prev"), "#!/bin/sh\n# old\nexit 0\n");
         std::fs::write(dir.join("options"), "-mqtt tcp://broker:1883\n").unwrap();
-        std::fs::write(dir.join("update.pending"), "0\nv0.3.2-ben.3\n").unwrap();
+        std::fs::write(dir.join("update.pending"), "0\nv0.3.2-rc.3\n").unwrap();
         let init = include_str!("../rootfs/nestlocal.init")
             .replace("/nestlabs/sbin/nestlocal", &format!("{d}/nestlocal"))
             .replace("/var/run/nestlocal.pid", &format!("{d}/pid"))
@@ -717,14 +721,14 @@ mod tests {
         };
         for n in 1..=3 {
             start();
-            assert_eq!(std::fs::read_to_string(dir.join("update.pending")).unwrap(), format!("{n}\nv0.3.2-ben.3\n"));
+            assert_eq!(std::fs::read_to_string(dir.join("update.pending")).unwrap(), format!("{n}\nv0.3.2-rc.3\n"));
             assert!(std::fs::read_to_string(dir.join("nestlocal")).unwrap().contains("new"));
         }
         start();
         assert!(!dir.join("update.pending").exists());
         assert!(!dir.join("nestlocal.prev").exists());
         assert!(std::fs::read_to_string(dir.join("nestlocal")).unwrap().contains("old"));
-        assert_eq!(std::fs::read_to_string(dir.join("update.failed")).unwrap(), "v0.3.2-ben.3\n");
+        assert_eq!(std::fs::read_to_string(dir.join("update.failed")).unwrap(), "v0.3.2-rc.3\n");
         // Committed (no PENDING): starts are not counted.
         start();
 
@@ -733,12 +737,12 @@ mod tests {
         exe(&dir.join("nestlocal"), "#!/bin/sh\n# new\nexit 0\n");
         exe(&dir.join("nestlocal.prev"), &format!("#!/bin/sh\n# old\necho \"$*\" >> {d}/prev-args\nexit 0\n"));
         std::fs::remove_file(dir.join("update.failed")).unwrap();
-        std::fs::write(dir.join("update.pending"), "0\nv0.3.2-ben.4\n").unwrap();
+        std::fs::write(dir.join("update.pending"), "0\nv0.3.2-rc.4\n").unwrap();
         exe(&dir.join("bin/start-stop-daemon"), "#!/bin/sh\ncase \" $* \" in *\" -t \"*) exit 1 ;; esac\nexit 0\n");
         start();
         assert!(!dir.join("update.pending").exists());
         assert!(std::fs::read_to_string(dir.join("nestlocal")).unwrap().contains("old"));
-        assert_eq!(std::fs::read_to_string(dir.join("update.failed")).unwrap(), "v0.3.2-ben.4\n");
+        assert_eq!(std::fs::read_to_string(dir.join("update.failed")).unwrap(), "v0.3.2-rc.4\n");
         // The previous build held the unit awake meanwhile, started once.
         std::thread::sleep(std::time::Duration::from_millis(200));
         let held = std::fs::read_to_string(dir.join("prev-args")).unwrap();
