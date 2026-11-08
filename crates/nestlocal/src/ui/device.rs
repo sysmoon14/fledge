@@ -29,10 +29,6 @@ pub const KEY_ENTER: u16 = 28;
 pub const REL_DIAL: u16 = 7;
 const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
 
-pub fn owned() -> bool {
-    std::fs::read_to_string(OWNER).ok().and_then(|s| s.trim().parse::<u32>().ok()) == Some(std::process::id())
-}
-
 pub fn own(yes: bool) {
     let result = if yes {
         crate::settings_ui::publish("screen.owner", std::process::id().to_string().as_bytes())
@@ -101,33 +97,75 @@ impl Display {
         unsafe { std::slice::from_raw_parts_mut(self.map, self.len) }
     }
 
-    /// The visible page's top 480 rows, as they are.
-    pub fn save(&mut self) -> Vec<u8> {
-        let (start, size) = (self.page(), self.stride * 480);
-        self.bytes()[start..start + size].to_vec()
-    }
-
-    pub fn restore(&mut self, saved: &[u8]) {
-        let start = self.page();
-        let size = saved.len().min(self.len - start);
-        self.bytes()[start..start + size].copy_from_slice(&saved[..size]);
-    }
-
-    pub fn show(&mut self, pixmap: &Pixmap) {
+    /// The visible page's top 480 rows as a Frame: what nlclient shows.
+    pub fn save(&mut self) -> Frame {
         let (start, stride) = (self.page(), self.stride);
-        let side = pixmap.width() as usize;
-        let source = pixmap.data();
-        let page = &mut self.bytes()[start..];
-        // The panel shows the framebuffer turned a quarter clockwise: upright
-        // row r, column c is framebuffer row c, column side-1-r.
-        for y in 0..side {
-            let row = &mut page[y * stride..y * stride + side * 4];
-            for (x, out) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                let s = &source[((side - 1 - x) * side + y) * 4..];
-                out.copy_from_slice(&[s[2], s[1], s[0], 0xff]);
+        let page = &self.bytes()[start..];
+        let mut frame = Vec::with_capacity(SIDE * ROW);
+        for y in 0..SIDE {
+            frame.extend_from_slice(&page[y * stride..y * stride + ROW]);
+        }
+        frame
+    }
+
+    /// Shows a Frame on the visible page.
+    pub fn show(&mut self, frame: &[u8]) {
+        self.rows(|y, row| row.copy_from_slice(&frame[y * ROW..(y + 1) * ROW]));
+    }
+
+    /// `from` sliding out and `to` in by `by` pixels of 480, sideways as the
+    /// display stands: the framebuffer's rows, as it is mounted turned.
+    pub fn slide(&mut self, from: &[u8], to: &[u8], by: usize, clockwise: bool) {
+        let by = by.min(SIDE);
+        self.rows(|y, row| {
+            let (source, at) = if clockwise {
+                if y + by < SIDE { (from, y + by) } else { (to, y + by - SIDE) }
+            } else if y >= by { (from, y - by) } else { (to, y + SIDE - by) };
+            row.copy_from_slice(&source[at * ROW..(at + 1) * ROW]);
+        });
+    }
+
+    /// `to` over `from` at `alpha` of 256.
+    pub fn fade(&mut self, from: &[u8], to: &[u8], alpha: u16) {
+        let alpha = alpha.min(256);
+        self.rows(|y, row| {
+            let (a, b) = (&from[y * ROW..(y + 1) * ROW], &to[y * ROW..(y + 1) * ROW]);
+            for ((out, &a), &b) in row.iter_mut().zip(a).zip(b) {
+                *out = ((a as u16 * (256 - alpha) + b as u16 * alpha) >> 8) as u8;
             }
+        });
+    }
+
+    fn rows(&mut self, mut each: impl FnMut(usize, &mut [u8])) {
+        let (start, stride) = (self.page(), self.stride);
+        let page = &mut self.bytes()[start..];
+        for y in 0..SIDE {
+            each(y, &mut page[y * stride..y * stride + ROW]);
         }
     }
+}
+
+/// The display's side, and a framebuffer row of it in bytes.
+const SIDE: usize = 480;
+const ROW: usize = SIDE * 4;
+
+/// A screen as the framebuffer holds it: 480 rows of 480 BGRX pixels, the
+/// picture turned a quarter anticlockwise, as the panel shows the
+/// framebuffer turned a quarter clockwise.
+pub type Frame = Vec<u8>;
+
+/// An upright picture as a Frame: upright row r, column c is framebuffer
+/// row c, column 479-r.
+pub fn frame(pixmap: &Pixmap) -> Frame {
+    let source = pixmap.data();
+    let mut frame = vec![0u8; SIDE * ROW];
+    for (y, row) in frame.as_chunks_mut::<ROW>().0.iter_mut().enumerate() {
+        for (x, out) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let s = &source[((SIDE - 1 - x) * SIDE + y) * 4..];
+            *out = [s[2], s[1], s[0], 0xff];
+        }
+    }
+    frame
 }
 
 impl Drop for Display {

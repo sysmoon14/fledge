@@ -17,6 +17,7 @@
 
 mod device;
 mod icons;
+mod machine;
 mod model;
 mod paint;
 mod screens;
@@ -25,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use model::Command;
+use machine::{Effect, Input, Machine, Mode, Slot};
 use model::{Card, Cards};
 use screens::{Position, Screen};
 
@@ -82,73 +84,22 @@ pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
     }
 }
 
-/// Ring counts per step, by what a step moves: a card, a list row, a value.
-/// REL_DIAL reports the ADC's raw counts; a step is a deliberate movement.
-const CARD_STEP: i32 = 500;
-const ROW_STEP: i32 = 250;
-const VALUE_STEP: i32 = 60;
-/// A pause this long ends a movement (for the log); this long, its counts
-/// towards the next step.
-const GESTURE: Duration = Duration::from_millis(400);
-const TURN_KEPT: Duration = Duration::from_millis(1500);
-/// How long each view waits, untouched, before going back a level.
-const CONTROL_IDLE: Duration = Duration::from_secs(8);
-const LIST_IDLE: Duration = Duration::from_secs(12);
-const CARD_IDLE: Duration = Duration::from_secs(20);
-/// Back to the cards this long after the last input on nlclient's screens,
-/// once nlclient shows its home dial again.
-const NATIVE_IDLE: Duration = Duration::from_secs(5);
-/// Keeps nlclient's display awake well within its own timeout (about 12 s).
-const NUDGE: Duration = Duration::from_secs(4);
-/// The fewest milliseconds between commands while turning.
-const SEND_EVERY: Duration = Duration::from_millis(300);
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Slot {
-    Thermostat,
-    Card(usize),
-    Settings,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum Mode {
-    /// No cards, or no nlclient: everything as stock.
-    Idle,
-    /// nlclient's screen with the ring grabbed: the thermostat card.
-    Home,
-    /// nlclient's screen and ring: its temperature, menus and settings.
-    Native,
-    /// One of the deck's own cards, at its index.
-    Card(usize),
-    LightList { slot: usize, selected: usize },
-    LightDim { slot: usize, light: usize, on: bool, value: u8 },
-    ClimateSet { slot: usize, target: f64 },
-    Volume { slot: usize, value: u8 },
-}
-
 struct Runtime {
     ui: Arc<Ui>,
     sender: Arc<dyn Sender>,
     fonts: paint::Fonts,
     display: device::Display,
     input: device::Input,
-    mode: Mode,
+    machine: Machine,
     generation: u64,
-    cards: Cards,
     /// nlclient's frame from before the UI owned the display.
     saved: Option<Vec<u8>>,
-    dirty: bool,
-    last_input: Instant,
-    last_nudge: Instant,
+    /// What the display shows, while the UI owns it.
+    shown: Option<device::Frame>,
+    /// How the display moves to what the mode shows next.
+    transition: Transition,
     last_check: Instant,
-    turn: i32,
-    turned_at: Instant,
-    /// Counts of the current movement, for tuning the steps.
-    movement: i32,
-    pending: Option<Command>,
-    last_sent: Instant,
     nlclient: bool,
-    holding: bool,
 }
 
 impl Runtime {
@@ -156,19 +107,10 @@ impl Runtime {
            input: device::Input) -> Runtime {
         let now = Instant::now();
         Runtime {
-            ui, sender, fonts, display, input,
-            mode: Mode::Idle, generation: u64::MAX, cards: Cards::default(), saved: None, dirty: false,
-            last_input: now, last_nudge: now, last_check: now - Duration::from_secs(10),
-            turn: 0, turned_at: now, movement: 0, pending: None, last_sent: now, nlclient: false,
-            holding: false,
+            ui, sender, fonts, display, input, machine: Machine::new(now), generation: u64::MAX, saved: None,
+            shown: None, transition: Transition::Cut,
+            last_check: now - Duration::from_secs(10), nlclient: false,
         }
-    }
-
-    fn deck(&self) -> Vec<Slot> {
-        let mut deck = vec![Slot::Thermostat];
-        deck.extend((0..self.cards.cards.len()).map(Slot::Card));
-        deck.push(Slot::Settings);
-        deck
     }
 
     fn run(mut self) {
@@ -176,6 +118,7 @@ impl Runtime {
         loop {
             let events = self.input.wait(Duration::from_millis(50));
             let now = Instant::now();
+            let mut effects = Vec::new();
             if now.duration_since(self.last_check) >= Duration::from_secs(2) {
                 self.last_check = now;
                 self.nlclient = !crate::pids("nlclient").is_empty();
@@ -183,313 +126,67 @@ impl Runtime {
             if self.ui.generation() != self.generation {
                 let (generation, cards) = self.ui.snapshot();
                 self.generation = generation;
-                self.cards = cards;
-                self.revalidate();
+                self.machine.set_cards(cards, &mut effects);
             }
-            let active = self.nlclient && !self.cards.cards.is_empty();
-            if !active {
-                if self.mode != Mode::Idle {
-                    logf!("ui: {}", if self.nlclient { "no cards: the thermostat as it was" } else { "nlclient stopped: standing aside" });
-                    self.go(Mode::Idle);
-                }
-                continue;
-            }
-            if self.mode == Mode::Idle {
-                logf!("ui: {} home screen cards", self.cards.cards.len());
-                // nlclient may be anywhere; the cards start on its home dial.
-                self.go(Mode::Native);
-                self.last_input = now - NATIVE_IDLE;
-            }
+            self.machine.set_active(self.nlclient, now, &mut effects);
+            let lit = device::lit();
+            let before = self.machine.mode.clone();
+            let turned = !events.is_empty();
             for event in events {
-                self.event(event, now);
+                let input = match (event.kind, event.code, event.value) {
+                    (device::EV_REL, device::REL_DIAL, value) => Input::Turn(value),
+                    (device::EV_KEY, device::KEY_ENTER, 1) => Input::Press,
+                    _ => continue,
+                };
+                self.machine.input(input, now, lit, &mut effects);
             }
-            self.tick(now);
-            if self.dirty && device::owned() {
+            let display = &mut self.display;
+            self.machine.tick(now, lit, &mut || home_dial(display), &mut effects);
+            self.transition = transition(&before, &self.machine.mode, self.machine.deck().len(), turned && lit);
+            for effect in effects {
+                self.apply(effect);
+            }
+            if self.machine.take_dirty() && self.machine.mode.owning() {
                 self.draw();
             }
-            self.flush(now, false);
         }
     }
 
-    /// Cards changed under the mode: keep what still exists.
-    fn revalidate(&mut self) {
-        let count = self.cards.cards.len();
-        let slot_ok = |slot: usize, cards: &Cards| slot < cards.cards.len();
-        let fine = match &self.mode {
-            Mode::Card(index) => *index < count + 2,
-            Mode::LightList { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } => slot_ok(*slot, &self.cards),
-            Mode::LightDim { slot, light, .. } => match self.cards.cards.get(*slot) {
-                Some(Card::Lights(card)) => *light < card.lights.len(),
-                _ => false,
-            },
-            _ => true,
-        };
-        if !fine {
-            self.go(Mode::Home);
-        }
-        self.dirty = true;
-    }
-
-    fn owning(mode: &Mode) -> bool {
-        !matches!(mode, Mode::Idle | Mode::Home | Mode::Native)
-    }
-
-    /// Moves to `mode`, handing the display and the ring over as it needs.
-    fn go(&mut self, mode: Mode) {
-        let (was, will) = (Self::owning(&self.mode), Self::owning(&mode));
-        if will && !was {
-            self.saved = Some(self.display.save());
-            device::own(true);
-            self.last_nudge = Instant::now() - NUDGE;
-        }
-        if was && !will {
-            if let Some(saved) = self.saved.take() {
-                self.display.restore(&saved);
+    fn apply(&mut self, effect: Effect) {
+        match effect {
+            Effect::Own(true) => {
+                self.saved = Some(self.display.save());
+                device::own(true);
             }
-            device::own(false);
-        }
-        let hold = !matches!(mode, Mode::Idle | Mode::Native);
-        if hold != self.holding || will != was {
-            logf!("ui: {} the ring, {} the display", if hold { "holds" } else { "leaves nlclient" },
-                  if will { "owns" } else { "nlclient has" });
-        }
-        self.holding = hold;
-        self.input.grab(hold);
-        self.flush(Instant::now(), true);
-        self.mode = mode;
-        self.dirty = true;
-    }
-
-    fn event(&mut self, event: device::Event, now: Instant) {
-        let previous = self.last_input;
-        self.last_input = now;
-        if self.mode == Mode::Native {
-            return;
-        }
-        if self.mode == Mode::Home && !device::lit() {
-            // Asleep: the turn or press only wakes nlclient's display.
-            self.input.nudge();
-            return;
-        }
-        match (event.kind, event.value) {
-            (device::EV_KEY, 1) if event.code == device::KEY_ENTER => self.press(),
-            (device::EV_REL, value) if event.code == device::REL_DIAL && value != 0 => {
-                let pause = now.duration_since(previous);
-                if pause > GESTURE && self.movement != 0 {
-                    logf!("ui: turned {} counts", self.movement);
-                    self.movement = 0;
-                }
-                // A slow turn keeps what it has, until it stops or reverses.
-                if pause > TURN_KEPT || (self.turn != 0 && value.signum() != self.turn.signum()) {
-                    self.turn = 0;
-                }
-                self.turn += value;
-                self.movement += value;
-                let step = match self.mode {
-                    Mode::Home | Mode::Card(_) => CARD_STEP,
-                    Mode::LightList { .. } => ROW_STEP,
-                    _ => VALUE_STEP,
-                };
-                let steps = self.turn / step;
-                if steps != 0 {
-                    self.turn -= steps * step;
-                    self.turned(steps);
-                }
-            }
-            _ => {}
-        }
-        self.turned_at = now;
-    }
-
-    fn card(&self, slot: usize) -> Option<&Card> {
-        self.cards.cards.get(slot)
-    }
-
-    fn turned(&mut self, steps: i32) {
-        let deck = self.deck();
-        match self.mode.clone() {
-            Mode::Home | Mode::Card(_) => {
-                let from = if let Mode::Card(index) = self.mode { index } else { 0 };
-                let index = (from as i32 + steps).rem_euclid(deck.len() as i32) as usize;
-                self.go(if index == 0 { Mode::Home } else { Mode::Card(index) });
-            }
-            Mode::LightList { slot, selected } => {
-                let rows = match self.card(slot) {
-                    Some(Card::Lights(card)) => card.lights.len() + 1,
-                    _ => 1,
-                };
-                let selected = (selected as i32 + steps).clamp(0, rows as i32 - 1) as usize;
-                self.mode = Mode::LightList { slot, selected };
-            }
-            Mode::LightDim { slot, light, on, value } => {
-                let start = if on { value as i32 } else { 0 };
-                let value = (start + steps * 2).clamp(1, 100) as u8;
-                if let Some(Card::Lights(card)) = self.card(slot) {
-                    self.pending = Some(Command::Brightness(card.lights[light].id.clone(), value));
-                }
-                self.mode = Mode::LightDim { slot, light, on: true, value };
-            }
-            Mode::ClimateSet { slot, target } => {
-                if let Some(Card::Climate(card)) = self.card(slot) {
-                    let target = (target + steps as f64 * card.step).clamp(card.min, card.max);
-                    self.pending = Some(Command::Temperature(card.id.clone(), target));
-                    self.mode = Mode::ClimateSet { slot, target };
-                }
-            }
-            Mode::Volume { slot, value } => {
-                if let Some(Card::Media(card)) = self.card(slot) {
-                    let value = (value as i32 + steps * 2).clamp(0, 100) as u8;
-                    self.pending = Some(Command::Volume(card.id.clone(), value));
-                    self.mode = Mode::Volume { slot, value };
-                }
-            }
-            Mode::Idle | Mode::Native => {}
-        }
-        self.dirty = true;
-    }
-
-    fn press(&mut self) {
-        let deck = self.deck();
-        match self.mode.clone() {
-            Mode::Home => self.go(Mode::Native),
-            Mode::Card(index) => match deck.get(index) {
-                Some(Slot::Settings) => {
-                    self.go(Mode::Native);
-                    // nlclient is on its home dial: a press opens its menu,
-                    // once it has its frame back on the display.
-                    std::thread::sleep(Duration::from_millis(300));
-                    self.input.press();
-                }
-                Some(Slot::Card(slot)) => {
-                    let slot = *slot;
-                    match self.card(slot) {
-                        Some(Card::Lights(_)) => self.mode = Mode::LightList { slot, selected: 0 },
-                        Some(Card::Climate(card)) => {
-                            let target = card.target.unwrap_or((card.min + card.max) / 2.0);
-                            self.mode = Mode::ClimateSet { slot, target };
-                        }
-                        Some(Card::Media(card)) => {
-                            self.mode = Mode::Volume { slot, value: card.volume.unwrap_or(30) };
-                        }
-                        None => {}
+            Effect::Own(false) => {
+                // nlclient's frame back before nlclient may present again.
+                if let Some(saved) = self.saved.take() {
+                    if let Some(from) = self.shown.take() {
+                        self.animate(&from, &saved, self.transition);
                     }
+                    self.display.show(&saved);
                 }
-                _ => {}
-            },
-            Mode::LightList { slot, selected } => {
-                let Some(Card::Lights(card)) = self.card(slot) else { return };
-                let Some(light) = card.lights.get(selected).cloned() else {
-                    self.mode = Mode::Card(slot + 1);
-                    self.dirty = true;
-                    return;
-                };
-                if light.dimmable {
-                    self.mode = Mode::LightDim { slot, light: selected, on: light.on,
-                                                 value: light.brightness.unwrap_or(100) };
-                } else {
-                    self.toggle_light(slot, selected, !light.on);
-                }
+                self.shown = None;
+                device::own(false);
             }
-            Mode::LightDim { slot, light, on, value } => {
-                self.toggle_light(slot, light, !on);
-                self.mode = Mode::LightDim { slot, light, on: !on, value };
+            Effect::Hold(hold) => self.input.grab(hold),
+            Effect::Nudge => self.input.nudge(),
+            Effect::KeepAwake => crate::wake::keep_awake_for(30),
+            Effect::PressNlclient => {
+                // Once nlclient has its frame back on the display.
+                std::thread::sleep(Duration::from_millis(300));
+                self.input.press();
             }
-            Mode::ClimateSet { slot, .. } => {
-                self.flush(Instant::now(), true);
-                self.mode = Mode::Card(slot + 1);
-            }
-            Mode::Volume { slot, .. } => {
-                if let Some(Card::Media(card)) = self.cards.cards.get_mut(slot) {
-                    self.sender.send(&Command::PlayPause(card.id.clone()));
-                    card.state = if card.state == "playing" { "paused".into() } else { "playing".into() };
-                }
-            }
-            Mode::Idle | Mode::Native => {}
-        }
-        self.dirty = true;
-    }
-
-    /// Switches a light, showing it switched until Home Assistant says.
-    fn toggle_light(&mut self, slot: usize, index: usize, on: bool) {
-        self.pending = None;
-        if let Some(Card::Lights(card)) = self.cards.cards.get_mut(slot) {
-            let light = &mut card.lights[index];
-            light.on = on;
-            let command = if on { Command::On(light.id.clone()) } else { Command::Off(light.id.clone()) };
-            self.sender.send(&command);
-        }
-    }
-
-    fn tick(&mut self, now: Instant) {
-        let idle = now.duration_since(self.last_input);
-        match self.mode.clone() {
-            Mode::Native => {
-                // Back to the cards once nlclient is home: dark, or its dial.
-                if !device::lit() || (idle >= NATIVE_IDLE && self.home_dial()) {
-                    self.go(Mode::Home);
-                }
-                return;
-            }
-            Mode::Idle | Mode::Home => return,
-            _ => {}
-        }
-        if !device::lit() {
-            // Something else put the display out: give it back.
-            self.go(Mode::Home);
-            return;
-        }
-        if now.duration_since(self.last_nudge) >= NUDGE {
-            self.last_nudge = now;
-            self.input.nudge();
-            crate::wake::keep_awake_for(30);
-        }
-        let back = match self.mode.clone() {
-            Mode::Card(_) if idle >= CARD_IDLE => Some(Mode::Home),
-            Mode::LightList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Card(slot + 1)),
-            Mode::LightDim { slot, light, .. } if idle >= CONTROL_IDLE => Some(Mode::LightList { slot, selected: light }),
-            Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Card(slot + 1)),
-            _ => None,
-        };
-        if let Some(mode) = back {
-            self.last_input = now;
-            self.go(mode);
-        }
-    }
-
-    /// Whether nlclient shows its home dial: its ring lit around the edge.
-    fn home_dial(&mut self) -> bool {
-        let page = self.display.save();
-        let stride = page.len() / 480;
-        let (mut lit, mut total) = (0, 0);
-        for angle in (0..360).step_by(3) {
-            for radius in (205..232).step_by(4) {
-                let (sin, cos) = (angle as f32).to_radians().sin_cos();
-                let (x, y) = ((240.0 + radius as f32 * cos) as usize, (240.0 + radius as f32 * sin) as usize);
-                let at = y * stride + x * 4;
-                total += 1;
-                lit += (page[at..at + 3].iter().max().copied().unwrap_or(0) > 60) as u32;
-            }
-        }
-        lit as f32 / total as f32 > 0.2
-    }
-
-    /// Sends what turning asked for, at most every SEND_EVERY, or now.
-    fn flush(&mut self, now: Instant, all: bool) {
-        if self.pending.is_none() || (!all && now.duration_since(self.last_sent) < SEND_EVERY) {
-            return;
-        }
-        if let Some(command) = self.pending.take() {
-            self.sender.send(&command);
-            self.last_sent = now;
+            Effect::Send(command) => self.sender.send(&command),
         }
     }
 
     fn draw(&mut self) {
-        self.dirty = false;
-        let deck = self.deck();
+        let machine = &self.machine;
+        let deck = machine.deck();
         let position = |index: usize| Position { index, count: deck.len() };
-        let card = |slot: usize| self.cards.cards.get(slot);
-        let (screen, at) = match &self.mode {
+        let card = |slot: usize| machine.cards.cards.get(slot);
+        let (screen, at) = match &machine.mode {
             Mode::Card(index) => {
                 let at = position(*index);
                 match deck.get(*index) {
@@ -521,9 +218,109 @@ impl Runtime {
             },
             _ => return,
         };
-        let pixmap = screens::draw(&self.fonts, &screen, at);
-        self.display.show(&pixmap);
+        let frame = device::frame(&screens::draw(&self.fonts, &screen, at));
+        // From the card before, or from nlclient's frame on the way in.
+        if let Some(from) = self.shown.take().or_else(|| self.saved.clone()) {
+            self.animate(&from, &frame, self.transition);
+        }
+        self.display.show(&frame);
+        self.shown = Some(frame);
+        self.transition = Transition::Cut;
     }
+
+    /// Moves the display from `from` to `to`: about a fifth of a second.
+    fn animate(&mut self, from: &[u8], to: &[u8], transition: Transition) {
+        if transition == Transition::Cut {
+            return;
+        }
+        let started = Instant::now();
+        let length = Duration::from_millis(match transition { Transition::Fade => 160, _ => 220 });
+        for frames in 0.. {
+            let t = started.elapsed().as_secs_f32() / length.as_secs_f32();
+            if t >= 1.0 {
+                if frames < 6 {
+                    logf!("ui: {transition:?} in {frames} frames");
+                }
+                return;
+            }
+            match transition {
+                Transition::Slide { clockwise } => {
+                    self.display.slide(from, to, (ease(t) * paint::SIZE as f32) as usize, clockwise)
+                }
+                _ => self.display.fade(from, to, (ease(t) * 256.0) as u16),
+            }
+        }
+    }
+}
+
+/// How the display moves from one screen to the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Transition {
+    Cut,
+    /// The next screen slides in from the right (clockwise) or left.
+    Slide { clockwise: bool },
+    Fade,
+}
+
+/// Turning between cards slides, the way the ring turned; going into a card
+/// or back out of one fades; handing nlclient its menus cuts.
+fn transition(before: &Mode, after: &Mode, deck: usize, turned: bool) -> Transition {
+    let index = |mode: &Mode| match mode {
+        Mode::Home => Some(0),
+        Mode::Card(index) => Some(*index),
+        _ => None,
+    };
+    let same_view = std::mem::discriminant(before) == std::mem::discriminant(after) && index(before).is_none();
+    if before == after || same_view || !(before.owning() || after.owning()) {
+        // A row or a value moved, or nothing of the UI's shows.
+        return Transition::Cut;
+    }
+    match (index(before), index(after)) {
+        (Some(from), Some(to)) if turned => Transition::Slide { clockwise: to == (from + 1) % deck },
+        _ if *after == Mode::Native => Transition::Cut,
+        _ => Transition::Fade,
+    }
+}
+
+fn ease(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turning_slides_the_way_the_ring_went_and_the_rest_fades() {
+        let slide = |clockwise| Transition::Slide { clockwise };
+        assert_eq!(transition(&Mode::Home, &Mode::Card(1), 5, true), slide(true));
+        assert_eq!(transition(&Mode::Home, &Mode::Card(4), 5, true), slide(false));
+        assert_eq!(transition(&Mode::Card(4), &Mode::Home, 5, true), slide(true), "past the last card");
+        assert_eq!(transition(&Mode::Card(2), &Mode::Card(1), 5, true), slide(false));
+        assert_eq!(transition(&Mode::Card(2), &Mode::Home, 5, false), Transition::Fade, "left alone");
+        let list = Mode::LightList { slot: 0, selected: 0 };
+        assert_eq!(transition(&Mode::Card(1), &list, 5, true), Transition::Fade);
+        assert_eq!(transition(&Mode::Card(4), &Mode::Native, 5, true), Transition::Cut, "nlclient's menu");
+        assert_eq!(transition(&Mode::Home, &Mode::Native, 5, true), Transition::Cut);
+        assert_eq!(transition(&list, &Mode::LightList { slot: 0, selected: 1 }, 5, true), Transition::Cut);
+    }
+}
+
+/// Whether nlclient shows its home dial: its ring lit around the edge.
+fn home_dial(display: &mut device::Display) -> bool {
+    let page = display.save();
+    let stride = page.len() / 480;
+    let (mut lit, mut total) = (0, 0);
+    for angle in (0..360).step_by(3) {
+        for radius in (205..232).step_by(4) {
+            let (sin, cos) = (angle as f32).to_radians().sin_cos();
+            let (x, y) = ((240.0 + radius as f32 * cos) as usize, (240.0 + radius as f32 * sin) as usize);
+            let at = y * stride + x * 4;
+            total += 1;
+            lit += (page[at..at + 3].iter().max().copied().unwrap_or(0) > 60) as u32;
+        }
+    }
+    lit as f32 / total as f32 > 0.2
 }
 
 /// Every screen, drawn to PNGs in UNFR0ZEN_UI_SHOTS with the fonts in
@@ -554,7 +351,7 @@ mod shots {
                 {"id":"light.alex_s_lamp","name":"Alex's Lamp","icon":"m3o:table-lamp","on":false,"dimmable":true,"brightness":null,"rgb":null},
                 {"id":"light.bedroom_lights","name":"Bedroom Lights","icon":"mdi:lightbulb-group","on":true,"dimmable":true,"brightness":40,"rgb":[255,214,170]}]},
             {"kind":"climate","id":"climate.living","name":"Living room","icon":"","mode":"heat","action":"heating","target":21.5,"current":19.5,"min":7,"max":30,"step":0.5},
-            {"kind":"media","id":"media_player.kitchen","name":"Kitchen","icon":"","state":"playing","title":"Sunday Morning Mix","artist":"Various artists","volume":35}]}"#).unwrap();
+            {"kind":"media","id":"media_player.kitchen","name":"Bedroom speaker","icon":"","state":"playing","title":"Sunday Morning Mix","artist":"Various artists","volume":35}]}"#).unwrap();
         let [Card::Lights(lights), Card::Climate(climate), Card::Media(media)] = &cards.cards[..] else { panic!() };
         let at = |index| Position { index, count: 5 };
         let shots = [

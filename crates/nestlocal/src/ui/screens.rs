@@ -230,9 +230,9 @@ fn volume(fonts: &Fonts, card: &MediaCard, value: u8) -> Pixmap {
     let mut p = paint::canvas(BLACK);
     let top = paint::tick_at(value as f32 / 100.0);
     paint::ring(&mut p, |i| if i <= top { colour(MEDIA) } else { colour(DIM) }, &[top]);
-    label(&mut p, fonts, 150.0, &format!("{} · volume", card.name), MEDIA);
+    label(&mut p, fonts, 150.0, &card.name, MEDIA);
     big_number(&mut p, fonts, value as f64, false, "", WHITE);
-    let action = if card.state == "playing" { "Press to pause" } else { "Press to play" };
+    let action = if card.state == "playing" { "Volume · press to pause" } else { "Volume · press to play" };
     line(&mut p, fonts, 366.0, action, GREY);
     p
 }
