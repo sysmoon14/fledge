@@ -350,6 +350,12 @@ fn unsupported_relocations_and_branch_veneers_are_refused() {
     let mut externals: BTreeMap<String, u32> =
         serde_json::from_value(golden["native_api"].clone()).unwrap();
     externals.entry("native_rename".into()).or_insert(0);
+    // Goldens from before the screen hand-over lack its imports: any PLT
+    // stub of the build stands in for them.
+    let stub = externals["native_fopen"];
+    for name in ["native_egl_swap", "native_open", "native_read", "native_close", "native_kill"] {
+        externals.entry(name.into()).or_insert(stub);
+    }
     let layout: BTreeMap<String, u32> =
         serde_json::from_value(golden["discovery"]["layout"].clone()).unwrap();
     externals.extend(layout.into_iter().map(|(k, v)| (format!("layout_{k}"), v)));

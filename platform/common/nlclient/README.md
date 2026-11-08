@@ -58,6 +58,25 @@ UNFR0ZEN is at settings-menu index 1, after the thermostat/Back entry at 0.
 Its carousel tile displays the glyph above UNFR0ZEN.
 The other items retain their order.
 
+## Screen hand-over
+
+The patch also routes nlclient's one `eglSwapBuffers` call (discovered as the
+`swap_call_slot` anchor) through `custom_swap`. While the process whose pid is
+in `/var/run/unfr0zen/screen.owner` is alive, nlclient keeps running and
+drawing but presents nothing, so that process owns the display. The check is
+live (`kill(pid, 0)` on every frame), so the display returns to nlclient the
+moment the owner exits or dies; a stale file does nothing.
+
+nestlocal's home screen cards (`crates/nestlocal/src/ui/`) use this. With
+cards from Home Assistant (`integrations/home-assistant/nest_ui.yaml`), it
+holds the ring and button while nlclient's home dial shows: turning moves to
+the cards, which it draws on the visible framebuffer page; pressing on the
+thermostat hands the ring back to nlclient for the temperature, and Nest
+settings opens nlclient's menu. Net-zero ring reports (+1, −1) keep nlclient's
+display awake while a card shows, and wake it from dark. Without cards, or
+while nlclient is stopped (Doom), nothing is held and the unit behaves as
+stock.
+
 ## Runtime and build requirements
 
 Run the packaged app or CLI. No screen-patching tools need to be installed on

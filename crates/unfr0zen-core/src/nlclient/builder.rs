@@ -95,6 +95,16 @@ pub fn build(source: &[u8], object: &[u8]) -> Result<Built> {
         let target = linked.symbols[&format!("custom_{bucket}_commit")];
         output[slot..slot + 4].copy_from_slice(&target.to_le_bytes());
     }
+    // nlclient's one eglSwapBuffers call goes through custom_swap, which
+    // skips presenting while unfr0zen's UI owns the display.
+    let swap_call = discovery.anchors["swap_call_slot"];
+    let swap_offset = elf.offset(swap_call)?;
+    let delta = linked.symbols["custom_swap"] as i64 - swap_call as i64 - 8;
+    if delta % 4 != 0 || !(-(1 << 25)..(1 << 25)).contains(&delta) {
+        return device("ARM swap call out of range or unaligned");
+    }
+    let call = 0xeb000000 | ((delta >> 2) as u32 & 0xffffff);
+    output[swap_offset..swap_offset + 4].copy_from_slice(&call.to_le_bytes());
     for (i, w) in menu_words.iter().enumerate() {
         output[menu_offset + i * 4..menu_offset + i * 4 + 4].copy_from_slice(&w.to_le_bytes());
     }
@@ -127,7 +137,7 @@ pub fn build(source: &[u8], object: &[u8]) -> Result<Built> {
         "payload_address":address,"payload_offset":offset,"payload_size":linked.bytes.len(),"entry":linked.entry,
         "symbols":linked.symbols,"native_api":discovery.native_api,"discovery":discovery,
         "image":"/nestlabs/share/images/G_unfr0zen_192px.png","runtime_directory":"/var/run/unfr0zen","wheel_trace":false,
-        "settings_menu":{"address":menu_address,"file_offset":menu_offset,"original":menu_names,"unfr0zen_index":1}
+        "swap_call":swap_call,"settings_menu":{"address":menu_address,"file_offset":menu_offset,"original":menu_names,"unfr0zen_index":1}
     });
     let journal = Patch::journal(source, &output)?;
     if Patch::parse(&journal)?.apply(source, false)? != output {

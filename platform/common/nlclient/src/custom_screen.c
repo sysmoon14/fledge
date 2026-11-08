@@ -310,6 +310,29 @@ static void downlink_activity(void *bucket) {
     if (count == sizeof(expires) && expires >= now && expires - now <= 10)
         wake_display(PTR(bucket, BUCKET_GLOBALS_OFFSET));
 }
+/* The screen hand-over. While the process named in SCREEN_OWNER is alive,
+ * nlclient keeps running and drawing but presents nothing: the display is
+ * unfr0zen's UI's. The owner's death hands it straight back. */
+extern u32 native_egl_swap(void *, void *);
+extern int native_open(const char *, int);
+extern int native_read(int, void *, unsigned int);
+extern int native_close(int);
+extern int native_kill(int, int);
+#define SCREEN_OWNER "/var/run/unfr0zen/screen.owner"
+static int screen_owned(void) {
+    char text[16];
+    int fd = native_open(SCREEN_OWNER, 0);
+    if (fd < 0) return 0;
+    int count = native_read(fd, text, sizeof(text) - 1);
+    native_close(fd);
+    int pid = 0;
+    for (int i = 0; i < count && text[i] >= '0' && text[i] <= '9'; i++) pid = pid * 10 + (text[i] - '0');
+    return pid > 1 && native_kill(pid, 0) == 0;
+}
+u32 custom_swap(void *display, void *surface) {
+    if (screen_owned()) return 1; /* EGL_TRUE: drawn, not shown */
+    return native_egl_swap(display, surface);
+}
 int custom_device_commit(void *bucket) {
     int result = native_device_commit(bucket);
     downlink_activity(bucket);

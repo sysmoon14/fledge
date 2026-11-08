@@ -20,6 +20,31 @@ const IMPORTS: [(&str, &str); 10] = [
     ("memcpy", "memcpy"),
     ("memset", "memset"),
 ];
+const HANDOVER_IMPORTS: [(&str, &str); 5] = [
+    ("native_egl_swap", "eglSwapBuffers"),
+    ("native_open", "open"),
+    ("native_read", "read"),
+    ("native_close", "close"),
+    ("native_kill", "kill"),
+];
+/// The one call that presents nlclient's frames: a BL to eglSwapBuffers's
+/// PLT stub. More than one, or none, and the hand-over can't be made whole.
+fn swap_call(elf: &Elf, stub: u32) -> Result<u32> {
+    let text = elf.section(".text")?;
+    let mut sites = Vec::new();
+    for off in (text.offset..text.offset + text.size).step_by(4) {
+        let w = word(elf.data, off)?;
+        if w >> 24 != 0xeb {
+            continue;
+        }
+        let pc = text.address + (off - text.offset) as u32;
+        let delta = (((w & 0xff_ffff) << 8) as i32) >> 6;
+        if pc.wrapping_add(8).wrapping_add(delta as u32) == stub {
+            sites.push(pc);
+        }
+    }
+    unique(sites, "eglSwapBuffers calls")
+}
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Discovery {
     pub factory: u32,
@@ -243,6 +268,12 @@ pub fn survey(data: &[u8]) -> Result<(Discovery, Option<String>)> {
     }
     if let Some(&rename) = imports.get("rename") {
         api.insert("native_rename".into(), rename);
+    }
+    // The screen hand-over: nlclient presents each frame through one call
+    // of eglSwapBuffers, which the payload wraps (custom_swap).
+    for (key, name) in HANDOVER_IMPORTS {
+        api.insert(key.to_owned(), *imports.get(name)
+            .ok_or_else(|| crate::Error::Device(format!("missing hand-over import {name}")))?);
     }
     let table = registry(&elf)?;
     require(
@@ -511,6 +542,7 @@ pub fn survey(data: &[u8]) -> Result<(Discovery, Option<String>)> {
     api.insert("native_scroll_target".into(), select[1]);
     layout.insert("GLOBALS_TIMER_OFFSET".into(), timer(&elf, &arm, &imports)?);
     downlink(&elf, &arm, &imports, &mut api, &mut layout, &mut anchors)?;
+    anchors.insert("swap_call_slot".into(), swap_call(&elf, api["native_egl_swap"])?);
     require(
         layout["LAYER_VTABLE_SIZE"].max(layout["SCREEN_VTABLE_SIZE"]) <= 0x400,
         "vtable larger than the payload holds",
