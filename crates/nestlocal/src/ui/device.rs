@@ -414,6 +414,16 @@ impl Input {
         events
     }
 
+    /// A turn of the ring for nlclient, as a hand makes one: `reports`
+    /// reports of `raw` counts, 15 ms apart (its menus take no other).
+    pub fn hand_turn(&mut self, raw: i32, reports: usize) {
+        let report: Vec<u8> = [encode(EV_REL, REL_DIAL, raw), encode(0, 0, 0)].concat();
+        for _ in 0..reports {
+            self.send(true, &report);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+
     /// A press and release of the button, for nlclient.
     pub fn press(&mut self) {
         let down: Vec<u8> = [encode(EV_KEY, KEY_ENTER, 1), encode(0, 0, 0)].concat();

@@ -419,9 +419,9 @@ fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
     p
 }
 
+/// No ring: there's nothing to turn.
 fn settings_card(fonts: &Fonts) -> Canvas {
     let mut p = paint::canvas(BLACK);
-    paint::ring(&mut p, |_| colour(DIM), &[]);
     icon(&mut p, "mdi:cog", "settings", HALF, 168.0, 96.0, WHITE);
     paint::text(&mut p, &fonts.regular, 40.0, HALF, 278.0, "Nest settings", 0.0, WHITE);
     line(&mut p, fonts, 316.0, "Schedule · Eco · Energy · System", GREY);

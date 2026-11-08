@@ -209,6 +209,9 @@ struct Runtime {
     /// button went down, and since when the press has waited for its dial.
     back_chosen: bool,
     back_since: Option<Instant>,
+    /// In nlclient's Settings, opened from the cards: since when, whether
+    /// it has been away from its dial, and when that was last looked at.
+    settings: Option<(Instant, bool, Instant)>,
     /// nlclient's dial as it last showed lit, and when: the thermostat's
     /// card when the display wakes, its own page dark until nlclient draws.
     dial: Option<device::Frame>,
@@ -238,7 +241,7 @@ impl Runtime {
             alerts: 0, ran: None,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
-            pressed: None, back_chosen: false, back_since: None, dial: None, last_dial: now - Duration::from_secs(60),
+            pressed: None, back_chosen: false, back_since: None, settings: None, dial: None, last_dial: now - Duration::from_secs(60),
         }
     }
 
@@ -333,6 +336,22 @@ impl Runtime {
                 if now.duration_since(down) >= LONG_PRESS {
                     self.pressed = Some((down, true, was_lit));
                     self.machine.input(Input::LongPress, now, was_lit, &mut effects);
+                }
+            }
+            if let Some((since, away, checked)) = self.settings {
+                // In nlclient's Settings: once it's back on its dial (Done),
+                // the cards. Looked at four times a second.
+                if self.machine.mode != Mode::Native || now.duration_since(since) > Duration::from_secs(900) {
+                    self.settings = None;
+                    self.machine.settings_open = false;
+                } else if now.duration_since(checked) >= Duration::from_millis(250) {
+                    let home = home_dial(&mut self.display);
+                    if home && away {
+                        self.settings = None;
+                        self.machine.input(Input::SettingsDone, now, lit, &mut effects);
+                    } else {
+                        self.settings = Some((since, away || !home, now));
+                    }
                 }
             }
             if let Some(since) = self.back_since {
@@ -777,10 +796,30 @@ impl Runtime {
                 }
             }
             Effect::KeepAwake => crate::wake::keep_awake_for(30),
-            Effect::PressNlclient => {
-                // Once nlclient has its frame back on the display.
+            Effect::OpenNestSettings => {
+                // Its menu, then on to Settings: each step only once the
+                // display shows the one before, so a turn only ever moves
+                // the menu, never the temperature. Else the menu stays.
                 std::thread::sleep(Duration::from_millis(300));
                 self.input.press();
+                let waiting = Instant::now();
+                while !back_chosen(&self.display.save()) {
+                    if waiting.elapsed() > Duration::from_millis(1500) {
+                        logf!("ui: nlclient's menu didn't show Back: left at the menu");
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                // Settings is the next item anticlockwise (counts up).
+                self.input.hand_turn(40, 13);
+                std::thread::sleep(Duration::from_millis(450));
+                if settings_chosen(&self.display.save()) {
+                    self.input.press();
+                    self.settings = Some((Instant::now(), false, Instant::now()));
+                    logf!("ui: nlclient's Settings");
+                } else {
+                    logf!("ui: nlclient's menu didn't show Settings: left at the menu");
+                }
             }
             Effect::Send(command) => self.sender.send(&command),
         }
@@ -1058,6 +1097,20 @@ fn back_chosen(page: &[u8]) -> bool {
         }
     }
     blue > 300
+}
+
+/// Whether nlclient's menu shows Settings chosen: its cog, below the
+/// date, lit white.
+fn settings_chosen(page: &[u8]) -> bool {
+    let stride = page.len() / 480;
+    let mut white = 0;
+    for x in 160..222 {
+        for y in 384..446 {
+            let at = x * stride + (479 - y) * 4;
+            white += page[at..at + 3].iter().all(|&c| c > 200) as u32;
+        }
+    }
+    white > 250
 }
 
 /// Whether a frame is (nearly) all black: nlclient's page, the display

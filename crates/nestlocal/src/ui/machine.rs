@@ -132,6 +132,8 @@ pub enum Input {
     LongPress,
     /// Back chosen in nlclient's own menu, which is now on its dial.
     NativeBack,
+    /// nlclient's Settings, opened from the cards, left for its dial.
+    SettingsDone,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -147,8 +149,9 @@ pub enum Effect {
     Click,
     /// Holds the unit awake while a card shows.
     KeepAwake,
-    /// A press for nlclient, once it has its frame back.
-    PressNlclient,
+    /// nlclient's Settings, from its menu: opened, Back checked as chosen,
+    /// one step on to Settings, checked again, and pressed.
+    OpenNestSettings,
     /// A notification's chime.
     Chime,
     Send(Command),
@@ -183,6 +186,9 @@ pub struct Machine {
     pub ran: Option<(usize, Instant)>,
     /// When a camera showing full screen last asked for a picture.
     pictured: Option<Instant>,
+    /// nlclient's Settings opened from the cards: on its dial again, the
+    /// cards (SettingsDone), not the thermostat.
+    pub settings_open: bool,
     /// Whether the display was lit at the last tick: lighting by itself
     /// (someone coming near) wakes to the cards as a turn would.
     was_lit: Option<bool>,
@@ -193,7 +199,7 @@ impl Machine {
         Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
-            lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None,
+            lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
         }
     }
 
@@ -335,6 +341,13 @@ impl Machine {
                 self.go(Mode::Chooser(0), out);
                 return;
             }
+            (Mode::Native, Input::SettingsDone) => {
+                self.settings_open = false;
+                let last = self.deck().len() - 1;
+                self.go(Mode::Chooser(last), out);
+                return;
+            }
+            (_, Input::SettingsDone) => return,
             (_, Input::NativeBack) => return,
             (Mode::Native, _) => return,
             (Mode::Home, _) if !lit => {
@@ -351,7 +364,7 @@ impl Machine {
         match input {
             Input::Press => self.press(out),
             Input::LongPress => self.back(out),
-            Input::NativeBack => {}
+            Input::NativeBack | Input::SettingsDone => {}
             Input::Turn(0) => {}
             Input::Turn(value) => {
                 if pause > GESTURE && self.movement != 0 {
@@ -544,8 +557,9 @@ impl Machine {
             Some(Slot::Thermostat) => self.go(Mode::Native, out),
             Some(Slot::Settings) => {
                 self.go(Mode::Native, out);
-                // nlclient is on its home dial: a press opens its menu.
-                out.push(Effect::PressNlclient);
+                // nlclient is on its home dial: straight to its Settings.
+                self.settings_open = true;
+                out.push(Effect::OpenNestSettings);
             }
             Some(&Slot::Card(slot)) => {
                 let mode = match self.card(slot) {
@@ -790,8 +804,10 @@ impl Machine {
         }
         match self.mode.clone() {
             Mode::Native => {
-                // Back to the thermostat's dial once nlclient is home.
-                if dark || (idle >= NATIVE_IDLE && home_dial()) {
+                // Back to the thermostat's dial once nlclient is home; from
+                // Settings opened from the cards, the runtime brings the cards.
+                if dark || (!self.settings_open && idle >= NATIVE_IDLE && home_dial()) {
+                    self.settings_open = false;
                     self.go(Mode::Home, out);
                 }
                 return;
@@ -1233,8 +1249,14 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::LightList { slot: 0, selected: 0 });
         let mut rig = Rig::woken();
         rig.turn(CARD_STEP * 4);
-        assert_eq!(rig.press(), vec![Effect::Own(false), Effect::Hold(false), Effect::PressNlclient],
+        assert_eq!(rig.press(), vec![Effect::Own(false), Effect::Hold(false), Effect::OpenNestSettings],
                    "Nest settings: nlclient's menu");
+        assert!(rig.machine.settings_open, "straight to nlclient's Settings");
+        rig.wait(NATIVE_IDLE * 3);
+        assert_eq!(rig.machine.mode, Mode::Native, "staying while in Settings, though nlclient's dial shows");
+        rig.input(Input::SettingsDone);
+        assert_eq!(rig.machine.mode, Mode::Chooser(4), "Done: the cards, on Nest settings");
+        assert!(!rig.machine.settings_open);
     }
 
     #[test]
