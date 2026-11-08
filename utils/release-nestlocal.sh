@@ -115,7 +115,7 @@ rm -f "$out/public.pem"
 if command -v sha256sum > /dev/null; then (cd "$out" && sha256sum nestlocal-armv7 > nestlocal-armv7.sha256)
 else (cd "$out" && shasum -a 256 nestlocal-armv7 > nestlocal-armv7.sha256); fi
 {
-    echo "nestlocal $tag, built on $base."
+    echo "Fledge $tag: nestlocal for the thermostat, and the Home Assistant integration."
     echo
     echo "## Changes since $previous"
     echo
