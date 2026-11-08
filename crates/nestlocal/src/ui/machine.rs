@@ -26,6 +26,10 @@ const GESTURE: Duration = Duration::from_millis(400);
 const TURN_KEPT: Duration = Duration::from_millis(1500);
 /// Between cards, a turn that stops this long settles: on the next card if
 /// it went past halfway, else back where it was.
+/// How often a camera full screen asks for a picture, and how long it
+/// stays with nothing pressed.
+pub const CAMERA_EVERY: Duration = Duration::from_secs(3);
+pub const CAMERA_IDLE: Duration = Duration::from_secs(60);
 /// How long a scene's card says it ran.
 pub const RAN_SHOWN: Duration = Duration::from_secs(2);
 /// A step of a light's warmth dial, in kelvin, and of its colour's, in degrees.
@@ -89,6 +93,8 @@ pub enum Mode {
     LightHue { slot: usize, light: usize, value: u16 },
     ClimateSet { slot: usize, target: f64 },
     Volume { slot: usize, value: u8 },
+    /// A camera, full screen, its picture refreshed while it shows.
+    Camera { slot: usize },
     /// A notification over `back`, which shows again once it goes.
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -109,7 +115,7 @@ impl Mode {
     pub fn card_index(&self) -> Option<usize> {
         match self {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
-            | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. }
+            | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } => Some(slot + 1),
             Mode::Menu { view, .. } => view.card_index(),
             _ => None,
@@ -175,6 +181,8 @@ pub struct Machine {
     /// A scene or script just run from its card, and when: its card says
     /// so for a moment.
     pub ran: Option<(usize, Instant)>,
+    /// When a camera showing full screen last asked for a picture.
+    pictured: Option<Instant>,
     /// Whether the display was lit at the last tick: lighting by itself
     /// (someone coming near) wakes to the cards as a turn would.
     was_lit: Option<bool>,
@@ -185,7 +193,7 @@ impl Machine {
         Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
-            lighting: None, was_lit: None, alert: None, alert_until: None, ran: None,
+            lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None,
         }
     }
 
@@ -211,6 +219,7 @@ impl Machine {
             Mode::LightList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(_))),
             Mode::ClimateSet { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Climate(_))),
             Mode::Volume { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Media(_))),
+            Mode::Camera { slot } => matches!(cards.cards.get(*slot), Some(Card::Camera(_))),
             Mode::LightDim { slot, light, .. } | Mode::LightWarmth { slot, light, .. }
             | Mode::LightHue { slot, light, .. } => match cards.cards.get(*slot) {
                 Some(Card::Lights(card)) => *light < card.lights.len(),
@@ -523,7 +532,7 @@ impl Machine {
                 let selected = (selected as i32 + steps).clamp(0, actions.len() as i32 - 1) as usize;
                 self.mode = Mode::Menu { view, actions, selected };
             }
-            Mode::Idle | Mode::Native | Mode::Alert { .. } => {}
+            Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } => {}
         }
         self.dirty = true;
     }
@@ -556,8 +565,7 @@ impl Machine {
                         Mode::ClimateSet { slot, target: card.target.unwrap_or((card.min + card.max) / 2.0) }
                     }
                     Some(Card::Media(card)) => Mode::Volume { slot, value: card.volume.unwrap_or(30) },
-                    // A scene, script or button runs; a camera takes a new
-                    // still. Both stay on the cards.
+                    // A scene, script or button runs, staying on the cards.
                     Some(Card::Action(card)) => {
                         out.push(Effect::Send(Command::Run(card.id.clone())));
                         self.ran = Some((slot, self.last_input));
@@ -565,8 +573,10 @@ impl Machine {
                         return;
                     }
                     Some(Card::Camera(card)) => {
+                        // Full screen, with a fresh picture on its way.
                         out.push(Effect::Send(Command::Snapshot(card.id.clone())));
-                        return;
+                        self.pictured = Some(self.last_input);
+                        Mode::Camera { slot }
                     }
                     Some(Card::Unknown) | None => return,
                 };
@@ -617,7 +627,7 @@ impl Machine {
                 let playing = matches!(self.card(slot), Some(Card::Media(m)) if m.state == "playing");
                 self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Play(!playing)], selected: 0 };
             }
-            Mode::ClimateSet { slot, .. } => self.go(Mode::Chooser(slot + 1), out),
+            Mode::ClimateSet { slot, .. } | Mode::Camera { slot } => self.go(Mode::Chooser(slot + 1), out),
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
             Mode::Idle | Mode::Native | Mode::Alert { .. } => {}
         }
@@ -809,12 +819,22 @@ impl Machine {
                 Some(self.dimmer(slot, light))
             }
             Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
+            Mode::Camera { slot } if idle >= CAMERA_IDLE => Some(Mode::Chooser(slot + 1)),
             Mode::Menu { view, .. } if idle >= CONTROL_IDLE => Some(*view),
             _ => None,
         };
         if let Some(mode) = back {
             self.last_input = now;
             self.go(mode, out);
+        }
+        if let Mode::Camera { slot } = self.mode {
+            // While it shows, a new picture every few seconds.
+            if self.pictured.is_none_or(|at| now.duration_since(at) >= CAMERA_EVERY) {
+                if let Some(Card::Camera(card)) = self.card(slot) {
+                    out.push(Effect::Send(Command::Snapshot(card.id.clone())));
+                }
+                self.pictured = Some(now);
+            }
         }
         if self.pending.is_some() && now.duration_since(self.last_sent) >= SEND_EVERY {
             self.last_sent = now;
@@ -1102,7 +1122,14 @@ mod tests {
         assert_eq!(rig.machine.ran, None, "for a moment");
         rig.turn(CARD_STEP);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Snapshot("camera.front_door".into())]);
-        assert_eq!(rig.machine.mode, Mode::Chooser(2));
+        assert_eq!(rig.machine.mode, Mode::Camera { slot: 1 }, "a camera opens full screen");
+        assert_eq!(Rig::sends(&rig.wait(CAMERA_EVERY)), vec![Command::Snapshot("camera.front_door".into())],
+                   "a new picture every few seconds");
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(2), "a press: back to the cards");
+        rig.press();
+        rig.wait(CAMERA_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Chooser(2), "left: back too");
     }
 
     #[test]

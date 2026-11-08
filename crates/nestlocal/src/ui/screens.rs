@@ -15,6 +15,8 @@ pub enum Screen<'a> {
     /// A scene, script or button; `done` just after it ran.
     ActionCard { card: &'a ActionCard, done: bool },
     CameraCard { card: &'a CameraCard },
+    /// A camera opened: its picture full screen, its name over it.
+    CameraView { card: &'a CameraCard },
     /// A notification, over whatever showed.
     Alert { alert: &'a Alert },
     /// The lights card pressed: its lights and Back, `selected` highlighted.
@@ -44,6 +46,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::SettingsCard => settings_card(fonts),
         Screen::ActionCard { card, done } => action_card(fonts, card, *done),
         Screen::CameraCard { card } => camera_card(fonts, card),
+        Screen::CameraView { card } => camera_view(fonts, card),
         Screen::Alert { alert } => alert_screen(fonts, alert),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         _ => {
@@ -335,6 +338,19 @@ fn camera_card(fonts: &Fonts, card: &CameraCard) -> Canvas {
             paint::text(&mut p, &fonts.regular, 36.0, HALF, 286.0, &name, 0.0, WHITE);
             line(&mut p, fonts, 328.0, "Press for a picture", GREY);
         }
+    }
+    p
+}
+
+/// A camera opened: its picture, or its card until the first comes, with
+/// its name over it.
+fn camera_view(fonts: &Fonts, card: &CameraCard) -> Canvas {
+    let mut p = camera_card(fonts, card);
+    if card.art.is_some() {
+        let name = paint::fit(&fonts.medium, 24.0, &card.name, 0.0, 280.0);
+        let width = paint::measure(&fonts.medium, 24.0, &name, 0.0) + 36.0;
+        paint::pill(&mut p, HALF - width / 2.0, 386.0, width, 40.0, alpha(BLACK, 0.6));
+        paint::text(&mut p, &fonts.medium, 24.0, HALF, 414.0, &name, 0.0, WHITE);
     }
     p
 }

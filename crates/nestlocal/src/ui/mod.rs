@@ -835,6 +835,10 @@ impl Runtime {
                 Card::Media(card) => Screen::Volume { card, value: *value },
                 _ => return None,
             },
+            Mode::Camera { slot } => match card(*slot)? {
+                Card::Camera(card) => Screen::CameraView { card },
+                _ => return None,
+            },
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
             _ => return None,
         })
