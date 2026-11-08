@@ -5,7 +5,9 @@ running [Fledge](https://github.com/sysmoon14/fledge). Waking the thermostat
 shows it among a card for each device you choose (lights, switches, fans,
 other thermostats, media players), zoomed out: turning browses, pressing
 opens one. A light dims, a switch switches, a thermostat sets its
-temperature, a speaker its volume. A light group makes a whole room one card.
+temperature, a speaker its volume, with its album art on its card. A long
+press switches a light on or off, or plays or pauses a speaker, from its card
+or its own screen. A light group makes a whole room one card.
 
 ## Install
 

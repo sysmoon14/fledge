@@ -27,6 +27,8 @@ DOMAINS = [*SWITCHED, "climate", "media_player"]
 # The cards the thermostat shows (retained) and what it asks for.
 CARDS_TOPIC = "{prefix}/{serial}/set/ui"
 COMMAND_TOPIC = "{prefix}/{serial}/ui/command"
+# A media player's album art (retained; empty for none).
+ART_TOPIC = "{prefix}/{serial}/set/art/{entity}"
 
 # nestlocal's device in Home Assistant: identifiers ("mqtt", "nestlocal_<serial>").
 DEVICE_IDENTIFIER = "nestlocal_{serial}"

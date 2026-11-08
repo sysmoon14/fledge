@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from homeassistant.components import mqtt
+from homeassistant.components.media_player import DATA_COMPONENT as MEDIA_PLAYERS
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -21,8 +22,8 @@ from homeassistant.helpers import area_registry as ar, device_registry as dr, en
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.event import async_track_state_change_event
 
-from . import cards
-from .const import (CARDS_TOPIC, COMMAND_TOPIC, CONF_AREAS, CONF_CLIMATES, CONF_ENTITIES, CONF_EXCLUDE, CONF_MEDIA,
+from . import art, cards
+from .const import (ART_TOPIC, CARDS_TOPIC, COMMAND_TOPIC, CONF_AREAS, CONF_CLIMATES, CONF_ENTITIES, CONF_EXCLUDE, CONF_MEDIA,
                     CONF_SERIAL, CONF_WAKE, CONF_WAKE_DEVICE, TOPIC_PREFIX, WAKE_CHOOSER)
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,8 +50,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: FledgeConfigEntry) -> b
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """No more cards: the thermostat goes back to how it was."""
-    topic = CARDS_TOPIC.format(prefix=TOPIC_PREFIX, serial=entry.data[CONF_SERIAL])
-    await mqtt.async_publish(hass, topic, "", retain=True)
+    serial = entry.data[CONF_SERIAL]
+    await mqtt.async_publish(hass, CARDS_TOPIC.format(prefix=TOPIC_PREFIX, serial=serial), "", retain=True)
+    for entity in entry.options.get(CONF_ENTITIES, []):
+        if entity.startswith("media_player."):
+            await mqtt.async_publish(hass, ART_TOPIC.format(prefix=TOPIC_PREFIX, serial=serial, entity=entity), "",
+                                     retain=True)
 
 
 async def _reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -104,6 +109,9 @@ class Thermostat:
         self.cards_topic = CARDS_TOPIC.format(prefix=TOPIC_PREFIX, serial=serial)
         self.command_topic = COMMAND_TOPIC.format(prefix=TOPIC_PREFIX, serial=serial)
         self.entities: list[str] = list(entry.options.get(CONF_ENTITIES, []))
+        self.serial = serial
+        # Each media player's picture as last sent: its entity_picture, or None.
+        self.art: dict[str, str | None] = {}
         self.last: str | None = None
         self._unsubscribe: list[Any] = []
         self._tracking: Any = None
@@ -134,6 +142,31 @@ class Thermostat:
         if payload != self.last:
             self.last = payload
             await mqtt.async_publish(self.hass, self.cards_topic, payload, retain=True)
+        for entity in self.entities:
+            state = self.hass.states.get(entity)
+            if not entity.startswith("media_player.") or state is None:
+                continue
+            picture = None if state.state in ("off", "unavailable") else state.attributes.get("entity_picture")
+            if entity not in self.art or self.art[entity] != picture:
+                self.art[entity] = picture
+                self.hass.async_create_task(self._send_art(entity, picture))
+
+    async def _send_art(self, entity: str, picture: str | None) -> None:
+        """A media player's album art, shrunk for the thermostat, or none."""
+        png: bytes | None = None
+        player = self.hass.data[MEDIA_PLAYERS].get_entity(entity) if picture and MEDIA_PLAYERS in self.hass.data else None
+        if player is not None:
+            try:
+                data, _ = await player.async_get_media_image()
+            except Exception:  # noqa: BLE001 - a player failing to fetch its art: none shown
+                _LOGGER.debug("No album art from %s", entity, exc_info=True)
+                data = None
+            if data:
+                png = await self.hass.async_add_executor_job(art.thumbnail, data)
+        if self.art.get(entity) != picture:
+            return  # the track changed again meanwhile
+        topic = ART_TOPIC.format(prefix=TOPIC_PREFIX, serial=self.serial, entity=entity)
+        await mqtt.async_publish(self.hass, topic, png or b"", retain=True)
 
     @callback
     def _command(self, message: mqtt.ReceiveMessage) -> None:

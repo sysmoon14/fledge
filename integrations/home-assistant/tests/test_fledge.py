@@ -7,13 +7,17 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 from homeassistant.helpers.service_info.mqtt import MqttServiceInfo
+from datetime import timedelta
+
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_mqtt_message,
+    async_fire_time_changed,
     async_mock_service,
 )
 
-from custom_components.fledge import cards
+from custom_components.fledge import art, cards
 from custom_components.fledge.const import DOMAIN
 
 SERIAL = "09AB01AC36230301"
@@ -79,6 +83,17 @@ def test_commands_reach_only_what_was_chosen_only_as_allowed():
         {"action": "on"},
     ]
     assert [command(p) for p in refused] == [None] * len(refused)
+
+
+def test_album_art_is_cropped_square_and_small():
+    from io import BytesIO
+    from PIL import Image
+    wide = BytesIO()
+    Image.new("RGBA", (400, 300), (200, 30, 40, 255)).save(wide, "PNG")
+    png = art.thumbnail(wide.getvalue())
+    with Image.open(BytesIO(png)) as out:
+        assert (out.size, out.mode, out.getpixel((80, 80))) == ((art.SIZE, art.SIZE), "RGB", (200, 30, 40))
+    assert art.thumbnail(b"not a picture") is None
 
 
 def _thermostat(hass: HomeAssistant) -> dr.DeviceEntry:
@@ -176,6 +191,46 @@ async def test_the_chosen_devices_are_kept_on_the_thermostat(hass: HomeAssistant
     await hass.config_entries.async_remove(entry.entry_id)
     await hass.async_block_till_done()
     assert _published(mqtt_mock)[-1] == (CARDS, "", 0, True), "removed: the thermostat back as it was"
+
+
+async def test_a_media_player_s_art_follows_its_track(hass: HomeAssistant, mqtt_mock) -> None:
+    from homeassistant.components.media_player import DATA_COMPONENT
+    from io import BytesIO
+    from PIL import Image
+    picture = BytesIO()
+    Image.new("RGB", (64, 64), (10, 200, 30)).save(picture, "PNG")
+
+    class Player:
+        async def async_get_media_image(self):
+            return picture.getvalue(), "image/png"
+
+    class Players:
+        def get_entity(self, entity_id):
+            return Player() if entity_id == "media_player.speaker" else None
+
+    hass.data[DATA_COMPONENT] = Players()
+    hass.states.async_set("media_player.speaker", "playing", {"entity_picture": "/art?1"})
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=SERIAL, data={"serial": SERIAL},
+                            options={"entities": ["media_player.speaker"], "wake": "chooser"})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    topic = f"nestlocal/{SERIAL}/set/art/media_player.speaker"
+    sent = lambda: [c.args[1] for c in mqtt_mock.async_publish.call_args_list if c.args[0] == topic]
+    assert len(sent()) == 1 and sent()[0].startswith(b"\x89PNG")
+    async def later():  # past the publisher's cooldown
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
+        await hass.async_block_till_done()
+
+    hass.states.async_set("media_player.speaker", "playing", {"entity_picture": "/art?1", "volume_level": 0.5})
+    await later()
+    assert len(sent()) == 1, "the same track: not sent again"
+    hass.states.async_set("media_player.speaker", "off", {})
+    await later()
+    assert sent()[-1] == b"", "off: none"
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert sent()[-1] == "", "removed: cleared"
 
 
 async def test_rooms_become_a_card_a_light(hass: HomeAssistant, mqtt_mock) -> None:

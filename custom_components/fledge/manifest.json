@@ -1,14 +1,25 @@
 {
   "domain": "fledge",
   "name": "Fledge",
-  "codeowners": ["@sysmoon14"],
+  "after_dependencies": [
+    "media_player"
+  ],
+  "codeowners": [
+    "@sysmoon14"
+  ],
   "config_flow": true,
-  "dependencies": ["mqtt"],
+  "dependencies": [
+    "mqtt"
+  ],
   "documentation": "https://github.com/sysmoon14/fledge/blob/main/custom_components/fledge/README.md",
   "integration_type": "service",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/sysmoon14/fledge/issues",
-  "mqtt": ["nestlocal/+/availability"],
-  "requirements": [],
-  "version": "0.4.4"
+  "mqtt": [
+    "nestlocal/+/availability"
+  ],
+  "requirements": [
+    "Pillow"
+  ],
+  "version": "0.4.5"
 }
