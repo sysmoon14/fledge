@@ -37,11 +37,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
+      # Pinned by digest, not the tag: a tag can be pushed again, and this
+      # image builds the release's binaries. The digest is checked to be the
+      # one for this Dockerfile; a changed Dockerfile needs a new one here.
       - id: tag
+        env:
+          DIGEST: ${{ vars.BUILD_IMAGE_DIGEST || 'sha256:b6a69cc0a5d416b6021b64e57df79bbc069b718f6d3fd514fd1646129cb071cd' }}
+          FOR: 81db106ef2f9
         run: |
-          image=unfr0zen/unfr0zen-build:$(sha256sum utils/ci/Dockerfile | cut -c1-12)
-          docker manifest inspect "$image" > /dev/null \
-            || { echo "::error::$image is not on Docker Hub: the Dockerfile changed, and Fledge doesn't publish its own image yet"; exit 1; }
+          [ "$(sha256sum utils/ci/Dockerfile | cut -c1-12)" = "$FOR" ] \
+            || { echo "::error::utils/ci/Dockerfile changed: pin the new build image's digest in apps.yml"; exit 1; }
+          image=unfr0zen/unfr0zen-build@$DIGEST
+          docker manifest inspect "$image" > /dev/null || { echo "::error::$image is not on Docker Hub"; exit 1; }
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
   # What the app installs on the thermostat, under build/.

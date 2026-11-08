@@ -29,7 +29,7 @@ jobs:
 
       - name: Tests and lints, in the build image
         run: |
-          image=unfr0zen/unfr0zen-build:$(sha256sum utils/ci/Dockerfile | cut -c1-12)
+          image=unfr0zen/unfr0zen-build@sha256:b6a69cc0a5d416b6021b64e57df79bbc069b718f6d3fd514fd1646129cb071cd
           docker run --rm -v "$PWD:$PWD" -w "$PWD" -e CARGO_HOME="$PWD/.work/cargo" -e CARGO_BUILD_JOBS=4 "$image" sh -ec '
             git config --global --add safe.directory "$PWD"
             cargo test -p nestlocal --locked
