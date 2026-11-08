@@ -250,9 +250,11 @@ pub fn pending() -> Option<String> {
     Some(text.lines().nth(1).unwrap_or("?").to_string())
 }
 
-/// The new build is healthy: nestlocal.init stops counting.
+/// The new build is healthy: nestlocal.init stops counting, and an older
+/// rollback no longer matters (a release below this build is not offered).
 pub fn commit() {
     let _ = std::fs::remove_file(PENDING);
+    let _ = std::fs::remove_file(FAILED);
     sync();
 }
 
