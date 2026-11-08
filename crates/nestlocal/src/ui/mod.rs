@@ -42,7 +42,10 @@ use crate::logf;
 ///   3  action (scene, script, button) and camera cards (run, snapshot),
 ///      notifications (<base>/set/alert; alert_pressed, alert_dismissed),
 ///      pictures up to 480 wide
-pub const PROTOCOL: u32 = 3;
+///   4  option (select) and cover cards (select, position, open, close),
+///      presets (preset), previous and next, a light group's members, and
+///      the glance
+pub const PROTOCOL: u32 = 4;
 
 #[derive(Default)]
 pub struct Ui {
