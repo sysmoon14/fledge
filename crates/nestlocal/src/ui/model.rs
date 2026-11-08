@@ -302,6 +302,8 @@ pub struct Art {
 
 /// A camera's still fills the display.
 pub const ART_MAX: u32 = 480;
+/// The largest JPEG taken (cropped and scaled down to ART_MAX).
+const JPEG_MAX: usize = 1920;
 
 impl Art {
     /// From a JPEG (a camera's picture) or a PNG (album art).
@@ -320,6 +322,13 @@ impl Art {
         use zune_core::options::DecoderOptions;
         let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
         let mut decoder = zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
+        // Its size from its header before decoding: a camera's is display
+        // sized; a huge one mustn't take the thermostat's memory.
+        decoder.decode_headers().map_err(|e| format!("art: {e:?}"))?;
+        let (width, height) = decoder.dimensions().ok_or("art: no size")?;
+        if width > JPEG_MAX || height > JPEG_MAX {
+            return Err(format!("art: {width}x{height}: at most {JPEG_MAX}"));
+        }
         let pixels = decoder.decode().map_err(|e| format!("art: {e:?}"))?;
         let (width, height) = decoder.dimensions().ok_or("art: no size")?;
         if pixels.len() < width * height * 3 {
@@ -342,6 +351,12 @@ impl Art {
     /// A PNG, square and 8-bit RGB or RGBA (alpha dropped).
     fn decode_png(png_data: &[u8]) -> Result<Art, String> {
         let mut reader = png::Decoder::new(png_data).read_info().map_err(|e| format!("art: {e}"))?;
+        // Its size checked before anything is allocated for it: a huge one
+        // from anyone on the broker mustn't take the thermostat's memory.
+        let header = reader.info();
+        if header.width > ART_MAX || header.height > ART_MAX {
+            return Err(format!("art: {}x{}: at most {ART_MAX}", header.width, header.height));
+        }
         let mut buffer = vec![0; reader.output_buffer_size()];
         let info = reader.next_frame(&mut buffer).map_err(|e| format!("art: {e}"))?;
         if info.width != info.height || info.width == 0 || info.width > ART_MAX

@@ -78,6 +78,11 @@ impl Ui {
     pub fn set_art(&self, entity: &str, payload: &[u8]) -> Result<(), String> {
         let art = if payload.is_empty() { None } else { Some(Arc::new(Art::decode(payload)?)) };
         let mut held = self.art.lock().unwrap();
+        if entity.starts_with("alert:") {
+            // A notification's picture is only wanted while it shows: one
+            // at a time, not one for every notification since it started.
+            held.retain(|key, _| !key.starts_with("alert:") || key == entity);
+        }
         let changed = match art {
             Some(art) => held.insert(entity.to_owned(), art.clone()).is_none_or(|old| old != art),
             None => held.remove(entity).is_some(),
@@ -257,7 +262,17 @@ impl Runtime {
         loop {
             // A frame each 8 ms while anything moves; otherwise input or time.
             let settling = self.settings.is_some_and(|since| since.elapsed() < Duration::from_millis(1500));
-            let wait = if self.animating() || self.pressed.is_some() || self.back_since.is_some() || settling { 8 } else { 50 };
+            // Quick while anything moves; a slower beat when there's nothing
+            // to show (no cards, or asleep on nlclient's dial), to wake the
+            // unit less, as input still ends the wait at once.
+            let idle = matches!(self.machine.mode, Mode::Idle) || (self.machine.mode == Mode::Home && !device::lit());
+            let wait = if self.animating() || self.pressed.is_some() || self.back_since.is_some() || settling {
+                8
+            } else if idle {
+                250
+            } else {
+                50
+            };
             let events = self.input.wait(Duration::from_millis(wait));
             let now = Instant::now();
             let mut effects = Vec::new();
@@ -1112,6 +1127,27 @@ mod tests {
         let at = |x: usize, y: usize| &art.rgb[(y * 48 + x) * 3..(y * 48 + x) * 3 + 3];
         assert!(at(4, 24)[0] > 150 && at(4, 24)[2] < 90, "red at the left: {:?}", at(4, 24));
         assert!(at(44, 24)[2] > 150 && at(44, 24)[0] < 90, "blue at the right: {:?}", at(44, 24));
+    }
+
+    #[test]
+    fn a_picture_too_large_is_refused_before_it_is_decoded() {
+        let error = Art::decode(include_bytes!("testdata/wide.jpg")).unwrap_err();
+        assert!(error.contains("at most"), "{error}");
+        assert!(Art::decode(&[0xFF, 0xD8, 0, 1, 2]).is_err(), "not a JPEG at all");
+    }
+
+    #[test]
+    fn only_the_latest_notification_s_picture_is_kept() {
+        let ui = Ui::default();
+        let picture = png(4, png::ColorType::Rgb, &[1, 2, 3]);
+        ui.set_art("camera.front", &picture).unwrap();
+        for tag in ["a", "b", "c"] {
+            ui.set_art(&format!("alert:{tag}"), &picture).unwrap();
+        }
+        let held = ui.art.lock().unwrap();
+        let mut keys: Vec<&String> = held.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["alert:c", "camera.front"], "a camera's stays; one notification's");
     }
 
     #[test]

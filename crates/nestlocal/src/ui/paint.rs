@@ -367,6 +367,11 @@ pub fn picture(canvas: &mut Canvas, rgb: &[u8], size: u32, cx: f32, cy: f32, rad
             let colour = canvas.rgb([rgb[from], rgb[from + 1], rgb[from + 2]]);
             let at = canvas.at(px as u32, py as u32);
             let data = canvas.pixmap.data_mut();
+            if cover >= 1.0 {
+                // Inside: the picture's own pixel, nothing to blend.
+                data[at..at + 3].copy_from_slice(&colour);
+                continue;
+            }
             for (channel, value) in colour.into_iter().enumerate() {
                 let old = data[at + channel] as f32;
                 data[at + channel] = (old + (value as f32 - old) * cover).round() as u8;
