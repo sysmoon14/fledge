@@ -26,6 +26,8 @@ const GESTURE: Duration = Duration::from_millis(400);
 const TURN_KEPT: Duration = Duration::from_millis(1500);
 /// Between cards, a turn that stops this long settles: on the next card if
 /// it went past halfway, else back where it was.
+/// How far the cards follow a turn past either end, in counts.
+pub const END_GIVE: i32 = CARD_STEP / 6;
 pub const SNAP: Duration = Duration::from_millis(250);
 /// How long each level waits, untouched, before going back to the one above.
 pub const CONTROL_IDLE: Duration = Duration::from_secs(8);
@@ -317,6 +319,16 @@ impl Machine {
                     self.turn = 0;
                 }
                 self.turn += value;
+                if cards {
+                    // At an end the cards give a little, then spring back.
+                    let at = if let Mode::Chooser(index) = self.mode { index } else { 0 };
+                    if at == 0 {
+                        self.turn = self.turn.max(-END_GIVE);
+                    }
+                    if at + 1 == self.deck().len() {
+                        self.turn = self.turn.min(END_GIVE);
+                    }
+                }
                 self.movement += value;
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
@@ -349,14 +361,20 @@ impl Machine {
     }
 
     fn turned(&mut self, steps: i32, out: &mut Vec<Effect>) {
-        out.push(Effect::Click);
         let deck = self.deck().len() as i32;
-        match self.mode.clone() {
-            Mode::Home | Mode::Chooser(_) => {
-                let from = if let Mode::Chooser(index) = self.mode { index as i32 } else { 0 };
-                let index = (from + steps).rem_euclid(deck) as usize;
-                self.go(Mode::Chooser(index), out);
+        if let Mode::Home | Mode::Chooser(_) = self.mode {
+            // The cards stop at either end, as Nest settings do.
+            let from = if let Mode::Chooser(index) = self.mode { index as i32 } else { 0 };
+            let index = (from + steps).clamp(0, deck - 1);
+            if index != from {
+                out.push(Effect::Click);
+                self.go(Mode::Chooser(index as usize), out);
             }
+            return;
+        }
+        out.push(Effect::Click);
+        match self.mode.clone() {
+            Mode::Home | Mode::Chooser(_) => {}
             Mode::LightList { slot, selected } => {
                 if let Some(Card::Lights(card)) = self.card(slot) {
                     let rows = card.lights.len() as i32 + 1;
@@ -848,10 +866,14 @@ mod tests {
             rig.turn(CARD_STEP);
             assert_eq!(rig.machine.mode, Mode::Chooser(index));
         }
-        assert!(rig.turn(CARD_STEP).is_empty(), "round to the thermostat, still the cards");
-        assert_eq!(rig.machine.mode, Mode::Chooser(0));
-        rig.turn(-CARD_STEP);
-        assert_eq!(rig.machine.mode, Mode::Chooser(4), "backwards from the thermostat: settings");
+        assert!(Rig::sends(&rig.turn(CARD_STEP)).is_empty());
+        assert_eq!(rig.machine.mode, Mode::Chooser(4), "settings is the last: they stop there");
+        rig.turn(-CARD_STEP * 9);
+        assert_eq!(rig.machine.mode, Mode::Chooser(0), "and at the thermostat, the first");
+        assert!(rig.turn(-CARD_STEP).is_empty(), "nothing before it");
+        assert!(rig.machine.position().unwrap() >= -(END_GIVE as f32) / CARD_STEP as f32, "past the end: only a little give");
+        rig.wait(SNAP * 2);
+        assert_eq!(rig.machine.position(), Some(0.0), "and back");
     }
 
     #[test]
@@ -888,7 +910,7 @@ mod tests {
         rig.press();
         assert_eq!(rig.machine.mode, Mode::LightList { slot: 0, selected: 0 });
         let mut rig = Rig::woken();
-        rig.turn(-CARD_STEP);
+        rig.turn(CARD_STEP * 4);
         assert_eq!(rig.press(), vec![Effect::Own(false), Effect::Hold(false), Effect::PressNlclient],
                    "Nest settings: nlclient's menu");
     }
@@ -1061,9 +1083,13 @@ mod tests {
         let clicks = |effects: Vec<Effect>| effects.iter().filter(|e| **e == Effect::Click).count();
         assert_eq!(clicks(rig.input_with_clicks(Input::Turn(CARD_STEP / 2))), 0, "not between steps");
         assert_eq!(clicks(rig.input_with_clicks(Input::Turn(CARD_STEP / 2))), 1);
+        assert_eq!(clicks(rig.input_with_clicks(Input::Turn(-CARD_STEP))), 1, "back to the first");
+        assert_eq!(clicks(rig.input_with_clicks(Input::Turn(-CARD_STEP))), 0, "none past the end");
+        rig.wait(SNAP * 2);
+        rig.turn(CARD_STEP);
         assert_eq!(clicks(rig.input_with_clicks(Input::Press)), 1);
         let mut rig = Rig::woken();
-        rig.turn(-CARD_STEP);
+        rig.turn(CARD_STEP * 4);
         assert_eq!(clicks(rig.input_with_clicks(Input::Press)), 0, "nlclient clicks for Nest settings");
         let mut rig = Rig::new();
         rig.lit = false;

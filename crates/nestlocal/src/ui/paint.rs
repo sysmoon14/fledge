@@ -628,6 +628,27 @@ pub fn dots(canvas: &mut Canvas, count: usize, active: usize, y: f32, fade: f32)
     }
 }
 
+const TITLE_BASELINE: f32 = 42.0;
+
+/// How wide the round display is at height `y`, less a margin.
+fn chord(y: f32) -> f32 {
+    let from_centre = CENTRE - y;
+    2.0 * (CENTRE * CENTRE - from_centre * from_centre).max(0.0).sqrt() - 12.0
+}
+
+/// The largest size a card's name fits at above the cards, where the
+/// round display is narrow, and the width it has there; a name too long
+/// even at the smallest is cut short to that width.
+fn title_size(fonts: &Fonts, name: &str) -> (f32, f32) {
+    let room = |size: f32| chord(TITLE_BASELINE - size * 0.72);
+    for size in [28.0, 25.0, 22.0, 19.0] {
+        if measure(&fonts.medium, size, name, 0.0) <= room(size) {
+            return (size, room(size));
+        }
+    }
+    (19.0, room(19.0))
+}
+
 /// Around the cards zoomed out, on a frame for the panel (device::Frame):
 /// the chosen one's name above at `title` of full opacity, and the dots
 /// under them at `fade`.
@@ -638,9 +659,10 @@ pub fn around_cards(frame: &mut Vec<u8>, fonts: &Fonts, name: &str, title: f32, 
     };
     let mut canvas = Canvas { pixmap, panel: true };
     if title > 0.01 {
-        let name = fit(&fonts.medium, 28.0, name, 0.0, 230.0);
-        let width = measure(&fonts.medium, 28.0, &name, 0.0);
-        text_at(&mut canvas, &fonts.medium, 28.0, CENTRE - width / 2.0, 38.0, &name, 0.0, WHITE, title.min(1.0));
+        let (size, room) = title_size(fonts, name);
+        let name = fit(&fonts.medium, size, name, 0.0, room);
+        let width = measure(&fonts.medium, size, &name, 0.0);
+        text_at(&mut canvas, &fonts.medium, size, CENTRE - width / 2.0, TITLE_BASELINE, &name, 0.0, WHITE, title.min(1.0));
     }
     dots(&mut canvas, count, active, 455.0, fade);
     *frame = canvas.pixmap.take();

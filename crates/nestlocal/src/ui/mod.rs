@@ -436,6 +436,13 @@ impl Runtime {
         let whole = at.floor();
         let part = at - whole;
         let (left, right) = (whole as i64, whole as i64 + 1);
+        let count = self.machine.deck().len() as i64;
+        if left < 0 || right >= count {
+            // Past an end: only the end card.
+            let frame = self.card_frame(at.round().clamp(0.0, count as f32 - 1.0) as i64);
+            self.display.show(&frame);
+            return;
+        }
         self.prepare(left);
         if part < 0.001 {
             let frame = self.card_frame(left);
@@ -443,7 +450,6 @@ impl Runtime {
             return;
         }
         self.prepare(right);
-        let count = self.machine.deck().len() as i64;
         let (cards, home) = (&self.cards, &self.home);
         let get = |at: i64| match at.rem_euclid(count) as usize {
             0 => home.as_deref(),
@@ -459,7 +465,7 @@ impl Runtime {
         let shrunk = self.zoom < 0.95;
         let z = if (self.zoom - zoom::ZOOMED).abs() < 0.003 { zoom::ZOOMED } else { self.zoom };
         let count = self.machine.deck().len() as i64;
-        for k in at.floor() as i64 - 2..=at.ceil() as i64 + 2 {
+        for k in (at.floor() as i64 - 2).max(0)..=(at.ceil() as i64 + 2).min(count - 1) {
             self.prepare(k);
             let index = k.rem_euclid(count) as usize;
             if shrunk && !self.shrunk.contains_key(&index) {
@@ -471,7 +477,10 @@ impl Runtime {
         }
         let (cards, shrunk_cards, home) = (&self.cards, &self.shrunk, &self.home);
         let get = |k: i64| -> Option<&[u8]> {
-            let index = k.rem_euclid(count) as usize;
+            if !(0..count).contains(&k) {
+                return None; // the cards stop at either end
+            }
+            let index = k as usize;
             if shrunk {
                 shrunk_cards.get(&index).map(Vec::as_slice)
             } else if index == 0 {
@@ -484,7 +493,7 @@ impl Runtime {
         // The chosen card's name above and the dots under, as they zoom
         // out; the name fades out and in between cards.
         let fade = ((1.0 - self.zoom) / (1.0 - zoom::ZOOMED)).clamp(0.0, 1.0);
-        let nearest = at.round().rem_euclid(count as f32) as usize;
+        let nearest = at.round().clamp(0.0, count as f32 - 1.0) as usize;
         let title = fade * (1.0 - 2.0 * (at - at.round()).abs()).clamp(0.0, 1.0);
         let name = self.name(nearest);
         paint::around_cards(&mut self.scratch, &self.fonts, &name, title, count as usize, nearest, fade);
