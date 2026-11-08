@@ -20,12 +20,15 @@ const IMPORTS: [(&str, &str); 10] = [
     ("memcpy", "memcpy"),
     ("memset", "memset"),
 ];
-const HANDOVER_IMPORTS: [(&str, &str); 5] = [
+const HANDOVER_IMPORTS: [(&str, &str); 8] = [
     ("native_egl_swap", "eglSwapBuffers"),
     ("native_open", "open"),
     ("native_read", "read"),
     ("native_close", "close"),
     ("native_kill", "kill"),
+    ("native_pthread_create", "pthread_create"),
+    ("native_usleep", "usleep"),
+    ("native_getpid", "getpid"),
 ];
 /// The one call that presents nlclient's frames: a BL to eglSwapBuffers's
 /// PLT stub. More than one, or none, and the hand-over can't be made whole.

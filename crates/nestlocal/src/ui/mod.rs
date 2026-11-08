@@ -59,9 +59,11 @@ impl Ui {
     }
 }
 
-/// What the UI sends Home Assistant.
+/// What the UI sends Home Assistant, and the Nest's own settings it follows.
 pub trait Sender: Send + Sync + 'static {
     fn send(&self, command: &Command);
+    /// Whether the Nest clicks as the ring turns (its click sound setting).
+    fn clicks(&self) -> bool;
 }
 
 /// Starts the UI on a gen 3 unit: it waits for cards from Home Assistant.
@@ -90,6 +92,7 @@ struct Runtime {
     fonts: paint::Fonts,
     display: device::Display,
     input: device::Input,
+    beeper: device::Beeper,
     machine: Machine,
     generation: u64,
     /// nlclient's frame from before the UI owned the display.
@@ -107,7 +110,7 @@ impl Runtime {
            input: device::Input) -> Runtime {
         let now = Instant::now();
         Runtime {
-            ui, sender, fonts, display, input, machine: Machine::new(now), generation: u64::MAX, saved: None,
+            ui, sender, fonts, display, input, beeper: device::Beeper::open(), machine: Machine::new(now), generation: u64::MAX, saved: None,
             shown: None, transition: Transition::Cut,
             last_check: now - Duration::from_secs(10), nlclient: false,
         }
@@ -115,6 +118,7 @@ impl Runtime {
 
     fn run(mut self) {
         logf!("ui: ready for home screen cards");
+        hold_state(false);
         loop {
             let events = self.input.wait(Duration::from_millis(50));
             let now = Instant::now();
@@ -134,7 +138,8 @@ impl Runtime {
             let turned = !events.is_empty();
             for event in events {
                 let input = match (event.kind, event.code, event.value) {
-                    (device::EV_REL, device::REL_DIAL, value) => Input::Turn(value),
+                    // The ADC counts anticlockwise up: clockwise is positive here.
+                    (device::EV_REL, device::REL_DIAL, value) => Input::Turn(-value),
                     (device::EV_KEY, device::KEY_ENTER, 1) => Input::Press,
                     _ => continue,
                 };
@@ -169,8 +174,16 @@ impl Runtime {
                 self.shown = None;
                 device::own(false);
             }
-            Effect::Hold(hold) => self.input.grab(hold),
-            Effect::Nudge => self.input.nudge(),
+            Effect::Hold(hold) => {
+                self.input.grab(hold);
+                hold_state(hold);
+            }
+            Effect::WakeDisplay => device::wake_display(),
+            Effect::Click => {
+                if self.sender.clicks() {
+                    self.beeper.click();
+                }
+            }
             Effect::KeepAwake => crate::wake::keep_awake_for(30),
             Effect::PressNlclient => {
                 // Once nlclient has its frame back on the display.
@@ -218,12 +231,21 @@ impl Runtime {
             },
             _ => return,
         };
-        let frame = device::frame(&screens::draw(&self.fonts, &screen, at));
+        let started = Instant::now();
+        let pixmap = screens::draw(&self.fonts, &screen, at);
+        let drawn = started.elapsed();
+        let frame = device::frame(&pixmap);
+        let turned = started.elapsed() - drawn;
         // From the card before, or from nlclient's frame on the way in.
         if let Some(from) = self.shown.take().or_else(|| self.saved.clone()) {
             self.animate(&from, &frame, self.transition);
         }
+        let shown = Instant::now();
         self.display.show(&frame);
+        if started.elapsed() > Duration::from_millis(30) {
+            logf!("ui: drew in {} ms, turned in {} ms, showed in {} ms", drawn.as_millis(), turned.as_millis(),
+                  shown.elapsed().as_millis());
+        }
         self.shown = Some(frame);
         self.transition = Transition::Cut;
     }
@@ -304,6 +326,12 @@ mod tests {
         assert_eq!(transition(&Mode::Home, &Mode::Native, 5, true), Transition::Cut);
         assert_eq!(transition(&list, &Mode::LightList { slot: 0, selected: 1 }, 5, true), Transition::Cut);
     }
+}
+
+/// Whether the ring is held, for tools that drive the unit's screen
+/// (utils/nest-screen.py): a turn while it isn't reaches the temperature.
+fn hold_state(hold: bool) {
+    let _ = crate::settings_ui::publish("ui.state", if hold { b"holds" } else { b"leaves" });
 }
 
 /// Whether nlclient shows its home dial: its ring lit around the edge.

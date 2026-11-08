@@ -895,6 +895,11 @@ impl crate::ui::Sender for Bridge {
         logf!("ui: {payload}");
         self.publish(&format!("{}/ui/command", self.base), false, payload.as_bytes());
     }
+
+    fn clicks(&self) -> bool {
+        let device = self.store.get(&format!("device.{}", self.serial));
+        device.and_then(|d| d.value.get("click_sound")?.as_str().map(|s| s != "off")).unwrap_or(true)
+    }
 }
 
 #[cfg(test)]

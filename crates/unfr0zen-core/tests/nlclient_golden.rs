@@ -353,7 +353,8 @@ fn unsupported_relocations_and_branch_veneers_are_refused() {
     // Goldens from before the screen hand-over lack its imports: any PLT
     // stub of the build stands in for them.
     let stub = externals["native_fopen"];
-    for name in ["native_egl_swap", "native_open", "native_read", "native_close", "native_kill"] {
+    for name in ["native_egl_swap", "native_open", "native_read", "native_close", "native_kill",
+                 "native_pthread_create", "native_usleep", "native_getpid"] {
         externals.entry(name.into()).or_insert(stub);
     }
     let layout: BTreeMap<String, u32> =

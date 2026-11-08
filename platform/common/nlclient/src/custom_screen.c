@@ -319,32 +319,74 @@ extern int native_read(int, void *, unsigned int);
 extern int native_close(int);
 extern int native_kill(int, int);
 #define SCREEN_OWNER "/var/run/unfr0zen/screen.owner"
+static int read_pid(const char *path);
 static int screen_owned(void) {
-    char text[16];
-    int fd = native_open(SCREEN_OWNER, 0);
-    if (fd < 0) return 0;
-    int count = native_read(fd, text, sizeof(text) - 1);
-    native_close(fd);
-    int pid = 0;
-    for (int i = 0; i < count && text[i] >= '0' && text[i] <= '9'; i++) pid = pid * 10 + (text[i] - '0');
+    int pid = read_pid(SCREEN_OWNER);
     return pid > 1 && native_kill(pid, 0) == 0;
 }
 u32 custom_swap(void *display, void *surface) {
     if (screen_owned()) return 1; /* EGL_TRUE: drawn, not shown */
     return native_egl_swap(display, surface);
 }
+/* While the UI owns the display, nlclient sees none of the ring and button,
+ * so it would let its display go dark. A thread of nlclient's own lights it
+ * as a command from Home Assistant does (wake_display): every 2 s while the
+ * UI owns the display, and at once when the UI leaves display.wake (a turn
+ * on a dark display). nlclient is never sent input it didn't get. */
+extern int native_pthread_create(void *, void *, void *(*)(void *), void *);
+extern int native_usleep(unsigned int);
+extern int native_getpid(void);
+#define DISPLAY_WAKE "/var/run/unfr0zen/display.wake"
+#define KEEPER "/var/run/unfr0zen/keeper.pid"
+static void *keeper(void *globals) {
+    for (unsigned int ticks = 1;; ticks++) {
+        native_usleep(100000);
+        int wake = !rename_setting(DISPLAY_WAKE, "/var/run/unfr0zen/display.woken");
+        if (wake || (ticks % 20 == 0 && screen_owned())) wake_display(globals);
+    }
+    return 0;
+}
+static int read_pid(const char *path) {
+    char text[16];
+    int fd = native_open(path, 0);
+    if (fd < 0) return 0;
+    int count = native_read(fd, text, sizeof(text) - 1);
+    native_close(fd);
+    int pid = 0;
+    for (int i = 0; i < count && text[i] >= '0' && text[i] <= '9'; i++) pid = pid * 10 + (text[i] - '0');
+    return pid;
+}
+/* Once per nlclient: the payload has no writable data, so the mark that the
+ * thread runs is this process's pid in KEEPER. */
+static void keeper_start(void *bucket) {
+    int pid = native_getpid();
+    if (read_pid(KEEPER) == pid) return;
+    char text[12];
+    int length = 0;
+    for (int rest = pid; rest; rest /= 10) length++;
+    for (int i = length, rest = pid; i > 0; rest /= 10) text[--i] = '0' + rest % 10;
+    void *file = native_fopen(KEEPER, "w");
+    if (!file) return;
+    native_fwrite(text, 1, length, file);
+    native_fclose(file);
+    unsigned int thread;
+    native_pthread_create(&thread, 0, keeper, PTR(bucket, BUCKET_GLOBALS_OFFSET));
+}
 int custom_device_commit(void *bucket) {
     int result = native_device_commit(bucket);
+    keeper_start(bucket);
     downlink_activity(bucket);
     return result;
 }
 int custom_shared_commit(void *bucket) {
     int result = native_shared_commit(bucket);
+    keeper_start(bucket);
     downlink_activity(bucket);
     return result;
 }
 int custom_schedule_commit(void *bucket) {
     int result = native_schedule_commit(bucket);
+    keeper_start(bucket);
     downlink_activity(bucket);
     return result;
 }

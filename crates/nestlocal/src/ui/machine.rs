@@ -22,8 +22,8 @@ pub const CARD_IDLE: Duration = Duration::from_secs(20);
 /// Back to the cards this long after the last input on nlclient's screens,
 /// once nlclient shows its home dial again.
 pub const NATIVE_IDLE: Duration = Duration::from_secs(5);
-/// Keeps nlclient's display awake well within its own timeout (about 12 s).
-pub const NUDGE: Duration = Duration::from_secs(4);
+/// How often the unit is held awake again while a card shows.
+pub const KEEP: Duration = Duration::from_secs(4);
 /// The least time between commands while turning.
 pub const SEND_EVERY: Duration = Duration::from_millis(300);
 
@@ -74,9 +74,11 @@ pub enum Effect {
     Own(bool),
     /// Hold the ring and button, or leave them to nlclient.
     Hold(bool),
-    /// Activity for nlclient that changes nothing: keeps its display awake,
-    /// or wakes it.
-    Nudge,
+    /// Asks nlclient to light its display (a turn while it was dark). While
+    /// the UI owns the display, nlclient keeps it lit by itself.
+    WakeDisplay,
+    /// The Nest's click, for a step of the ring or a press.
+    Click,
     /// Holds the unit awake while a card shows.
     KeepAwake,
     /// A press for nlclient, once it has its frame back.
@@ -89,8 +91,8 @@ pub struct Machine {
     pub cards: Cards,
     dirty: bool,
     last_input: Instant,
-    /// When nlclient was last nudged under a card; None: nudge now.
-    last_nudge: Option<Instant>,
+    /// When the unit was last held awake under a card; None: now.
+    last_keep: Option<Instant>,
     turn: i32,
     movement: i32,
     pending: Option<Command>,
@@ -100,7 +102,7 @@ pub struct Machine {
 impl Machine {
     pub fn new(now: Instant) -> Machine {
         Machine {
-            mode: Mode::Idle, cards: Cards::default(), dirty: false, last_input: now, last_nudge: None,
+            mode: Mode::Idle, cards: Cards::default(), dirty: false, last_input: now, last_keep: None,
             turn: 0, movement: 0, pending: None, last_sent: now,
         }
     }
@@ -172,7 +174,7 @@ impl Machine {
             out.push(Effect::Hold(hold));
         }
         if will && !was {
-            self.last_nudge = None;
+            self.last_keep = None;
         }
         if let Some(command) = self.pending.take() {
             out.push(Effect::Send(command));
@@ -188,7 +190,7 @@ impl Machine {
             Mode::Idle | Mode::Native => return,
             Mode::Home if !lit => {
                 // Dark: the turn or press only wakes nlclient's display.
-                out.push(Effect::Nudge);
+                out.push(Effect::WakeDisplay);
                 return;
             }
             _ => {}
@@ -222,6 +224,7 @@ impl Machine {
     }
 
     fn turned(&mut self, steps: i32, out: &mut Vec<Effect>) {
+        out.push(Effect::Click);
         let deck = self.deck().len() as i32;
         match self.mode.clone() {
             Mode::Home | Mode::Card(_) => {
@@ -265,6 +268,10 @@ impl Machine {
 
     fn press(&mut self, out: &mut Vec<Effect>) {
         let deck = self.deck();
+        // Nest settings passes the press on to nlclient, which clicks itself.
+        if !matches!(self.mode, Mode::Card(index) if deck.get(index) == Some(&Slot::Settings)) {
+            out.push(Effect::Click);
+        }
         match self.mode.clone() {
             Mode::Home => self.go(Mode::Native, out),
             Mode::Card(index) => match deck.get(index) {
@@ -347,9 +354,8 @@ impl Machine {
             self.go(Mode::Home, out);
             return;
         }
-        if self.last_nudge.is_none_or(|last| now.duration_since(last) >= NUDGE) {
-            self.last_nudge = Some(now);
-            out.push(Effect::Nudge);
+        if self.last_keep.is_none_or(|last| now.duration_since(last) >= KEEP) {
+            self.last_keep = Some(now);
             out.push(Effect::KeepAwake);
         }
         let back = match self.mode {
@@ -423,7 +429,12 @@ mod tests {
             out
         }
 
+        /// What an input does, its clicks aside (clicks_on_each_step_and_press).
         fn input(&mut self, input: Input) -> Vec<Effect> {
+            self.input_with_clicks(input).into_iter().filter(|e| *e != Effect::Click).collect()
+        }
+
+        fn input_with_clicks(&mut self, input: Input) -> Vec<Effect> {
             self.now += 20 * MS;
             let mut out = vec![];
             self.machine.input(input, self.now, self.lit, &mut out);
@@ -504,11 +515,27 @@ mod tests {
     }
 
     #[test]
+    fn clicks_on_each_step_and_press() {
+        let mut rig = Rig::new();
+        let clicks = |effects: Vec<Effect>| effects.iter().filter(|e| **e == Effect::Click).count();
+        assert_eq!(clicks(rig.input_with_clicks(Input::Turn(CARD_STEP / 2))), 0, "not between steps");
+        assert_eq!(clicks(rig.input_with_clicks(Input::Turn(CARD_STEP / 2))), 1);
+        assert_eq!(clicks(rig.input_with_clicks(Input::Press)), 1);
+        let mut rig = Rig::new();
+        rig.turn(-CARD_STEP);
+        assert_eq!(rig.machine.mode, Mode::Card(4));
+        assert_eq!(clicks(rig.input_with_clicks(Input::Press)), 0, "nlclient clicks for Nest settings");
+        rig.lit = false;
+        rig.tick();
+        assert_eq!(clicks(rig.input_with_clicks(Input::Turn(CARD_STEP))), 0, "waking is silent, as nlclient's");
+    }
+
+    #[test]
     fn a_dark_display_only_wakes() {
         let mut rig = Rig::new();
         rig.lit = false;
-        assert_eq!(rig.turn(CARD_STEP * 3), vec![Effect::Nudge]);
-        assert_eq!(rig.press(), vec![Effect::Nudge]);
+        assert_eq!(rig.turn(CARD_STEP * 3), vec![Effect::WakeDisplay]);
+        assert_eq!(rig.press(), vec![Effect::WakeDisplay]);
         assert_eq!(rig.machine.mode, Mode::Home);
     }
 
@@ -540,9 +567,9 @@ mod tests {
         let mut rig = Rig::new();
         rig.turn(CARD_STEP);
         let effects = rig.wait(CARD_IDLE - Duration::from_millis(100));
-        let nudges = effects.iter().filter(|e| **e == Effect::Nudge).count();
-        assert_eq!(nudges, 5, "at once, then every 4 s");
-        assert!(effects.contains(&Effect::KeepAwake));
+        let keeps = effects.iter().filter(|e| **e == Effect::KeepAwake).count();
+        assert_eq!(keeps, 5, "at once, then every 4 s");
+        assert!(!effects.iter().any(|e| matches!(e, Effect::WakeDisplay)), "nlclient keeps its display lit itself");
         assert_eq!(rig.wait(Duration::from_millis(200)), vec![Effect::Own(false)]);
         assert_eq!(rig.machine.mode, Mode::Home);
     }

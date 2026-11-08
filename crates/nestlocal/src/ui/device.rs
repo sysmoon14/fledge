@@ -23,6 +23,9 @@ use tiny_skia::Pixmap;
 pub const OWNER: &str = "/var/run/unfr0zen/screen.owner";
 const RING: &str = "2280000.adc";
 const BUTTON: &str = "gpio-keys";
+const BEEPER: &str = "pwm-beeper";
+const EV_SND: u16 = 0x12;
+const SND_TONE: u16 = 2;
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
 pub const KEY_ENTER: u16 = 28;
@@ -40,6 +43,30 @@ pub fn own(yes: bool) {
     };
     if let Err(e) = result {
         crate::logf!("ui: {OWNER}: {e}");
+    }
+}
+
+/// Asks nlclient to light its display (custom_screen.c's keeper).
+pub fn wake_display() {
+    if let Err(e) = crate::settings_ui::publish("display.wake", b"") {
+        crate::logf!("ui: display.wake: {e}");
+    }
+}
+
+/// The Nest's click: the beeper's tone, at nlclient's own clickfrequency
+/// and clickduration (/nestlabs/etc/client.config).
+pub struct Beeper(Option<File>);
+
+impl Beeper {
+    pub fn open() -> Beeper {
+        Beeper(node(BEEPER).map_err(|e| crate::logf!("ui: {e}: no clicks")).ok())
+    }
+
+    pub fn click(&mut self) {
+        let Some(file) = &mut self.0 else { return };
+        let _ = file.write_all(&[encode(EV_SND, SND_TONE, 2000), encode(0, 0, 0)].concat());
+        std::thread::sleep(Duration::from_millis(3));
+        let _ = file.write_all(&[encode(EV_SND, SND_TONE, 0), encode(0, 0, 0)].concat());
     }
 }
 
@@ -266,16 +293,6 @@ impl Input {
             }
         }
         events
-    }
-
-    /// Activity nlclient sees, that changes nothing: the ring a count each
-    /// way in one report. It keeps nlclient's display awake, or wakes it.
-    pub fn nudge(&mut self) {
-        let mut report = Vec::with_capacity(48);
-        report.extend(encode(EV_REL, REL_DIAL, 1));
-        report.extend(encode(EV_REL, REL_DIAL, -1));
-        report.extend(encode(0, 0, 0));
-        self.send(true, &report);
     }
 
     /// A press and release of the button, for nlclient.
