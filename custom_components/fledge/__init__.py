@@ -23,7 +23,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from . import cards
 from .const import (CARDS_TOPIC, COMMAND_TOPIC, CONF_AREAS, CONF_CLIMATES, CONF_EXCLUDE, CONF_MEDIA,
-                    CONF_SERIAL, TOPIC_PREFIX)
+                    CONF_SERIAL, CONF_WAKE, TOPIC_PREFIX, WAKE_CHOOSER)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ class Thermostat:
                       and e.entity_id not in left_out]
             lights.sort(key=lambda e: (e.name or e.original_name or e.entity_id).lower())
             rooms.append(cards.LightsCard(area.name, area.icon or "mdi:lightbulb-group",
-                                          [e.entity_id for e in lights]))
+                                          [e.entity_id for e in lights], f"area:{area_id}"))
         self.rooms = rooms
 
     def _track(self) -> None:
@@ -134,7 +134,8 @@ class Thermostat:
         self.hass.async_create_task(self._publisher.async_call())
 
     async def _publish(self) -> None:
-        payload = json.dumps(cards.cards(self.rooms, self.climates, self.players, self.hass.states.get),
+        wake = self.entry.options.get(CONF_WAKE, WAKE_CHOOSER)
+        payload = json.dumps(cards.cards(self.rooms, self.climates, self.players, self.hass.states.get, wake),
                              separators=(",", ":"))
         if payload != self.last:
             self.last = payload

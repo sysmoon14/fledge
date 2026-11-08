@@ -10,6 +10,11 @@ CONF_AREAS = "areas"
 CONF_CLIMATES = "climates"
 CONF_MEDIA = "media"
 CONF_EXCLUDE = "exclude"
+CONF_WAKE = "wake"
+
+# What the thermostat wakes to, besides a chosen device ("area:<id>", "entity:<id>").
+WAKE_CHOOSER = "chooser"
+WAKE_THERMOSTAT = "thermostat"
 
 # The cards the thermostat shows (retained) and what it asks for.
 CARDS_TOPIC = "{prefix}/{serial}/set/ui"

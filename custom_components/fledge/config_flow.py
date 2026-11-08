@@ -8,10 +8,11 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
+from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er, selector
 from homeassistant.helpers.service_info.mqtt import MqttServiceInfo
 
-from .const import CONF_AREAS, CONF_CLIMATES, CONF_EXCLUDE, CONF_MEDIA, CONF_SERIAL, DOMAIN, TOPIC_PREFIX
+from .const import (CONF_AREAS, CONF_CLIMATES, CONF_EXCLUDE, CONF_MEDIA, CONF_SERIAL, CONF_WAKE, DOMAIN,
+                    TOPIC_PREFIX, WAKE_CHOOSER, WAKE_THERMOSTAT)
 
 
 def thermostats(hass: HomeAssistant) -> dict[str, dr.DeviceEntry]:
@@ -52,6 +53,27 @@ def _cards_schema(hass: HomeAssistant, serial: str, current: dict[str, Any]) -> 
     })
 
 
+def _wake_schema(hass: HomeAssistant, cards: dict[str, Any], current: str) -> vol.Schema:
+    """What the thermostat wakes to: the chooser, itself, or one of the cards."""
+    options = [selector.SelectOptionDict(value=WAKE_CHOOSER, label="The device chooser"),
+               selector.SelectOptionDict(value=WAKE_THERMOSTAT, label="This thermostat, as the Nest always did")]
+    areas = ar.async_get(hass)
+    for area_id in cards.get(CONF_AREAS, []):
+        area = areas.async_get_area(area_id)
+        if area is not None:
+            options.append(selector.SelectOptionDict(value=f"area:{area_id}", label=f"{area.name} lights"))
+    for entity_id in [*cards.get(CONF_CLIMATES, []), *cards.get(CONF_MEDIA, [])]:
+        state = hass.states.get(entity_id)
+        name = state.attributes.get("friendly_name") if state else None
+        options.append(selector.SelectOptionDict(value=f"entity:{entity_id}", label=name or entity_id))
+    if current not in [o["value"] for o in options]:
+        current = WAKE_CHOOSER
+    return vol.Schema({
+        vol.Required(CONF_WAKE, default=current): selector.SelectSelector(
+            selector.SelectSelectorConfig(options=options, mode=selector.SelectSelectorMode.LIST)),
+    })
+
+
 def _title(hass: HomeAssistant, serial: str) -> str:
     device = thermostats(hass).get(serial)
     name = device and (device.name_by_user or device.name)
@@ -65,6 +87,7 @@ class FledgeConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._serial: str | None = None
+        self._cards: dict[str, Any] = {}
 
     async def async_step_mqtt(self, discovery_info: MqttServiceInfo) -> ConfigFlowResult:
         """A Nest running Fledge came online: nestlocal/<serial>/availability."""
@@ -100,9 +123,16 @@ class FledgeConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_cards(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         assert self._serial is not None
         if user_input is not None:
-            return self.async_create_entry(title=_title(self.hass, self._serial),
-                                           data={CONF_SERIAL: self._serial}, options=user_input)
+            self._cards = user_input
+            return await self.async_step_wake()
         return self.async_show_form(step_id="cards", data_schema=_cards_schema(self.hass, self._serial, {}))
+
+    async def async_step_wake(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        assert self._serial is not None
+        if user_input is not None:
+            return self.async_create_entry(title=_title(self.hass, self._serial),
+                                           data={CONF_SERIAL: self._serial}, options={**self._cards, **user_input})
+        return self.async_show_form(step_id="wake", data_schema=_wake_schema(self.hass, self._cards, WAKE_CHOOSER))
 
     @staticmethod
     @callback
@@ -111,11 +141,21 @@ class FledgeConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class FledgeOptionsFlow(OptionsFlow):
-    """Changing which cards the thermostat shows."""
+    """Changing which cards the thermostat shows, and what it wakes to."""
+
+    def __init__(self) -> None:
+        self._cards: dict[str, Any] = {}
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            self._cards = user_input
+            return await self.async_step_wake()
         serial = self.config_entry.data[CONF_SERIAL]
         return self.async_show_form(step_id="init",
                                     data_schema=_cards_schema(self.hass, serial, dict(self.config_entry.options)))
+
+    async def async_step_wake(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data={**self._cards, **user_input})
+        current = self.config_entry.options.get(CONF_WAKE, WAKE_CHOOSER)
+        return self.async_show_form(step_id="wake", data_schema=_wake_schema(self.hass, self._cards, current))

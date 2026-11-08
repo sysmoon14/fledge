@@ -31,6 +31,8 @@ class LightsCard:
     name: str
     icon: str
     lights: Sequence[str]
+    # What the wake option calls this card: "area:<id>".
+    key: str = ""
 
 
 def _name(state: State) -> str:
@@ -94,17 +96,29 @@ def cards(
     climates: Sequence[str],
     players: Sequence[str],
     get: Any,
+    wake: str = "chooser",
 ) -> dict[str, Any]:
     """The cards, from the chosen rooms, thermostats and media players, each
-    entity's state from `get` (None: unknown to Home Assistant, left out)."""
+    entity's state from `get` (None: unknown to Home Assistant, left out),
+    and what the thermostat wakes to: "chooser", "thermostat", or the place
+    among the cards of the one `wake` names ("area:<id>", "entity:<id>"),
+    the chooser if it isn't there."""
     out: list[dict[str, Any]] = []
+    keys: list[str] = []
     for room in rooms:
         lights = [light(s) for s in map(get, room.lights) if s is not None][:MAX_LIGHTS]
         if lights:
             out.append({"kind": "lights", "name": room.name, "icon": room.icon, "lights": lights})
-    out.extend(climate(s) for s in map(get, climates) if s is not None)
-    out.extend(media(s) for s in map(get, players) if s is not None)
-    return {"cards": out}
+            keys.append(room.key)
+    for build, entities in ((climate, climates), (media, players)):
+        for state in map(get, entities):
+            if state is not None:
+                out.append(build(state))
+                keys.append(f"entity:{state.entity_id}")
+    woken: Any = "thermostat" if wake == "thermostat" else "chooser"
+    if wake in keys:
+        woken = keys.index(wake)
+    return {"cards": out, "wake": woken}
 
 
 @dataclass

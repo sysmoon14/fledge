@@ -37,6 +37,16 @@ def test_a_light_as_the_thermostat_lists_it():
     assert cards.light(faint)["brightness"] == 1, "on is at least 1%"
 
 
+def test_the_thermostat_wakes_to_what_was_chosen():
+    rooms = [cards.LightsCard("Bedroom", "mdi:bed", ["light.lamp"], "area:bedroom"),
+             cards.LightsCard("Hall", "mdi:door", ["light.gone"], "area:hall")]
+    states = {"light.lamp": State("light.lamp", "on"), "climate.utility": State("climate.utility", "heat")}
+    wake = lambda w: cards.cards(rooms, ["climate.utility"], [], states.get, w)["wake"]
+    assert wake("chooser") == "chooser" and wake("thermostat") == "thermostat"
+    assert wake("area:bedroom") == 0 and wake("entity:climate.utility") == 1, "by its place among the cards"
+    assert wake("area:hall") == "chooser", "a card that isn't there: the chooser"
+
+
 def test_a_room_with_no_known_lights_has_no_card():
     rooms = [cards.LightsCard("Bedroom", "mdi:bed", ["light.gone"]),
              cards.LightsCard("Kitchen", "mdi:knife", ["light.kitchen"])]
@@ -86,9 +96,19 @@ async def test_choosing_the_thermostat_and_its_cards(hass: HomeAssistant, mqtt_m
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"serial": SERIAL})
     assert result["step_id"] == "cards"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"climates": [], "media": []})
+    assert result["step_id"] == "wake"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"wake": "thermostat"})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == f"Nest Thermostat ({SERIAL})"
     assert result["data"] == {"serial": SERIAL}
+    assert result["options"]["wake"] == "thermostat"
+
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"climates": [], "media": []})
+    assert result["step_id"] == "wake"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"wake": "chooser"})
+    assert result["type"] is FlowResultType.CREATE_ENTRY and entry.options["wake"] == "chooser"
 
 
 async def test_without_a_thermostat_there_is_nothing_to_set_up(hass: HomeAssistant, mqtt_mock) -> None:
@@ -104,7 +124,9 @@ async def test_a_thermostat_coming_online_is_offered(hass: HomeAssistant, mqtt_m
     assert result["step_id"] == "confirm"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY and result["data"] == {"serial": SERIAL}
+    assert result["options"]["wake"] == "chooser", "the chooser unless chosen"
     again = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_MQTT},
                                                       data=info)
     assert again["type"] is FlowResultType.ABORT and again["reason"] == "already_configured"
@@ -138,6 +160,7 @@ async def test_a_room_s_lights_are_kept_on_the_thermostat(hass: HomeAssistant, m
 
     topic, payload, qos, retain = _published(mqtt_mock)[-1]
     card = json.loads(payload)["cards"][0]
+    assert json.loads(payload)["wake"] == "chooser"
     assert retain and card["name"] == "Bedroom" and card["icon"] == "mdi:bed"
     assert [(l["name"], l["on"], l["brightness"]) for l in card["lights"]] == [("Ceiling", False, None),
                                                                                 ("Lamp", True, 100)]

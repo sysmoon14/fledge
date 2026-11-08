@@ -28,6 +28,13 @@
           "media": "Speakers whose volume the ring sets.",
           "exclude": "Lights in those rooms not to list, such as a screen's backlight."
         }
+      },
+      "wake": {
+        "title": "When the thermostat wakes",
+        "description": "What a turn or press shows when the thermostat's screen is dark. The device chooser shows the thermostat among your devices, zoomed out: turn to browse, press to open. Or open one device straight away.",
+        "data": {
+          "wake": "Show"
+        }
       }
     },
     "abort": {
@@ -52,6 +59,13 @@
           "climates": "Heating zones or other thermostats to set from this one.",
           "media": "Speakers whose volume the ring sets.",
           "exclude": "Lights in those rooms not to list, such as a screen's backlight."
+        }
+      },
+      "wake": {
+        "title": "When the thermostat wakes",
+        "description": "What a turn or press shows when the thermostat's screen is dark. The device chooser shows the thermostat among your devices, zoomed out: turn to browse, press to open. Or open one device straight away.",
+        "data": {
+          "wake": "Show"
         }
       }
     }
