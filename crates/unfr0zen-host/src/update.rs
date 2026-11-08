@@ -78,20 +78,20 @@ pub fn release_version(build: &str) -> Option<&str> {
         .then_some(version)
 }
 
-/// Picks the release asset for this platform from a list of file names.
+/// Picks the release asset for this platform from a list of file names:
+/// Fledge-<platform>-<version>, or unfr0zen-… as releases were once named.
 /// On macOS, prefers the universal build; falls back to the arch-specific one.
 fn pick_asset(names: &[&str]) -> Option<usize> {
     let is_archive = |n: &str| n.ends_with(".zip") || n.ends_with(".tar.gz");
+    let named = |platform: &str| {
+        let prefixes = [format!("Fledge-{platform}-"), format!("unfr0zen-{platform}-")];
+        names.iter().position(|n| prefixes.iter().any(|p| n.starts_with(p.as_str())) && is_archive(n))
+    };
     if cfg!(target_os = "macos") {
-        let arch = if cfg!(target_arch = "aarch64") { "macos-arm64-" } else { "macos-x86_64-" };
-        names.iter().position(|n| n.starts_with("unfr0zen-macos-universal-") && is_archive(n))
-            .or_else(|| {
-                let prefix = format!("unfr0zen-{arch}");
-                names.iter().position(|n| n.starts_with(&prefix) && is_archive(n))
-            })
+        let arch = if cfg!(target_arch = "aarch64") { "macos-arm64" } else { "macos-x86_64" };
+        named("macos-universal").or_else(|| named(arch))
     } else {
-        let prefix = format!("unfr0zen-{PLATFORM}-");
-        names.iter().position(|n| n.starts_with(&prefix) && is_archive(n))
+        named(PLATFORM)
     }
 }
 
@@ -388,6 +388,17 @@ mod tests {
         };
         assert!(picked.starts_with(expected_prefix),
                 "picked {picked} but expected prefix {expected_prefix}");
+    }
+
+    #[test]
+    fn takes_fledge_s_names_and_the_old_ones() {
+        let platform = if cfg!(target_os = "macos") { "macos-universal".to_owned() } else { PLATFORM.to_owned() };
+        let ext = if cfg!(windows) || cfg!(target_os = "macos") { "zip" } else { "tar.gz" };
+        let fledge = format!("Fledge-{platform}-v0.4.8.{ext}");
+        let old = format!("unfr0zen-{platform}-v0.1.8.{ext}");
+        assert_eq!(pick_asset(&["nestlocal-armv7", fledge.as_str()]), Some(1));
+        assert_eq!(pick_asset(&[old.as_str()]), Some(0));
+        assert_eq!(pick_asset(&["nestlocal-armv7", "nestlocal-armv7.sig"]), None, "a thermostat-only release");
     }
 
     #[test]

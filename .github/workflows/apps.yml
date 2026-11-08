@@ -1,0 +1,161 @@
+name: Apps
+
+# The Fledge app for every platform, built into a release: when a release is
+# published (utils/release-nestlocal.sh publishes one with the thermostat's
+# nestlocal), or by hand for an existing release's tag. Everything builds on
+# GitHub's Linux runners, in the build image (utils/ci/Dockerfile): the
+# firmware the app carries first, then the app for each platform, cross-
+# compiled (zig for Linux and macOS, MinGW for Windows), each uploaded to the
+# release as Fledge-<platform>-<version>, which the app's updater looks for.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release to build into (vX.Y.Z)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apps-${{ github.event.release.tag_name || inputs.tag }}
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  # The build image for this Dockerfile, as the Dockerfile's first twelve hex
+  # of SHA-256 tags it on Docker Hub (utils/ci/configs.py).
+  image:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.tag.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - id: tag
+        run: |
+          image=unfr0zen/unfr0zen-build:$(sha256sum utils/ci/Dockerfile | cut -c1-12)
+          docker manifest inspect "$image" > /dev/null \
+            || { echo "::error::$image is not on Docker Hub: the Dockerfile changed, and Fledge doesn't publish its own image yet"; exit 1; }
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  # What the app installs on the thermostat, under build/.
+  firmware:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Make room
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      # U-Boot only to its pinned commit: its full history is gigabytes.
+      - name: Submodules
+        run: git submodule update --init --depth 1 platform/diamond3/uboot/upstream platform/common/doom/doomgeneric
+
+      # The OMAP boards' x-loader and the j49's kernel build in Docker
+      # containers of their own, so here on the runner; build-firmware.sh then
+      # finds them up to date.
+      - name: The j49's x-loader and kernel
+        run: |
+          sh platform/j49/xloader.sh build/j49
+          sh platform/j49/kernel.sh build/j49
+
+      - name: Everything else, in the build image
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+        run: |
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e JOBS=4 -e CARGO_HOME="$PWD/.work/cargo" \
+            -e UNFR0ZEN_BUILD_VERSION="$TAG" "$IMAGE" \
+            sh -c 'git config --global --add safe.directory "$PWD" && utils/build-firmware.sh'
+
+      - name: Logs
+        if: failure()
+        run: tail -n 60 .work/build-*.log || true
+
+      - name: Pack
+        run: sudo tar cf firmware.tar build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: firmware.tar
+          retention-days: 3
+
+  # The app for each platform, into the release.
+  app:
+    name: app (${{ matrix.platform }})
+    needs: [image, firmware]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux against glibc 2.28, so the binaries also run on older distributions.
+          - { platform: linux-x86_64, target: x86_64-unknown-linux-gnu, build: "cargo zigbuild --target x86_64-unknown-linux-gnu.2.28" }
+          - { platform: linux-arm64, target: aarch64-unknown-linux-gnu, build: "cargo zigbuild --target aarch64-unknown-linux-gnu.2.28" }
+          - { platform: linux-riscv64, target: riscv64gc-unknown-linux-gnu, build: "cargo zigbuild --target riscv64gc-unknown-linux-gnu.2.28" }
+          - { platform: windows-x86_64, target: x86_64-pc-windows-gnu, build: "cargo build --target x86_64-pc-windows-gnu" }
+          - { platform: windows-arm64, target: aarch64-pc-windows-gnullvm, build: "cargo zigbuild --target aarch64-pc-windows-gnullvm" }
+          # universal2 builds both architectures and merges them, so the
+          # single-architecture binaries come with it.
+          - { platform: macos, target: universal2-apple-darwin, build: "cargo zigbuild --target universal2-apple-darwin" }
+    steps:
+      - name: Make room
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+
+      - name: Build and package
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+          BUILD: ${{ matrix.build }}
+        run: |
+          tar xf firmware.tar && rm firmware.tar
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e PLATFORM -e TARGET -e BUILD -e TAG \
+            -e CARGO_BUILD_JOBS=4 -e UNFR0ZEN_BUILD_VERSION="$TAG" "$IMAGE" sh -ec '
+              git config --global --add safe.directory "$PWD"
+              $BUILD --release --locked --bin unfr0zen
+              out=target/$TARGET/release
+              mkdir -p dist
+              # Linux binaries in tarballs, which keep them executable; Windows
+              # and the ad-hoc signed macOS bundles in zips, stored without
+              # compression or extra fields so every unzipper reads them.
+              case $PLATFORM in
+                linux-*)
+                  tar czf dist/Fledge-$PLATFORM-$TAG.tar.gz -C "$out" unfr0zen ;;
+                windows-*)
+                  zip -0 -jqX dist/Fledge-$PLATFORM-$TAG.zip "$out/unfr0zen.exe" ;;
+                macos)
+                  for arch in universal:universal2 arm64:aarch64 x86_64:x86_64; do
+                    UNFR0ZEN_BINARY="target/${arch#*:}-apple-darwin/release/unfr0zen" sh utils/make_macos_app.sh
+                    (cd dist && zip -0 -qryX Fledge-macos-${arch%%:*}-$TAG.zip Fledge.app && rm -rf Fledge.app)
+                  done ;;
+              esac
+              ls -l dist'
+
+      - name: Into the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" dist/Fledge-* --clobber --repo "$GITHUB_REPOSITORY"
