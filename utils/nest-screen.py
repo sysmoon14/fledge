@@ -10,9 +10,10 @@ without anyone at the thermostat:
 Commands chain: `wake shot a.png press shot b.png` runs in order. The display
 goes dark after a few idle seconds and its framebuffer with it; a press on a
 dark display only lights it. On the home screen a turn changes the target
-temperature, so `turn` runs only within TURN_WINDOW seconds of a press or
-turn earlier in the same chain (a page this chain opened is still open), on
-a lit display.
+temperature, so before each step `turn` looks at the display and refuses the
+home screen (its tick ring fills the rim, unlike menus and pages), and after
+it checks the display changed: a step that did not register stops the chain,
+so a later press cannot land on the wrong choice.
 
 A gen 3 unit (diamond3): the ring is the ADC's relative dial (REL_DIAL on the
 input device named "2280000.adc"), the press gpio-keys' KEY_ENTER, and the
@@ -24,6 +25,7 @@ first. The unit must be awake (utils/push-over-ssh.sh --wake, or MQTT
 set/stay_awake) and its SSH must take a key (no password prompt per call).
 """
 import argparse
+import math
 import os
 import struct
 import subprocess
@@ -34,9 +36,10 @@ import zlib
 
 EV_SYN, EV_KEY, EV_REL = 0, 1, 2
 KEY_ENTER, REL_DIAL = 28, 7
-# nlclient moves one item per REL_DIAL event of at least ~250 (raw ADC
-# counts); smaller events do not add up.
-STEP = 300
+# REL_DIAL events are raw ADC counts. The main menu moves an item for one
+# large event (not always the first); lists only follow streams of small
+# ones, as a hand makes. A step alternates the two until the display changes.
+LARGE, BURST, AMOUNT, TRIES = 1000, 3, 60, 8
 RING_NAME, BUTTON_NAME = "2280000.adc", "gpio-keys"
 
 
@@ -71,7 +74,9 @@ class Unit:
 
 
 BACKLIGHT = "/sys/class/backlight/*/brightness"
-TURN_WINDOW = 5.0
+# The home screen's dial: its ticks (or the heating/cooling colour) fill the
+# rim; menus and pages leave it nearly black (about 5%).
+HOME_RIM = 0.2
 
 
 def lit(unit):
@@ -95,14 +100,44 @@ def press(unit):
     unit.send(device, [(EV_KEY, KEY_ENTER, 0), (EV_SYN, 0, 0)])
 
 
+def frame(unit, size=480):
+    """The visible display, raw: (stride, bytes of its top size rows)."""
+    info = unit.run("cat /sys/class/graphics/fb0/stride /sys/class/graphics/fb0/pan").decode().split()
+    stride, y = int(info[0]), int(info[1].split(",")[1])
+    return stride, unit.run(f"dd if=/dev/fb0 bs={stride} skip={y} count={size} 2>/dev/null")
+
+
+def home_screen(stride, raw, size=480):
+    """Whether the display shows the thermostat's home dial."""
+    lit = total = 0
+    for angle in range(0, 360, 3):
+        for radius in range(205, 232, 4):
+            x = int(size / 2 + radius * math.cos(math.radians(angle)))
+            y = int(size / 2 + radius * math.sin(math.radians(angle)))
+            at = y * stride + x * 4
+            total += 1
+            lit += max(raw[at:at + 3]) > 60
+    return lit / total > HOME_RIM
+
+
 def turn(unit, steps):
     if not lit(unit):
         sys.exit("the display is dark: a turn could change the target temperature; wake it and look first")
     device = unit.device(RING_NAME)
-    step = STEP if steps > 0 else -STEP
+    sign = 1 if steps > 0 else -1
+    large = [(EV_REL, REL_DIAL, sign * LARGE), (EV_SYN, 0, 0)]
+    small = [e for _ in range(BURST) for e in ((EV_REL, REL_DIAL, sign * AMOUNT), (EV_SYN, 0, 0))]
     for _ in range(abs(steps)):
-        unit.send(device, [(EV_REL, REL_DIAL, step), (EV_SYN, 0, 0)])
-        time.sleep(0.25)
+        stride, before = frame(unit)
+        if home_screen(stride, before):
+            sys.exit("turn: the home screen is showing, where a turn changes the target temperature; stopped")
+        for attempt in range(TRIES):
+            unit.send(device, large if attempt % 2 == 0 else small)
+            time.sleep(0.5)
+            if frame(unit)[1] != before:
+                break
+        else:
+            sys.exit("turn: the display did not change, so the step did not register; stopped")
 
 
 def shot(unit, out, size=480):
@@ -141,7 +176,6 @@ def main():
     args = parser.parse_args()
     unit = Unit(args.host)
     words = list(args.commands)
-    acted = None  # when this chain last pressed or turned
     while words:
         command = words.pop(0)
         if command == "wake":
@@ -150,17 +184,10 @@ def main():
             wake(unit)
             shot(unit, words.pop(0))
         elif command == "press":
-            dark = not lit(unit)
             press(unit)
-            acted = None if dark else time.monotonic()
             time.sleep(args.pause)
         elif command == "turn" and words:
-            steps = int(words.pop(0))
-            if acted is None or time.monotonic() - acted > TURN_WINDOW:
-                sys.exit("turn: no page this chain opened is known to be showing (the home screen "
-                         "would change the target temperature); press into a menu first, in the same chain")
-            turn(unit, steps)
-            acted = time.monotonic()
+            turn(unit, int(words.pop(0)))
             time.sleep(args.pause)
         else:
             sys.exit(f"unexpected {command!r}: wake | shot OUT.png | press | turn N")
