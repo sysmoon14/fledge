@@ -10,6 +10,9 @@ aes = "0.9"
 bytes = "1"
 ccm = "0.6"
 png = "0.17"
+# Camera pictures, passed through from Home Assistant as Frigate made them.
+zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
+zune-core = { version = "0.5", default-features = false, features = ["std"] }
 # The home screen cards (ui/): drawing, the unit's own fonts, icons' SVG paths.
 ab_glyph = "0.2"
 kurbo = "0.13"

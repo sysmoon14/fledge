@@ -3472,6 +3472,8 @@ dependencies = [
  "tokio-rustls",
  "webpki-roots",
  "zbus",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

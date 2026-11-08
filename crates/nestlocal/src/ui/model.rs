@@ -1,5 +1,6 @@
 //! Home Assistant's cards, as the Fledge integration keeps them retained on
-//! <base>/set/ui, a media player's album art on <base>/set/art/<entity id>,
+//! <base>/set/ui, pictures (a media player's album art as PNG, a camera's
+//! still as JPEG) on <base>/set/art/<key>,
 //! and the commands the cards send back on <base>/ui/command.
 
 use std::sync::Arc;
@@ -236,8 +237,43 @@ pub struct Art {
 pub const ART_MAX: u32 = 480;
 
 impl Art {
-    /// From a PNG, square and 8-bit RGB or RGBA (alpha dropped).
-    pub fn decode(png_data: &[u8]) -> Result<Art, String> {
+    /// From a JPEG (a camera's picture) or a PNG (album art).
+    pub fn decode(data: &[u8]) -> Result<Art, String> {
+        if data.starts_with(&[0xFF, 0xD8]) {
+            Art::decode_jpeg(data)
+        } else {
+            Art::decode_png(data)
+        }
+    }
+
+    /// A JPEG, cropped square from its middle and scaled down to fit the
+    /// display if it's larger.
+    fn decode_jpeg(data: &[u8]) -> Result<Art, String> {
+        use zune_core::colorspace::ColorSpace;
+        use zune_core::options::DecoderOptions;
+        let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+        let mut decoder = zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
+        let pixels = decoder.decode().map_err(|e| format!("art: {e:?}"))?;
+        let (width, height) = decoder.dimensions().ok_or("art: no size")?;
+        if pixels.len() < width * height * 3 {
+            return Err("art: short".into());
+        }
+        let side = width.min(height);
+        let (left, top) = ((width - side) / 2, (height - side) / 2);
+        let size = side.min(ART_MAX as usize);
+        let mut rgb = Vec::with_capacity(size * size * 3);
+        for y in 0..size {
+            let row = top + y * side / size;
+            for x in 0..size {
+                let at = (row * width + left + x * side / size) * 3;
+                rgb.extend_from_slice(&pixels[at..at + 3]);
+            }
+        }
+        Ok(Art { size: size as u32, rgb })
+    }
+
+    /// A PNG, square and 8-bit RGB or RGBA (alpha dropped).
+    fn decode_png(png_data: &[u8]) -> Result<Art, String> {
         let mut reader = png::Decoder::new(png_data).read_info().map_err(|e| format!("art: {e}"))?;
         let mut buffer = vec![0; reader.output_buffer_size()];
         let info = reader.next_frame(&mut buffer).map_err(|e| format!("art: {e}"))?;

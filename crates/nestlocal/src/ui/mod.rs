@@ -1004,6 +1004,16 @@ mod tests {
     }
 
     #[test]
+    fn a_camera_s_jpeg_is_cropped_square_from_its_middle() {
+        // 64x48: red on the left half, blue on the right.
+        let art = Art::decode(include_bytes!("testdata/still.jpg")).unwrap();
+        assert_eq!(art.size, 48, "square, as tall as it is");
+        let at = |x: usize, y: usize| &art.rgb[(y * 48 + x) * 3..(y * 48 + x) * 3 + 3];
+        assert!(at(4, 24)[0] > 150 && at(4, 24)[2] < 90, "red at the left: {:?}", at(4, 24));
+        assert!(at(44, 24)[2] > 150 && at(44, 24)[0] < 90, "blue at the right: {:?}", at(44, 24));
+    }
+
+    #[test]
     fn a_media_player_s_art_joins_its_card() {
         let ui = Ui::default();
         ui.configure(br#"{"cards":[{"kind":"media","id":"media_player.speaker","name":"Speaker"}]}"#).unwrap();
