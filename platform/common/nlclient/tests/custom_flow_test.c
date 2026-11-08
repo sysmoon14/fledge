@@ -136,6 +136,28 @@ static void lights_test(void) {
     assert(d.idle == CUSTOM_LIGHT_IDLE);
     assert(custom_back(&f) && f.page == CUSTOM_LIGHTS && f.light == 0);
     assert(custom_lights_choose(&f, &lights, &d, lights.count) == 0 && f.page == CUSTOM_HOME);
+    f.page = CUSTOM_LIGHTS;
+    assert(custom_back(&f) && f.page == CUSTOM_HOME);
+    /* Opened with lights, the list is the top page: More, Done, and Back leaves. */
+    custom_open(&f, 2);
+    assert(f.page == CUSTOM_LIGHTS && f.lights_first && f.light == 0);
+    assert(custom_lights_rows(2) == 4 && custom_lights_rows(CUSTOM_LIGHTS_MAX) == CUSTOM_LIGHTS_MAX + 1);
+    assert(custom_lights_rows(CUSTOM_LIGHTS_MAX - 1) == CUSTOM_LIGHT_ROWS_MAX);
+    assert(!custom_back(&f) && f.page == CUSTOM_LIGHTS);
+    assert(custom_lights_choose(&f, &lights, &d, lights.count + 1) == 2);
+    assert(custom_lights_choose(&f, &lights, &d, lights.count + 2) == 0 && f.page == CUSTOM_LIGHTS);
+    assert(custom_lights_choose(&f, &lights, &d, lights.count) == 0 && f.page == CUSTOM_HOME);
+    assert(custom_choose(&f, 4, request) == 1 && f.page == CUSTOM_LIGHTS);
+    assert(!custom_back(&f));
+    custom_open(&f, 0);
+    assert(f.page == CUSTOM_HOME && !f.lights_first);
+    /* With a full list, More takes the last slot and Done is on the UNFR0ZEN page. */
+    struct custom_lights full;
+    assert(custom_lights_parse("5\n1 1 1 a\n1 1 1 b\n1 1 1 c\n1 1 1 d\n1 1 1 e\n1 1 1 f\n", &full) == CUSTOM_LIGHTS_MAX);
+    custom_open(&f, full.count);
+    assert(custom_lights_choose(&f, &full, &d, CUSTOM_LIGHTS_MAX + 1) == 0 && f.page == CUSTOM_LIGHTS);
+    assert(custom_lights_choose(&f, &full, &d, CUSTOM_LIGHTS_MAX) == 0 && f.page == CUSTOM_HOME);
+    f.page = CUSTOM_LIGHTS; f.lights_first = 0;
     /* A list shrunk under the light page sends nothing and leaves it. */
     f.page = CUSTOM_LIGHT; f.light = 3;
     assert(custom_lights_choose(&f, &lights, &d, 0) == 0 && f.page == CUSTOM_LIGHTS);

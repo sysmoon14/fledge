@@ -6,8 +6,10 @@ enum custom_page {
     CUSTOM_MATTER_PAIRING, CUSTOM_ZIGBEE_PAIRING, CUSTOM_MATTER_CONFIRM,
     CUSTOM_LIGHTS, CUSTOM_LIGHT
 };
-/* light: the light chosen on the Lights page, and that page's selection. */
-struct custom_flow { enum custom_page page; int parent_selection; int action_failed; int light; };
+/* light: the light chosen on the Lights page, and that page's selection.
+ * lights_first: the screen opened on Lights (Home Assistant has some), which
+ * is then its top page: More leads to the UNFR0ZEN page, Back leaves. */
+struct custom_flow { enum custom_page page; int parent_selection; int action_failed; int light; int lights_first; };
 static int custom_activity(enum custom_page page) {
     return page == CUSTOM_MATTER_PAIRING || page == CUSTOM_ZIGBEE_PAIRING;
 }
@@ -29,8 +31,18 @@ static inline int custom_home_action(int choice, unsigned int features) {
     if ((features & 4) && choice == index++) return 3;
     return choice == index ? 2 : -1;
 }
+/* The page the screen opens on: Lights while Home Assistant has configured
+ * any, for the fewest presses from the thermostat's menu; else UNFR0ZEN's. */
+static inline void custom_open(struct custom_flow *flow, int light_count) {
+    flow->page = light_count > 0 ? CUSTOM_LIGHTS : CUSTOM_HOME;
+    flow->lights_first = light_count > 0;
+    flow->parent_selection = 0;
+    flow->action_failed = 0;
+    flow->light = 0;
+}
 static int custom_back(struct custom_flow *flow) {
     if (flow->page == CUSTOM_HOME) return 0;
+    if (flow->page == CUSTOM_LIGHTS && flow->lights_first) return 0;
     flow->page = flow->page == CUSTOM_LIGHT ? CUSTOM_LIGHTS :
                  flow->page == CUSTOM_MATTER_CONFIRM ? CUSTOM_MATTER :
                  flow->page == CUSTOM_ZIGBEE_PAIRING || flow->page == CUSTOM_ZIGBEE_CONFIRM ? CUSTOM_ZIGBEE : CUSTOM_HOME;
@@ -237,9 +249,14 @@ static inline int custom_light_tick(struct custom_dial *dial) {
     dial->held = 0;
     return 1;
 }
-/* A choice on the Lights page: the lights, then Back. 1 when the chosen
- * light is to be sent (an on/off light toggles in place); a dimmable one
- * opens its own page, where the ring sets brightness and a press toggles. */
+/* The Lights page's rows: the lights, then More (the UNFR0ZEN page) when it
+ * is the top page, else Back; then Done while a choice slot is left. */
+#define CUSTOM_LIGHT_ROWS_MAX (CUSTOM_LIGHTS_MAX + 1)
+static inline int custom_lights_done(int count) { return count + 1 < CUSTOM_LIGHT_ROWS_MAX; }
+static inline int custom_lights_rows(int count) { return count + 1 + custom_lights_done(count); }
+/* A choice on the Lights page. 1 when the chosen light is to be sent (an
+ * on/off light toggles in place); a dimmable one opens its own page, where
+ * the ring sets brightness and a press toggles. 2: Done, leave the screen. */
 static inline int custom_lights_choose(struct custom_flow *flow, struct custom_lights *lights,
                                        struct custom_dial *dial, int choice) {
     if (flow->page == CUSTOM_LIGHT) {
@@ -247,8 +264,13 @@ static inline int custom_lights_choose(struct custom_flow *flow, struct custom_l
         custom_light_press(&lights->light[flow->light], dial);
         return 1;
     }
-    if (choice < 0 || choice > lights->count) return 0;
-    if (choice == lights->count) { custom_back(flow); return 0; }
+    if (choice < 0 || choice >= custom_lights_rows(lights->count)) return 0;
+    if (choice == lights->count + 1) return 2;
+    if (choice == lights->count) {
+        flow->page = CUSTOM_HOME;
+        flow->action_failed = 0;
+        return 0;
+    }
     flow->light = choice;
     if (lights->light[choice].dimmable) {
         flow->page = CUSTOM_LIGHT;

@@ -510,10 +510,12 @@ static int show_lights(struct custom_state *s) {
         custom_light_label(text, sizeof(text), &s->lights.light[i]);
         native_string_copy(&s->choices[i], text);
     }
-    native_string_copy(&s->choices[s->lights.count], "Back");
-    clear_choices(s, s->lights.count + 1);
+    int rows = custom_lights_rows(s->lights.count);
+    native_string_copy(&s->choices[s->lights.count], s->flow.lights_first ? "More" : "Back");
+    if (custom_lights_done(s->lights.count)) native_string_copy(&s->choices[s->lights.count + 1], "Done");
+    clear_choices(s, rows);
     s->config.text_count = 1;
-    return s->lights.count + 1;
+    return rows;
 }
 static void show(void *raw, int opening) {
     float old_y = *(float *)((u8 *)raw + 8);
@@ -526,7 +528,7 @@ static void show(void *raw, int opening) {
             custom_lights_merge(&s->lights, &read, s->dial.hold > 0 ? s->flow.light : -1);
         }
         /* The list emptied, or shrank under the open light. */
-        if (!s->lights.count) s->flow.page = CUSTOM_HOME;
+        if (!s->lights.count) { s->flow.page = CUSTOM_HOME; s->flow.lights_first = 0; }
         else if (s->flow.light >= s->lights.count) { s->flow.light = 0; s->flow.page = CUSTOM_LIGHTS; }
     }
     int choice_count;
@@ -624,7 +626,9 @@ static int click(void *raw) {
     enum custom_page before = s->flow.page;
     int result;
     if (light_page(before)) {
-        if (custom_lights_choose(&s->flow, &s->lights, &s->dial, selected)) send_light(s);
+        int chosen = custom_lights_choose(&s->flow, &s->lights, &s->dial, selected);
+        if (chosen == 2) return 2; /* Done: the stock exit, as on the UNFR0ZEN page */
+        if (chosen) send_light(s);
         show(raw, s->flow.page != before);
         return 1;
     }
@@ -885,12 +889,10 @@ static void enter_screen(void *screen) {
     s->drawn = 0;
     attempt_begin();
     s->active = 1;
-    s->flow.page = CUSTOM_HOME;
-    s->flow.parent_selection = 0;
-    s->flow.action_failed = 0;
-    s->flow.light = 0;
-    s->lights.count = 0;
     bytes_zero(&s->dial, sizeof(s->dial));
+    /* Open on Lights when Home Assistant has configured any. */
+    read_lights(&s->lights);
+    custom_open(&s->flow, s->lights.count);
     load_image(raw_layer(screen));
     native_screen_enter(screen);
     show(raw_layer(screen), 1);
