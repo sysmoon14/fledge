@@ -622,7 +622,7 @@ static void show(void *raw, int opening) {
     native_string_copy(&s->text[2], "");
     if (s->flow.page == CUSTOM_HOME) {
         char name[64];
-        read_text("/etc/unfr0zen/version", name, sizeof(name), "unfr0zen");
+        read_text("/etc/unfr0zen/version", name, sizeof(name), "Fledge");
         native_string_copy(&s->text[1], name);
         for (int i = 0; i < CUSTOM_CHOICES; i++) {
             int action = custom_home_action(i, s->features);

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the universal unfr0zen binary and wrap it in a macOS .app bundle,
-# into dist/unfr0zen.app. Run on macOS.
+# into dist/Fledge.app. Run on macOS.
 #
 #     sh utils/make_macos_app.sh
 #
@@ -15,7 +15,7 @@ repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_dir"
 version=$(git describe --tag --always --dirty)
 export UNFR0ZEN_BUILD_VERSION="$version"
-app="$repo_dir/dist/unfr0zen.app"
+app="$repo_dir/dist/Fledge.app"
 # The oldest macOS the zig-built CI binary supports; local builds match it.
 min_macos=13.0
 
@@ -45,8 +45,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>unfr0zen</string>
-    <key>CFBundleDisplayName</key><string>unfr0zen</string>
+    <key>CFBundleName</key><string>Fledge</string>
+    <key>CFBundleDisplayName</key><string>Fledge</string>
     <key>CFBundleIdentifier</key><string>dev.unfr0zen.gui</string>
     <key>CFBundleExecutable</key><string>unfr0zen</string>
     <key>CFBundleIconFile</key><string>unfr0zen</string>
@@ -56,7 +56,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
-    <key>NSHumanReadableCopyright</key><string>Copyright © 2026 unfr0zen team</string>
+    <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Fledge contributors, after unfr0zen</string>
 </dict>
 </plist>
 PLIST

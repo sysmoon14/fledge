@@ -33,7 +33,7 @@ pub fn install() {
         .expect("winit creates the application menu before the app");
     for item in menu.itemArray() {
         if item.action() == Some(sel!(orderFrontStandardAboutPanel:)) {
-            item.setTitle(&NSString::from_str(&crate::tr!("about.native_title", app = "unfr0zen")));
+            item.setTitle(&NSString::from_str(&crate::tr!("about.native_title", app = "Fledge")));
             // The class object lives for the process lifetime and implements
             // this action with AppKit's target/action signature.
             unsafe {
@@ -46,7 +46,7 @@ pub fn install() {
 }
 
 fn options(icon: &NSImage) -> Retained<NSDictionary<NSString, AnyObject>> {
-    let name = NSString::from_str("unfr0zen");
+    let name = NSString::from_str("Fledge");
     let version = NSString::from_str(crate::BUILD_VERSION);
     let credits = NSAttributedString::from_nsstring(ns_string!(""));
     // These exported keys describe NSString, NSImage and NSAttributedString
@@ -74,7 +74,7 @@ mod tests {
         assert!(icon.size().width > 0.0 && icon.size().height > 0.0);
         let panel = options(&icon);
         let name = panel.objectForKey(ns_string!("ApplicationName")).unwrap();
-        assert_eq!(name.downcast_ref::<NSString>().unwrap().to_string(), "unfr0zen");
+        assert_eq!(name.downcast_ref::<NSString>().unwrap().to_string(), "Fledge");
         let version = panel.objectForKey(ns_string!("ApplicationVersion")).unwrap();
         assert_eq!(version.downcast_ref::<NSString>().unwrap().to_string(), crate::BUILD_VERSION);
         let image = panel.objectForKey(ns_string!("ApplicationIcon")).unwrap();

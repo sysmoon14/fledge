@@ -385,15 +385,15 @@ fn local_nlclient(binary: &std::path::Path, out: &std::path::Path, undo: Option<
 fn update() -> unfr0zen_host::Result<String> {
     let version = env!("UNFR0ZEN_BUILD_VERSION");
     if update::release_version(version).is_none() {
-        return Ok(format!("unfr0zen {version} is a development build; release builds update themselves"));
+        return Ok(format!("Fledge {version} is a development build; release builds update themselves"));
     }
     ui::waiting("Checking GitHub for a newer release");
     let Some(release) = update::check(update::App::Cli, version)? else {
-        return Ok(format!("unfr0zen {version} is the latest release"));
+        return Ok(format!("Fledge {version} is the latest release"));
     };
-    ui::waiting(&format!("Installing unfr0zen {}", release.tag));
+    ui::waiting(&format!("Installing Fledge {}", release.tag));
     update::install(update::App::Cli, &release)?;
-    Ok(format!("Updated unfr0zen {version} to {}: {}", release.tag, release.url))
+    Ok(format!("Updated Fledge {version} to {}: {}", release.tag, release.url))
 }
 
 #[cfg(test)]

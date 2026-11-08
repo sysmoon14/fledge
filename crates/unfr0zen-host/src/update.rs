@@ -1,4 +1,4 @@
-//! Self-update from the GitHub releases of unfr0zen/unfr0zen.
+//! Self-update from the GitHub releases of sysmoon14/fledge (Fledge's app).
 //!
 //! Checks the latest stable release (no drafts, no -rc pre-releases) for a
 //! file matching this platform.  Both the window and the terminal use the
@@ -18,8 +18,8 @@ use self_update::{Download, Extract};
 use unfr0zen_core::shell::sha256_hex;
 use unfr0zen_core::{Error, Result};
 
-pub const REPO_OWNER: &str = "unfr0zen";
-pub const REPO_NAME: &str = "unfr0zen";
+pub const REPO_OWNER: &str = "sysmoon14";
+pub const REPO_NAME: &str = "fledge";
 
 /// This build's platform tag, matching the CI asset names.
 pub const PLATFORM: &str = if cfg!(target_os = "macos") {
@@ -201,12 +201,19 @@ fn install_archive(
     Extract::from_source(archive).extract_into(&unpacked)
         .map_err(|e| failed("unpack", e))?;
     match bundle {
-        Some(bundle) => swap_bundle(bundle, &unpacked.join("unfr0zen.app"), work),
+        Some(bundle) => {
+            // Fledge.app, or unfr0zen.app from before the name changed.
+            let new = ["Fledge.app", "unfr0zen.app"].iter().map(|name| unpacked.join(name))
+                .find(|path| path.is_dir()).unwrap_or_else(|| unpacked.join("Fledge.app"));
+            swap_bundle(bundle, &new, work)
+        }
         None => {
             let exe_name = app.executable();
-            // The macOS archive contains unfr0zen.app, not a bare executable.
+            // The macOS archive contains Fledge.app (once unfr0zen.app), not a
+            // bare executable.
             let new = [
                 unpacked.join(exe_name),
+                unpacked.join(format!("Fledge.app/Contents/MacOS/{exe_name}")),
                 unpacked.join(format!("unfr0zen.app/Contents/MacOS/{exe_name}")),
             ].into_iter().find(|p| p.is_file());
             let Some(new) = new else {
@@ -254,7 +261,7 @@ pub fn remove_previous() {
     }
 }
 
-/// The unfr0zen.app holding `exe` (…/unfr0zen.app/Contents/MacOS/unfr0zen).
+/// The .app holding `exe` (…/Fledge.app/Contents/MacOS/unfr0zen).
 fn app_bundle(exe: &Path) -> Result<PathBuf> {
     exe.ancestors().nth(3)
         .filter(|bundle| bundle.extension().is_some_and(|e| e == "app"))
@@ -476,7 +483,7 @@ mod tests {
     #[test]
     fn evaluate_builds_correct_url() {
         let available = evaluate("0.1.5", &fake_release("0.2.0")).unwrap();
-        assert!(available.url.contains("unfr0zen/unfr0zen"), "url={}", available.url);
+        assert!(available.url.contains("sysmoon14/fledge"), "url={}", available.url);
         assert!(available.url.contains("v0.2.0"), "url={}", available.url);
     }
 

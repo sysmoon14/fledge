@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=unfr0zen
-Comment=diamond3 USB recovery
+Name=Fledge
+Comment=Free your Nest thermostat
 Exec=unfr0zen
 Icon=dev.unfr0zen.gui
 Terminal=false

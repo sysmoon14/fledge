@@ -53,7 +53,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     if std::env::args().skip(1).any(|arg| arg == "--version" || arg == "-V") {
-        println!("unfr0zen {BUILD_VERSION}");
+        println!("Fledge {BUILD_VERSION}");
         return Ok(());
     }
     unfr0zen_host::init_logging(BUILD_VERSION);
@@ -69,7 +69,7 @@ fn main() -> eframe::Result<()> {
     };
     let instance = single_instance::SingleInstance::new(&name).ok();
     if instance.as_ref().is_some_and(|i| !i.is_single()) {
-        eprintln!("unfr0zen is already running.");
+        eprintln!("Fledge is already running.");
         return Ok(());
     }
     if let Err(error) = unfr0zen_host::diamond3::usb::init_hid() {
@@ -81,7 +81,7 @@ fn main() -> eframe::Result<()> {
         .with_resizable(false)
         // eframe also names the macOS app menu after the title, so there it
         // stays the app's name; the sidebar shows the version on every platform.
-        .with_title(if cfg!(target_os = "macos") { "unfr0zen" } else { BUILD_VERSION })
+        .with_title(if cfg!(target_os = "macos") { "Fledge" } else { BUILD_VERSION })
         // The Wayland app_id / X11 WM class: how the compositor maps the window
         // to the installed .desktop entry for its taskbar/dock icon.
         .with_app_id("dev.unfr0zen.gui")
@@ -2053,7 +2053,7 @@ pub(crate) fn section_after(ui: &mut egui::Ui, name: &str, space: f32) {
     ui.add_space(4.0);
 }
 
-const NAME: &str = "unfr0zen";
+const NAME: &str = "Fledge";
 /// Seconds from launch to the name's first glint.
 const GLINT_FIRST: f64 = 0.5;
 /// Seconds between the starts of the name's glints.
@@ -2077,7 +2077,7 @@ fn glint_phase(time: f64) -> f64 {
 /// The colour at `time` of the name's letter at `index`: white under the
 /// glint, which enters and leaves past the ends so no letter jumps.
 fn name_color(index: usize, time: f64) -> egui::Color32 {
-    let rest = if NAME.as_bytes()[index] == b'0' { ACCENT } else { MUTED };
+    let rest = MUTED;
     let phase = glint_phase(time);
     if phase < 0.0 {
         return rest;
@@ -2622,14 +2622,14 @@ mod tests {
     }
 
     #[test]
-    fn the_title_bar_names_the_app_with_its_zero_in_the_accent() {
+    fn the_title_bar_names_the_app() {
         let output = render(&mut App::default(), WINDOW);
         let name = output.shapes.iter().find_map(|shape| match &shape.shape {
-            egui::epaint::Shape::Text(t) if t.galley.job.text == "unfr0zen" => Some(t.galley.clone()),
+            egui::epaint::Shape::Text(t) if t.galley.job.text == "Fledge" => Some(t.galley.clone()),
             _ => None,
         }).expect("the name is drawn");
         let colors: Vec<_> = name.job.sections.iter().map(|section| section.format.color).collect();
-        assert_eq!(colors, [MUTED, MUTED, MUTED, MUTED, ACCENT, MUTED, MUTED, MUTED]);
+        assert_eq!(colors, [MUTED; 6]);
     }
 
     #[test]
@@ -2658,7 +2658,7 @@ mod tests {
         let shown = texts(&output);
         let order = |text: &str| shown.iter().position(|t| t == text).unwrap_or_else(|| panic!("{text} is drawn: {shown:?}"));
         assert!(order("Logs") < order("About") && order("About") < order("ADVANCED"), "{shown:?}");
-        assert!(!shown.iter().any(|t| t == "i" || t == "About unfr0zen"), "no info button, no dialog: {shown:?}");
+        assert!(!shown.iter().any(|t| t == "i" || t == "About Fledge"), "no info button, no dialog: {shown:?}");
         let version = output.shapes.iter().find_map(|shape| match &shape.shape {
             egui::epaint::Shape::Text(t) if t.galley.job.text == BUILD_VERSION => Some(t.galley.rect.translate(t.pos.to_vec2()).center()),
             _ => None,
@@ -2669,7 +2669,7 @@ mod tests {
         frame(&mut app, vec![press(false)]);
         assert_eq!(app.page, Page::About);
         let shown = texts(&frame(&mut app, Vec::new()));
-        for text in ["About unfr0zen", "Licenses", "unfr0zen (GPLv3)", "https://github.com/unfr0zen",
+        for text in ["About Fledge", "Licenses", "Fledge, after unfr0zen (GPLv3)", "https://github.com/sysmoon14/fledge",
                      "Credits", "BusyBox —", "the BusyBox project",
                      "CVE-2017-7932 and CVE-2017-7936 —", "Quarkslab"] {
             assert!(shown.iter().any(|t| t == text), "{text}: {shown:?}");
@@ -2802,7 +2802,7 @@ mod tests {
     fn a_glint_comes_soon_after_launch_then_each_period_left_to_right() {
         let start = GLINT_FIRST;
         let next = GLINT_FIRST + GLINT_PERIOD;
-        let rest = |index| if index == 4 { ACCENT } else { MUTED };
+        let rest = |_| MUTED;
         let brightest = |time: f64| (0..NAME.len()).max_by_key(|&index| name_color(index, time).r()).unwrap();
         for time in [0.0, start - 0.01, start + GLINT_CROSSING + 0.01, next - 0.01] {
             assert!((0..NAME.len()).all(|index| name_color(index, time) == rest(index)), "at rest at {time}");

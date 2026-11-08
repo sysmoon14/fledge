@@ -700,7 +700,7 @@ pub fn patch_on_device(volume: &mut impl Volume, target: Device, options: &Optio
             tree.insert(crate::nlclient::JOURNAL.into(), (journal, 0o600));
             tree.insert(crate::nlclient::ICON.into(), (crate::nlclient::ICON_BYTES.to_vec(), 0o644));
             tree.insert(crate::nlclient::GLYPH.into(), (crate::nlclient::GLYPH_BYTES.to_vec(), 0o644));
-            tree.insert(crate::nlclient::VERSION.into(), (format!("unfr0zen {}\n", options.version).into_bytes(), 0o644));
+            tree.insert(crate::nlclient::VERSION.into(), (format!("Fledge {}\n", options.version).into_bytes(), 0o644));
             if originals.get(crate::nlclient::ORIGINAL).is_some_and(Option::is_none) {
                 tree.insert(crate::nlclient::ORIGINAL.into(), (source, 0o600));
             }
@@ -1860,10 +1860,10 @@ mod tests {
         let mut volume = with_nlclient(build.stock());
         let first = Options { version: "v1.2-3-gabc1234".into(), ..options() };
         build.patch(&mut volume, &first, false).unwrap();
-        assert_eq!(volume.files[VERSION], ("0:0".into(), 0o644, b"unfr0zen v1.2-3-gabc1234\n".to_vec()));
+        assert_eq!(volume.files[VERSION], ("0:0".into(), 0o644, b"Fledge v1.2-3-gabc1234\n".to_vec()));
         let changes = build.patch(&mut volume, &Options { version: "v1.3".into(), ..first }, false).unwrap();
         assert_eq!(changes.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), [VERSION]);
-        assert_eq!(volume.files[VERSION].2, b"unfr0zen v1.3\n");
+        assert_eq!(volume.files[VERSION].2, b"Fledge v1.3\n");
     }
 
     #[test]

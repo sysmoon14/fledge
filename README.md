@@ -1,19 +1,41 @@
-# fledge
-[![GitHub Release](https://img.shields.io/github/v/release/sysmoon14/fledge?include_prereleases&color=06b6d4)](https://github.com/sysmoon14/fledge/releases)
-[![GitHub License](https://img.shields.io/github/license/sysmoon14/fledge?v=1)](LICENSE)
+<p align="center">
+  <img src="assets/icon/fledge.svg" width="128" height="128" alt="Fledge: a bird leaving the Nest's lit dial">
+</p>
 
-Fledge started as a fork of [unfr0zen](https://github.com/unfr0zen/unfr0zen), by
-willtm and its contributors, and has grown its own way: Home Assistant on the
-thermostat's own screen, signed updates from Home Assistant, and more. The app,
-its executable and the paths on the thermostat keep unfr0zen's names for now, so
-units and backups made with either keep working.
+<h1 align="center">Fledge</h1>
 
-Home screen cards (Home Assistant's lights, thermostats and speakers on the
-thermostat's screen) come with the Fledge integration, released apart from this
-repository: [sysmoon14/fledge-homeassistant](https://github.com/sysmoon14/fledge-homeassistant).
+<p align="center">
+  <b>Your Nest thermostat, out of the nest.</b><br>
+  Root a Nest Learning Thermostat over USB, cut it loose from Google's cloud, and put Home Assistant on its own screen.
+</p>
 
-Root and free the Nest Learning Thermostat (1st, 2nd and 3rd generation) over USB.
-Local control over MQTT, Matter (Wi-Fi, Thread) or Zigbee, no Google cloud needed.
+<p align="center">
+  <a href="https://github.com/sysmoon14/fledge/releases"><img src="https://img.shields.io/github/v/release/sysmoon14/fledge?color=F15A00&label=thermostat" alt="Latest thermostat release"></a>
+  <a href="https://github.com/sysmoon14/fledge-homeassistant"><img src="https://img.shields.io/github/v/release/sysmoon14/fledge-homeassistant?color=F15A00&label=home%20assistant" alt="Latest Home Assistant integration"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/sysmoon14/fledge?v=1" alt="GPL-3.0"></a>
+</p>
+
+<p align="center">
+  <img src="assets/screens/cards.png" width="100%" alt="Five of the thermostat's screens: a room's lights, another heating zone that is heating, a speaker's album art and progress, and a lamp's warmth and colour dials.">
+</p>
+
+The Nest's ring is the best physical control in the house. Fledge keeps it, and
+keeps everything the Nest does well (heating, learning, safety, its own menus),
+then hands it the rest of your home:
+
+- **🔓 Local, cloud-free control.** MQTT, Matter (over Wi-Fi or Thread) or
+  Zigbee, on your own network. No Google account, no internet needed.
+- **🏠 Home Assistant on the thermostat's screen.** Walk up, and your devices
+  show zoomed out around the thermostat: turn to browse, press to open. Dim
+  lights, set their warmth and colour, set other heating zones, turn a
+  speaker up and see what's playing, all on the ring, with the Nest's own clicks.
+- **⚡ It feels native.** Drawn at 60 frames a second in the Nest's own style
+  and fonts; long press to switch a light or pause the music.
+- **🔁 Updates from Home Assistant.** The thermostat's software updates from
+  an ordinary Home Assistant update entity, signed, with automatic rollback.
+
+The cards come with the **[Fledge integration for Home Assistant](https://github.com/sysmoon14/fledge-homeassistant)**:
+pick your devices, and choose (or automate) what the thermostat wakes to.
 
 > [!CAUTION]
 > **This rewrites the flash of the device that runs your heating.** A failed run
@@ -22,23 +44,32 @@ Local control over MQTT, Matter (Wi-Fi, Thread) or Zigbee, no Google cloud neede
 > ([Undo it](#undo-it)) and have another way to heat or cool the house while you
 > test.
 >
-> Claude Code has been used to speed up the app's GUI, the documentation and the
-> tests. Fledge comes **without any warranty**: you use it at your own risk
-> ([Disclaimers](#disclaimers)).
+> Claude Code has been used throughout Fledge's development. Fledge comes
+> **without any warranty**: you use it at your own risk ([Disclaimers](#disclaimers)).
+
+## How it works
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/overview-dark.svg">
   <img alt="Inside the thermostat, Nest's nlclient app still runs the screen and drives the backplate's heating and cooling wires. nestlocal stands in for Nest's cloud on 127.0.0.1: it reaches an MQTT broker and Matter controllers over Wi-Fi, a Zigbee coordinator through the 802.15.4 radio over SPI, and a Thread border router through OpenThread's ot-daemon and the same radio, which carries Matter over Thread. Nest's and Google's servers are resolved to 0.0.0.0 in /etc/hosts." src="assets/overview-light.svg">
 </picture>
 
+Nest's own app, nlclient, keeps running the thermostat: the heating, the
+schedule, the learning. Fledge adds **nestlocal** beside it, which stands in for
+Google's cloud and speaks MQTT, Matter and Zigbee instead. For the home screen
+cards, nlclient hands its display and ring to nestlocal while a card shows, and
+takes them straight back when you open the thermostat.
+
 ## What you get
 
 | | Stock | With Fledge |
 |-|-|-|
 | Control from | the Nest/Google Home app, through Google's cloud | Home Assistant or any MQTT client, Matter controller or Zigbee coordinator, on your network |
+| On its screen | the thermostat | the thermostat, plus your lights, other heating zones and speakers (MQTT with Home Assistant) |
 | Internet access | required | not needed: the unit only has to join your Wi-Fi |
 | Nest and Google servers | always contacted | blocked with Block cloud (`--block-cloud`) |
 | Integrations | none | MQTT, Matter over Wi-Fi or Thread, Zigbee router |
+| Updates | Google's | signed releases, installed from Home Assistant, rolled back if they fail |
 | Extras | none | SSH (`--ssh`), Doom (`--doom`), whole-NAND backup and restore |
 
 ## Supported thermostats
@@ -50,6 +81,8 @@ Local control over MQTT, Matter (Wi-Fi, Thread) or Zigbee, no Google cloud neede
 | Nest Learning Thermostat (1st generation) | `diamond` | TI AM3703 | 🧪 | 🧪 | — | — |
 
 ✅ tested on a unit · 🧪 built, not yet tested on a unit · — not available
+
+The home screen cards are developed and tested on the 3rd generation.
 
 - **1st generation:** experimental. Patching has not been verified on a physical
   unit or a stock NAND. Its CC2530 radio uses UART, not the 2nd generation's SPI
@@ -65,21 +98,29 @@ thermostat. With MQTT or Matter, the thermostat reaches the broker or the
 controller over Wi-Fi, joined from its own menu (Settings → Network); the
 network doesn't need internet access.
 
-## Requirements
-1. **A USB data cable.** Gen 1 uses mini-USB; Gen 2 and 3 use micro-USB. Charge-only cables won't work.
-2. **Windows (x86_64, arm64), macOS 13+ (universal, arm64, x86_64) or Linux (x86_64, arm64, riscv64; glibc 2.28+).**
+## Get started
 
-## Install
-Download the latest build from the [releases page](https://github.com/sysmoon14/fledge/releases).
+1. **A USB data cable.** Gen 1 uses mini-USB; Gen 2 and 3 use micro-USB.
+   Charge-only cables won't work.
+2. **The Fledge app** for Windows (x86_64, arm64), macOS 13+ or Linux (x86_64,
+   arm64, riscv64; glibc 2.28+). Prebuilt downloads of the app aren't published
+   yet: build it with the steps in [BUILDING.md](BUILDING.md) (on macOS,
+   `sh utils/make_macos_app.sh` makes `dist/Fledge.app`).
+3. **Patch the thermostat:** open the app, tick the integrations on the Patch
+   page (MQTT for Home Assistant), fill in their settings, plug in the
+   thermostat, press **Start** and follow the prompts.
+4. **In Home Assistant:** the thermostat appears through MQTT. Add the
+   [Fledge integration](https://github.com/sysmoon14/fledge-homeassistant) to put
+   your devices on its screen.
 
-- **Windows:** unzip and run `unfr0zen.exe`. 1st and 2nd generation: bind the WinUSB
-  driver to the boot ROM (`0451:d00e`) once with [Zadig](https://zadig.akeo.ie).
-- **macOS:** unzip and open `unfr0zen.app`. It is signed ad hoc, not notarized: run
-  `xattr -dr com.apple.quarantine unfr0zen.app`, or allow it under System Settings → Privacy & Security.
-- **Linux:** `tar xf unfr0zen-linux-x86_64-vX.Y.Z.tar.gz && ./unfr0zen`, after the one-time USB setup below.
+- **Windows:** 1st and 2nd generation: bind the WinUSB driver to the boot ROM
+  (`0451:d00e`) once with [Zadig](https://zadig.akeo.ie).
+- **macOS:** the app is signed ad hoc, not notarized: run
+  `xattr -dr com.apple.quarantine Fledge.app`, or allow it under System Settings → Privacy & Security.
+- **Linux:** run it as your normal user, after the one-time USB setup below.
 
 <details>
-<summary>Linux: USB access and runtime dependencies (click to expand)</summary>
+<summary>Linux: USB access and runtime dependencies</summary>
 
 Run both the app and CLI as your normal user, without `sudo`. Both need the
 same one-time udev setup below; neither requests elevated privileges. Keep the
@@ -91,7 +132,7 @@ sudo tee /etc/udev/rules.d/70-unfr0zen.rules > /dev/null <<'EOF'
 # i.MX ROM serial download, recovery U-Boot
 ATTRS{idVendor}=="15a2", ATTRS{idProduct}=="0071", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
 ATTRS{idVendor}=="18d1", ATTRS{idProduct}=="4ee0", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
-# unfr0zen initramfs shell and the Nest application's console
+# the recovery initramfs shell and the Nest application's console
 ATTRS{idVendor}=="0525", ATTRS{idProduct}=="a4a7", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
 ATTRS{idVendor}=="0525", ATTRS{idProduct}=="b4a4", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
 ATTRS{idVendor}=="2464", ATTRS{idProduct}=="0030", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
@@ -107,9 +148,8 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 Reconnect the unit afterwards if it is already plugged in. The same rules cover
 both the USB device and its HID/serial interfaces as it switches recovery modes.
 
-Both frontends save logs to `~/.local/share/unfr0zen/logs/<timestamp>/unfr0zen.log`
-(or `$XDG_DATA_HOME/unfr0zen/logs/<timestamp>/unfr0zen.log` when set). Errors creating
-run or log directories include the affected path.
+Logs go to `~/.local/share/unfr0zen/logs/<timestamp>/unfr0zen.log` (or under
+`$XDG_DATA_HOME` when set).
 
 | Dependency | Why |
 |-|-|
@@ -119,20 +159,19 @@ run or log directories include the affected path.
 
 </details>
 
-## Usage
-**App:** open it, tick the integrations on the Patch page, fill in their
-settings (the MQTT broker, Matter's pairing code), plug in the thermostat,
-press **Start** and follow the prompts. The sidebar's other pages are Backups
-(the whole-NAND images the app keeps, with back up, restore and delete), Logs
-(every run's steps and log), About and, under Advanced, the 3rd generation's
-application boot and a serial console on a patched unit's USB root shell.
+## The app and the command line
 
-<p align="center"><a href="https://unfr0zen.com/"><img src="assets/app.png" width="100%" alt="The unfr0zen app on macOS, rotating through its Patch, Backups and Logs pages."></a></p>
+**App:** the Patch page sets up the integrations and patches the unit. The
+sidebar's other pages are Backups (the whole-NAND images the app keeps, with
+back up, restore and delete), Logs (every run's steps and log), About and, under
+Advanced, the 3rd generation's application boot and a serial console on a
+patched unit's USB root shell.
 
 **CLI (Linux and macOS):** the same executable, run with arguments, works from a
 terminal, over SSH or headless, with a few things the app doesn't have
-(`--nand-image`, `verify`, `uboot`, `nlclient`). On macOS it is
-`unfr0zen.app/Contents/MacOS/unfr0zen`. Windows has the app only.
+(`--nand-image`, `verify`, `uboot`, `nlclient`). The executable keeps its
+original name, `unfr0zen`; on macOS it is `Fledge.app/Contents/MacOS/unfr0zen`.
+Windows has the app only.
 ```
 unfr0zen [OPTIONS] [COMMAND]
 
@@ -153,21 +192,23 @@ Common options:
   --matter-thread       Serve Matter over Thread too (replaces Heat Link; excludes --zigbee)
   --zigbee              Join a Zigbee network as a router (replaces Heat Link)
   --external-temperature  Regulate from temperatures sent to it; turns off Bluetooth (3rd generation)
-  --doom                Install Doom, launched from FLEDGE → Doom
+  --doom                Install Doom, launched from the Fledge page in the Nest's settings
   --ssh                 Run an SSH server on the unit
   --block-cloud         Cut the unit off from Nest's and Google's servers
 ```
-Run `unfr0zen --help` for every option.
+Run it with `--help` for every option.
 
-Setting up MQTT, Matter, Thread, Zigbee, the external temperature and Doom, with the app's and the CLI's
-options side by side: [unfr0zen.com/integrations](https://unfr0zen.com/integrations/).
+**On the thermostat:** Fledge adds a page to the Nest's own Settings for what
+you turned on: Matter's pairing code and QR, Zigbee pairing, and Doom.
 
 ## Updating
-Release builds keep themselves current: the window checks for a newer release
-when it starts and offers to install it next to its version, and
-`unfr0zen update` does the same for the command-line tool. On macOS the window
-replaces its whole `unfr0zen.app`. Development builds (a `git describe` with
-commits past a tag, or local changes) never update.
+
+- **The thermostat:** a patched unit with MQTT shows a Home Assistant update
+  entity. Releases are signed; the unit checks the signature, installs, and
+  rolls back by itself if the new build doesn't come up. It checks daily, and
+  whenever the Fledge integration updates.
+- **The app:** release builds check for a newer release when they start and
+  offer to install it. Development builds never update.
 
 ## Undo it
 - **Before the first run:** the app's Backups page, Back up unit (or
@@ -183,10 +224,10 @@ charge-only cables are the usual cause. Connect to the USB port on the back of
 the detached display, not the power-only USB port on a European stand or Heat
 Link base. On Windows, the 1st and 2nd generation need the WinUSB driver bound
 to `0451:d00e` with [Zadig](https://zadig.akeo.ie). On Linux, add the
-[udev rule](#install) and reconnect the unit.
+[udev rule](#get-started) and reconnect the unit.
 
 **macOS won't open the app.** It is signed ad hoc, not notarized: run
-`xattr -dr com.apple.quarantine unfr0zen.app`, or allow it under System
+`xattr -dr com.apple.quarantine Fledge.app`, or allow it under System
 Settings → Privacy & Security.
 
 **Home Assistant shows the thermostat offline.** The availability topic is
@@ -194,33 +235,37 @@ online only while the thermostat's app calls in to nestlocal and nestlocal is
 connected to the broker. Check that the unit is on Wi-Fi (Settings → Network)
 and that it reaches the broker URL you gave it.
 
-Still stuck? [Open an issue](https://github.com/unfr0zen/unfr0zen/issues/new) with:
+Still stuck? [Open an issue](https://github.com/sysmoon14/fledge/issues/new) with:
 - How you ran it (app or CLI, with the options used) and the OS of your computer
 - The full log of the run
 - What the thermostat screen showed
 
 ## Disclaimers
-unfr0zen is provided **as is, without any warranty**. We are **NOT** responsible
+Fledge is provided **as is, without any warranty**. We are **NOT** responsible
 for any data loss, a bricked thermostat, damage to your heating or cooling
-system, or anything else that happens to your device. By using unfr0zen you
+system, or anything else that happens to your device. By using Fledge you
 accept full responsibility for the result.
 - Modifying the thermostat voids its warranty and may break Google's services for it.
 - Doom takes over the UI: while it runs the thermostat does not control the heating or cooling.
 - Matter uses the test vendor ID (0xFFF1) and test attestation; controllers treat the unit as uncertified.
-- unfr0zen is not affiliated with, endorsed or sponsored by Google LLC or Nest Labs.
+- Fledge is not affiliated with, endorsed or sponsored by Google LLC or Nest Labs.
   Nest and Nest Learning Thermostat are trademarks of Google LLC.
 
 ## Building
 See [BUILDING.md](BUILDING.md).
 
 ## License
-unfr0zen is licensed under the [GNU General Public License v3.0](LICENSE).
+Fledge is licensed under the [GNU General Public License v3.0](LICENSE).
 Bundled third-party components keep their own licenses: U-Boot and its patches
 (GPL-2.0+), busybox (GPL-2.0), doomgeneric (GPL-2.0), the `zbwake` kernel
 module (GPL-2.0). DOOM1.WAD is id Software's shareware episode, redistributed
 under its shareware terms.
 
 ## Credits
+Fledge grew from [unfr0zen](https://github.com/unfr0zen/unfr0zen), by willtm
+and its contributors, which does the hard part: rooting the thermostat, nestlocal,
+and its MQTT, Matter and Zigbee. Thank you.
+
 - U-Boot (i.MX) — [NXP](https://github.com/nxp-imx/uboot-imx)
 - BusyBox — [the BusyBox project](https://busybox.net)
 - rs-matter — [Project CHIP](https://github.com/project-chip/rs-matter)
@@ -228,6 +273,7 @@ under its shareware terms.
 - Gecko SDK / EmberZNet — [Silicon Labs](https://github.com/SiliconLabs/gecko_sdk)
 - doomgeneric — [ozkl](https://github.com/ozkl/doomgeneric)
 - DOOM — [id Software](https://github.com/id-Software/DOOM)
+- Material Design Icons — [Pictogrammers](https://pictogrammers.com/library/mdi/), and Material Symbols — [Google](https://github.com/google/material-design-icons)
 - CVE-2017-7932 and CVE-2017-7936 — [Quarkslab](https://quarkslab.com)
 - diamond3 official loader — [@evan-hoddinott](https://github.com/evan-hoddinott)
 - cuckoo loader (diamond/j49) — [@ajb142](https://github.com/ajb142)

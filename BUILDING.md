@@ -1,4 +1,4 @@
-# Building unfr0zen
+# Building Fledge
 
 The first firmware build needs internet access: it downloads busybox, Nest's
 kernel and x-loader sources, the Silicon Labs SDK and OpenThread at pinned
@@ -86,5 +86,5 @@ The version comes from `git describe --tag --always --dirty`.
 
 ### Packaging
 
-- macOS universal app bundle: `sh utils/make_macos_app.sh` → `dist/unfr0zen.app`
+- macOS universal app bundle: `sh utils/make_macos_app.sh` → `dist/Fledge.app`
 - Linux desktop entry and icon: `sh utils/install_linux.sh`

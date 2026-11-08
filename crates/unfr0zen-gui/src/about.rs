@@ -4,10 +4,10 @@ use eframe::egui;
 // build time by build.rs from `cargo metadata`, so it tracks `Cargo.lock`.
 include!(concat!(env!("OUT_DIR"), "/third_party.rs"));
 
-const PROJECT: &str = "https://github.com/unfr0zen";
+const PROJECT: &str = "https://github.com/sysmoon14/fledge";
 fn licenses() -> [&'static str; 5] {
     [
-        "unfr0zen (GPLv3)",
+        "Fledge, after unfr0zen (GPLv3)",
         "BusyBox (GPLv2)",
         crate::tr!("about.license.uboot"),
         "Linux (GPLv2)",
