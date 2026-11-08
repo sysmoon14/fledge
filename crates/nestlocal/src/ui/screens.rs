@@ -3,7 +3,7 @@
 
 
 use super::icons;
-use super::model::{ActionCard, Alert, CameraCard, ClimateCard, Light, LightsCard, MediaCard};
+use super::model::{ActionCard, Alert, CameraCard, ClimateCard, CoverCard, Light, LightsCard, MediaCard, OptionsCard};
 use super::paint::{self, *};
 
 pub enum Screen<'a> {
@@ -19,6 +19,14 @@ pub enum Screen<'a> {
     CameraView { card: &'a CameraCard },
     /// A notification, over whatever showed.
     Alert { alert: &'a Alert },
+    /// A select's card, and its options listed.
+    OptionsCard { card: &'a OptionsCard },
+    OptionList { card: &'a OptionsCard, selected: usize },
+    /// A light group's own lights, listed to switch.
+    Members { card: &'a LightsCard, selected: usize },
+    /// A cover's card, and its position on the ring.
+    CoverCard { card: &'a CoverCard },
+    CoverSet { card: &'a CoverCard, value: u8 },
     /// The lights card pressed: its lights and Back, `selected` highlighted.
     LightList { card: &'a LightsCard, selected: usize },
     LightDim { light: &'a Light, on: bool, value: u8 },
@@ -48,6 +56,10 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::CameraCard { card } => camera_card(fonts, card),
         Screen::CameraView { card } => camera_view(fonts, card),
         Screen::Alert { alert } => alert_screen(fonts, alert),
+        Screen::OptionsCard { card } => options_card(fonts, card),
+        Screen::OptionList { card, selected } => option_list(fonts, card, *selected),
+        Screen::Members { card, selected } => lights_listed(fonts, &card.name, &card.members, *selected),
+        Screen::CoverCard { card } => cover_card(fonts, card),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         _ => {
             let mut p = still(fonts, screen);
@@ -67,6 +79,7 @@ pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
         Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour"),
         Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), true),
         Screen::Volume { card, .. } => volume_still(fonts, card),
+        Screen::CoverSet { card, .. } => cover_still(fonts, card),
         _ => draw(fonts, screen, None),
     }
 }
@@ -80,6 +93,7 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
         Screen::LightHue { value, .. } => hue_moving(p, live.as_deref_mut(), fonts, *value, sweep),
         Screen::ClimateSet { card, target } => climate_moving(p, live.as_deref_mut(), fonts, card, Some(*target), sweep),
         Screen::Volume { value, .. } => volume_moving(p, live.as_deref_mut(), fonts, *value, sweep),
+        Screen::CoverSet { card, value } => cover_moving(p, live.as_deref_mut(), fonts, card, *value, sweep),
         _ => {}
     }
     if let Some(live) = live {
@@ -95,6 +109,7 @@ pub fn still_key(screen: &Screen) -> Option<String> {
         Screen::LightHue { light, .. } => Some(format!("hue {}", light.id)),
         Screen::ClimateSet { card, .. } => Some(format!("set {card:?}")),
         Screen::Volume { card, .. } => Some(format!("volume {card:?}")),
+        Screen::CoverSet { card, .. } => Some(format!("cover {card:?}")),
         _ => None,
     }
 }
@@ -237,7 +252,7 @@ fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, setting
         paint::text(&mut p, &fonts.regular, 96.0, HALF, 300.0, "OFF", 0.0, WHITE);
     }
     let bottom = if setting {
-        "Press when done".to_owned()
+        if card.presets.is_empty() { "Press when done".to_owned() } else { "Press for presets".to_owned() }
     } else {
         let now = card.current.map(|t| format!("{t:.1}° now")).unwrap_or_default();
         let state = match card.action.as_str() {
@@ -431,10 +446,15 @@ fn settings_card(fonts: &Fonts) -> Canvas {
 const ROWS: usize = 5;
 
 fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Canvas {
+    lights_listed(fonts, &card.name, &card.lights, selected)
+}
+
+/// Lights listed under `name`, each with its state, then Back.
+fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize) -> Canvas {
     let mut p = paint::canvas(BLACK);
-    let accent = card.lights.iter().find(|l| l.on).map_or(GREY, |l| l.colour());
-    label(&mut p, fonts, 100.0, &card.name, accent);
-    let rows = card.lights.len() + 1;
+    let accent = lights.iter().find(|l| l.on).map_or(GREY, |l| l.colour());
+    label(&mut p, fonts, 100.0, name, accent);
+    let rows = lights.len() + 1;
     let first = selected.saturating_sub(ROWS - 1).min(rows.saturating_sub(ROWS));
     for (slot, row) in (first..rows.min(first + ROWS)).enumerate() {
         let y = 128.0 + slot as f32 * 62.0;
@@ -443,7 +463,7 @@ fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Canvas {
         if chosen {
             paint::pill(&mut p, x, y, w, h, colour(SELECT));
         }
-        let (name, value, tint, value_tint, icon_name, entity) = match card.lights.get(row) {
+        let (name, value, tint, value_tint, icon_name, entity) = match lights.get(row) {
             Some(light) => {
                 let value = match (light.on, light.brightness) {
                     (true, Some(b)) if light.dimmable => format!("{b}%"),
@@ -607,7 +627,105 @@ pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], 
     }
 }
 
-fn capitalise(text: &str) -> String {
+/// A thermostat preset's icon in its menu.
+pub fn preset_icon(preset: &str) -> &'static str {
+    match preset {
+        "eco" => "mdi:leaf",
+        "away" | "vacation" => "mdi:airplane",
+        "home" => "mdi:home",
+        "sleep" | "night" => "mdi:sleep",
+        "boost" | "comfort" => "mdi:fire",
+        _ => "mdi:thermometer",
+    }
+}
+
+/// Covers' accent: a cool blue.
+const COVER: [u8; 3] = [120, 170, 255];
+
+fn options_card(fonts: &Fonts, card: &OptionsCard) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    let found = icons::lookup(&card.icon, &card.id).or_else(|| icons::lookup("mdi:format-list-bulleted", ""));
+    if let Some(found) = found {
+        paint::icon(&mut p, found, HALF, 150.0, 84.0, colour(WHITE));
+    }
+    label(&mut p, fonts, 232.0, &card.name, GREY);
+    let current = paint::fit(&fonts.regular, 40.0, card.current.as_deref().unwrap_or("—"), 0.0, 330.0);
+    paint::text(&mut p, &fonts.regular, 40.0, HALF, 292.0, &current, 0.0, WHITE);
+    line(&mut p, fonts, 334.0, "Press to choose", GREY);
+    p
+}
+
+/// A select's options, the current one marked, then Back.
+fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    label(&mut p, fonts, 100.0, &card.name, GREY);
+    let rows = card.options.len() + 1;
+    let first = selected.saturating_sub(ROWS - 1).min(rows.saturating_sub(ROWS));
+    for (slot, row) in (first..rows.min(first + ROWS)).enumerate() {
+        let y = 128.0 + slot as f32 * 62.0;
+        let (x, w, h) = (62.0, 356.0, 54.0);
+        if row == selected {
+            paint::pill(&mut p, x, y, w, h, colour(SELECT));
+        }
+        let (name, now) = match card.options.get(row) {
+            Some(option) => (option.as_str(), card.current.as_deref() == Some(option.as_str())),
+            None => ("Back", false),
+        };
+        if row == card.options.len() {
+            icon(&mut p, "mdi:arrow-left", "back", x + 34.0, y + h / 2.0, 28.0, if row == selected { WHITE } else { GREY });
+        }
+        let value = if now { "Now" } else { "" };
+        let value_width = paint::measure(&fonts.regular, 20.0, value, 0.0);
+        let name = paint::fit(&fonts.regular, 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
+        paint::text_at(&mut p, &fonts.regular, 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
+        if now {
+            paint::text_at(&mut p, &fonts.regular, 20.0, x + w - 22.0 - value_width, y + 35.0, value, 0.0, ACTION, 1.0);
+        }
+    }
+    p
+}
+
+/// A cover: how open on the ring, if it knows; open or closed in words.
+fn cover_card(fonts: &Fonts, card: &CoverCard) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    let open = card.state == "open" || card.state == "opening";
+    if let Some(position) = card.position {
+        let top = paint::tick_at(position as f32 / 100.0);
+        paint::ring(&mut p, |i| if i <= top && position > 0 { colour(COVER) } else { colour(DIM) }, &[]);
+    }
+    let name = if open { "mdi:window-shutter-open" } else { "mdi:window-shutter" };
+    let found = icons::lookup(&card.icon, &card.id).or_else(|| icons::lookup(name, ""));
+    if let Some(found) = found {
+        paint::icon(&mut p, found, HALF, 132.0, 72.0, colour(if open { COVER } else { GREY }));
+    }
+    label(&mut p, fonts, 214.0, &card.name, if open { COVER } else { GREY });
+    let middle = match (card.position, card.state.as_str()) {
+        (Some(p), _) if card.positionable => format!("{p}%"),
+        (_, "opening") => "Opening".to_owned(),
+        (_, "closing") => "Closing".to_owned(),
+        (_, state) => capitalise(state),
+    };
+    paint::text(&mut p, &fonts.regular, 80.0, HALF, 316.0, &middle, 0.0, WHITE);
+    p
+}
+
+fn cover_still(fonts: &Fonts, card: &CoverCard) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    label(&mut p, fonts, 150.0, &card.name, COVER);
+    line(&mut p, fonts, 366.0, if card.positionable { "How open · press for more" } else { "Press to open or close" }, GREY);
+    p
+}
+
+fn cover_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, card: &CoverCard, value: u8,
+                sweep: Option<f32>) {
+    let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
+    ring_on(p, live.as_deref_mut(), |i| if i <= top && value > 0 { colour(COVER) } else { colour(DIM) }, &[top]);
+    if card.positionable {
+        big_number_on(p, live, fonts, value as f64, false, "%", WHITE);
+    }
+}
+
+pub fn capitalise(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }

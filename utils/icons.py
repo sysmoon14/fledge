@@ -29,8 +29,11 @@ water coffee kettle blinds curtains window robot vacuum washing dishwasher
 night moon movie sleep party weather sun star
 """.split())
 
-# The cards' own: Nest settings, the lists' Back, a light's warmth and colour.
-NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause", "palette", "white-balance-sunny"}
+# The cards' own: Nest settings, the lists' Back, the menus' actions.
+NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause", "palette", "white-balance-sunny",
+         "skip-next", "skip-previous", "leaf", "airplane", "home-export-outline", "arrow-up-bold",
+         "arrow-down-bold", "format-list-bulleted", "lightbulb-group-outline", "window-shutter",
+         "window-shutter-open", "blinds", "blinds-open", "water-boiler", "fire", "snowflake"}
 
 # Home Assistant's Material Symbols sets, by its prefixes.
 SETS = {"outlined": "m3o", "rounded": "m3r", "sharp": "m3s"}

@@ -72,6 +72,16 @@ pub enum Action {
     Warmth,
     /// A light's colour: its own dial.
     Colour,
+    /// A media player's next and previous tracks.
+    Next,
+    Previous,
+    /// A thermostat's preset, by its place in its card's presets.
+    Preset(u8),
+    /// A light group's own lights, each to switch.
+    Members,
+    /// A cover opened or closed whole.
+    Open,
+    Close,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -95,6 +105,12 @@ pub enum Mode {
     Volume { slot: usize, value: u8 },
     /// A camera, full screen, its picture refreshed while it shows.
     Camera { slot: usize },
+    /// A select's options, `selected` highlighted (its last row Back).
+    OptionList { slot: usize, selected: usize },
+    /// A light group's own lights, `selected` highlighted (its last row Back).
+    Members { slot: usize, selected: usize },
+    /// A cover, the ring setting how open (percent).
+    CoverSet { slot: usize, value: u8 },
     /// A notification over `back`, which shows again once it goes.
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -116,7 +132,8 @@ impl Mode {
         match self {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
             | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
-            | Mode::Volume { slot, .. } => Some(slot + 1),
+            | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
+            | Mode::CoverSet { slot, .. } => Some(slot + 1),
             Mode::Menu { view, .. } => view.card_index(),
             _ => None,
         }
@@ -226,6 +243,9 @@ impl Machine {
             Mode::ClimateSet { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Climate(_))),
             Mode::Volume { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Media(_))),
             Mode::Camera { slot } => matches!(cards.cards.get(*slot), Some(Card::Camera(_))),
+            Mode::OptionList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Options(_))),
+            Mode::CoverSet { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Cover(_))),
+            Mode::Members { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(c)) if !c.members.is_empty()),
             Mode::LightDim { slot, light, .. } | Mode::LightWarmth { slot, light, .. }
             | Mode::LightHue { slot, light, .. } => match cards.cards.get(*slot) {
                 Some(Card::Lights(card)) => *light < card.lights.len(),
@@ -392,7 +412,7 @@ impl Machine {
                 self.movement += value;
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
-                    Mode::LightList { .. } | Mode::Menu { .. } => ROW_STEP,
+                    Mode::LightList { .. } | Mode::Menu { .. } | Mode::OptionList { .. } | Mode::Members { .. } => ROW_STEP,
                     Mode::ClimateSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
@@ -541,6 +561,27 @@ impl Machine {
                     self.mode = Mode::Volume { slot, value };
                 }
             }
+            Mode::OptionList { slot, selected } => {
+                if let Some(Card::Options(card)) = self.card(slot) {
+                    let selected = (selected as i32 + steps).clamp(0, card.options.len() as i32) as usize;
+                    self.mode = Mode::OptionList { slot, selected };
+                }
+            }
+            Mode::Members { slot, selected } => {
+                if let Some(Card::Lights(card)) = self.card(slot) {
+                    let selected = (selected as i32 + steps).clamp(0, card.members.len() as i32) as usize;
+                    self.mode = Mode::Members { slot, selected };
+                }
+            }
+            Mode::CoverSet { slot, value } => {
+                if let Some(Card::Cover(card)) = self.card(slot) {
+                    if card.positionable {
+                        let value = (value as i32 + steps).clamp(0, 100) as u8;
+                        self.pending = Some(Command::Position(card.id.clone(), value));
+                        self.mode = Mode::CoverSet { slot, value };
+                    }
+                }
+            }
             Mode::Menu { view, actions, selected } => {
                 let selected = (selected as i32 + steps).clamp(0, actions.len() as i32 - 1) as usize;
                 self.mode = Mode::Menu { view, actions, selected };
@@ -592,6 +633,14 @@ impl Machine {
                         self.pictured = Some(self.last_input);
                         Mode::Camera { slot }
                     }
+                    Some(Card::Options(card)) => {
+                        let at = card.current.as_ref().and_then(|c| card.options.iter().position(|o| o == c));
+                        Mode::OptionList { slot, selected: at.unwrap_or(0) }
+                    }
+                    Some(Card::Cover(card)) => {
+                        let open = if card.state == "open" { 100 } else { 0 };
+                        Mode::CoverSet { slot, value: card.position.unwrap_or(open) }
+                    }
                     Some(Card::Unknown) | None => return,
                 };
                 self.go(mode, out);
@@ -630,6 +679,9 @@ impl Machine {
                     if card.lights[light].hues {
                         actions.push(Action::Colour);
                     }
+                    if !card.members.is_empty() {
+                        actions.push(Action::Members);
+                    }
                 }
                 self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
             }
@@ -639,9 +691,46 @@ impl Machine {
             }
             view @ Mode::Volume { slot, .. } => {
                 let playing = matches!(self.card(slot), Some(Card::Media(m)) if m.state == "playing");
-                self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Play(!playing)], selected: 0 };
+                self.mode = Mode::Menu { view: Box::new(view),
+                                         actions: vec![Action::Back, Action::Play(!playing), Action::Previous, Action::Next],
+                                         selected: 0 };
             }
-            Mode::ClimateSet { slot, .. } | Mode::Camera { slot } => self.go(Mode::Chooser(slot + 1), out),
+            view @ Mode::ClimateSet { slot, .. } => match self.card(slot) {
+                // Its presets, where it has them; else done.
+                Some(Card::Climate(card)) if !card.presets.is_empty() => {
+                    let mut actions = vec![Action::Back];
+                    actions.extend((0..card.presets.len().min(4)).map(|i| Action::Preset(i as u8)));
+                    self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
+                }
+                _ => self.go(Mode::Chooser(slot + 1), out),
+            },
+            Mode::Camera { slot } => self.go(Mode::Chooser(slot + 1), out),
+            Mode::OptionList { slot, selected } => {
+                if let Some(Card::Options(card)) = self.cards.cards.get_mut(slot) {
+                    if let Some(option) = card.options.get(selected).cloned() {
+                        out.push(Effect::Send(Command::Select(card.id.clone(), option.clone())));
+                        card.current = Some(option);
+                    }
+                }
+                self.go(Mode::Chooser(slot + 1), out);
+            }
+            Mode::Members { slot, selected } => {
+                let member = match self.cards.cards.get_mut(slot) {
+                    Some(Card::Lights(card)) => card.members.get_mut(selected),
+                    _ => None,
+                };
+                match member {
+                    Some(light) => {
+                        light.on = !light.on;
+                        let id = light.id.clone();
+                        out.push(Effect::Send(if light.on { Command::On(id) } else { Command::Off(id) }));
+                    }
+                    None => self.mode = self.dimmer(slot, 0),
+                }
+            }
+            view @ Mode::CoverSet { .. } => {
+                self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Open, Action::Close], selected: 0 };
+            }
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
             Mode::Idle | Mode::Native | Mode::Alert { .. } => {}
         }
@@ -677,6 +766,31 @@ impl Machine {
                 self.toggle(slot, None, out);
                 self.mode = Mode::Volume { slot, value };
             }
+            (Action::Next | Action::Previous, view @ Mode::Volume { slot, .. }) => {
+                if let Some(Card::Media(card)) = self.card(slot) {
+                    let id = card.id.clone();
+                    out.push(Effect::Send(if action == Action::Next { Command::Next(id) } else { Command::Previous(id) }));
+                }
+                self.mode = view;
+            }
+            (Action::Preset(i), Mode::ClimateSet { slot, .. }) => {
+                if let Some(Card::Climate(card)) = self.cards.cards.get_mut(slot) {
+                    if let Some(preset) = card.presets.get(i as usize).cloned() {
+                        out.push(Effect::Send(Command::Preset(card.id.clone(), preset.clone())));
+                        card.preset = Some(preset);
+                    }
+                }
+                self.go(Mode::Chooser(slot + 1), out);
+            }
+            (Action::Members, Mode::LightDim { slot, .. }) => self.mode = Mode::Members { slot, selected: 0 },
+            (Action::Open | Action::Close, view @ Mode::CoverSet { slot, .. }) => {
+                if let Some(Card::Cover(card)) = self.cards.cards.get_mut(slot) {
+                    let (id, open) = (card.id.clone(), action == Action::Open);
+                    out.push(Effect::Send(if open { Command::Open(id) } else { Command::Close(id) }));
+                    card.state = if open { "opening".into() } else { "closing".into() };
+                }
+                self.mode = view;
+            }
             (_, view) => self.mode = view,
         }
     }
@@ -696,6 +810,13 @@ impl Machine {
                 for index in changing {
                     self.switch_light(slot, index, on, out);
                 }
+                true
+            }
+            Some(Card::Cover(card)) => {
+                let id = card.id.clone();
+                let open = card.state == "open" || card.state == "opening";
+                out.push(Effect::Send(if open { Command::Close(id) } else { Command::Open(id) }));
+                card.state = if open { "closing".into() } else { "opening".into() };
                 true
             }
             Some(Card::Media(card)) => {
@@ -836,6 +957,9 @@ impl Machine {
             }
             Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
             Mode::Camera { slot } if idle >= CAMERA_IDLE => Some(Mode::Chooser(slot + 1)),
+            Mode::OptionList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(slot + 1)),
+            Mode::Members { slot, .. } if idle >= LIST_IDLE => Some(self.dimmer(slot, 0)),
+            Mode::CoverSet { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
             Mode::Menu { view, .. } if idle >= CONTROL_IDLE => Some(*view),
             _ => None,
         };
@@ -1146,6 +1270,90 @@ mod tests {
         rig.press();
         rig.wait(CAMERA_IDLE);
         assert_eq!(rig.machine.mode, Mode::Chooser(2), "left: back too");
+    }
+
+    fn deck_of(json: &[u8]) -> Rig {
+        let mut rig = Rig::with(Cards::parse(json).unwrap());
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        rig
+    }
+
+    #[test]
+    fn an_option_is_chosen_from_its_list() {
+        let mut rig = deck_of(br#"{"cards":[{"kind":"options","id":"select.boost","name":"Hot water boost",
+            "options":["Off","30 min","1 hour"],"current":"Off"}]}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::OptionList { slot: 0, selected: 0 }, "on the current one");
+        rig.turn(ROW_STEP * 2);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Select("select.boost".into(), "1 hour".into())]);
+        assert_eq!(rig.machine.mode, Mode::Chooser(1));
+        assert!(matches!(&rig.machine.cards.cards[0], Card::Options(c) if c.current.as_deref() == Some("1 hour")));
+        rig.press();
+        rig.turn(ROW_STEP * 9);
+        assert!(Rig::sends(&rig.press()).is_empty() && rig.machine.mode == Mode::Chooser(1), "Back: nothing chosen");
+    }
+
+    #[test]
+    fn a_cover_opens_as_far_as_turned_and_its_menu_opens_or_closes_it() {
+        let mut rig = deck_of(br#"{"cards":[{"kind":"cover","id":"cover.blind","name":"Blind","state":"open",
+            "position":40,"positionable":true}]}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::CoverSet { slot: 0, value: 40 });
+        for _ in 0..5 {
+            rig.turn(VALUE_STEP);
+        }
+        assert_eq!(Rig::sends(&rig.wait(SEND_EVERY)), vec![Command::Position("cover.blind".into(), 45)]);
+        rig.press();
+        rig.turn(ROW_STEP * 2);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Close("cover.blind".into())], "its menu: Close");
+        rig.long();
+        assert_eq!(rig.machine.mode, Mode::Chooser(1));
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::Open("cover.blind".into())],
+                   "long press on its card: open again, as it's closing");
+    }
+
+    #[test]
+    fn a_thermostat_s_presets_and_a_speaker_s_tracks_are_in_their_menus() {
+        let mut rig = deck_of(br#"{"cards":[
+            {"kind":"climate","id":"climate.kitchen","name":"Kitchen","target":19,"presets":["eco","away"]},
+            {"kind":"media","id":"media_player.speaker","name":"Speaker","state":"playing","volume":30}]}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.press();
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1..] == [Action::Preset(0), Action::Preset(1)]));
+        rig.turn(ROW_STEP);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Preset("climate.kitchen".into(), "eco".into())]);
+        assert_eq!(rig.machine.mode, Mode::Chooser(1));
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.press();
+        rig.turn(ROW_STEP * 3);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Next("media_player.speaker".into())]);
+        assert!(matches!(rig.machine.mode, Mode::Volume { .. }), "back to its volume");
+    }
+
+    #[test]
+    fn a_light_group_s_menu_lists_its_lights_to_switch() {
+        let mut rig = deck_of(br#"{"cards":[{"kind":"lights","name":"Bedroom","lights":[
+            {"id":"light.bedroom","name":"Bedroom","on":true,"dimmable":true,"brightness":50}],
+            "members":[{"id":"light.lamp","name":"Lamp","on":true},{"id":"light.ceiling","name":"Ceiling","on":false}]}]}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.press();
+        let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!() };
+        assert_eq!(actions.last(), Some(&Action::Members));
+        rig.turn(ROW_STEP * (actions.len() as i32 - 1));
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Members { slot: 0, selected: 0 });
+        rig.turn(ROW_STEP);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::On("light.ceiling".into())], "each switched");
+        rig.turn(ROW_STEP);
+        rig.press();
+        assert!(matches!(rig.machine.mode, Mode::LightDim { .. }), "Back: the group's dimmer");
     }
 
     #[test]

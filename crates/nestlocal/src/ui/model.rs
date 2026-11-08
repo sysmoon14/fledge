@@ -52,6 +52,10 @@ pub enum Card {
     Action(ActionCard),
     /// A camera's latest still: pressed, a new one.
     Camera(CameraCard),
+    /// A choice of options (a select: hot water boost): pressed, the list.
+    Options(OptionsCard),
+    /// Blinds, curtains, a garage door: the ring sets how open.
+    Cover(CoverCard),
     /// A kind from a newer Fledge: left out rather than failing the rest.
     #[serde(other)]
     Unknown,
@@ -64,6 +68,37 @@ pub struct ActionCard {
     pub name: String,
     #[serde(default)]
     pub icon: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct OptionsCard {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub current: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CoverCard {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: String,
+    /// open, closed, opening, closing.
+    #[serde(default)]
+    pub state: String,
+    /// Percent open, if it knows.
+    #[serde(default)]
+    pub position: Option<u8>,
+    /// Whether it can be set part open (else only opened and closed).
+    #[serde(default)]
+    pub positionable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -123,6 +158,9 @@ pub struct LightsCard {
     pub icon: String,
     #[serde(default)]
     pub lights: Vec<Light>,
+    /// A light group's own lights, each switched from its menu.
+    #[serde(default)]
+    pub members: Vec<Light>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -177,6 +215,11 @@ pub struct ClimateCard {
     pub max: f64,
     #[serde(default = "temp_step")]
     pub step: f64,
+    /// Its presets (eco, away, ...) and the one it's in, for its menu.
+    #[serde(default)]
+    pub presets: Vec<String>,
+    #[serde(default)]
+    pub preset: Option<String>,
 }
 
 fn min_temp() -> f64 { 7.0 }
@@ -348,6 +391,16 @@ pub enum Command {
     /// time up).
     AlertPressed(String),
     AlertDismissed(String),
+    Next(String),
+    Previous(String),
+    /// A thermostat's preset, by name.
+    Preset(String, String),
+    /// A select's option.
+    Select(String, String),
+    /// A cover's position, percent open; or open or closed whole.
+    Position(String, u8),
+    Open(String),
+    Close(String),
 }
 
 impl Command {
@@ -365,6 +418,13 @@ impl Command {
             Command::Snapshot(id) => json!({"id": id, "action": "snapshot"}),
             Command::AlertPressed(id) => json!({"id": id, "action": "alert_pressed"}),
             Command::AlertDismissed(id) => json!({"id": id, "action": "alert_dismissed"}),
+            Command::Next(id) => json!({"id": id, "action": "next"}),
+            Command::Previous(id) => json!({"id": id, "action": "previous"}),
+            Command::Preset(id, o) => json!({"id": id, "action": "preset", "option": o}),
+            Command::Select(id, o) => json!({"id": id, "action": "select", "option": o}),
+            Command::Position(id, p) => json!({"id": id, "action": "position", "value": p}),
+            Command::Open(id) => json!({"id": id, "action": "open"}),
+            Command::Close(id) => json!({"id": id, "action": "close"}),
         }
     }
 }

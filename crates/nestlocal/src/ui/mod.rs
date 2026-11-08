@@ -632,6 +632,8 @@ impl Runtime {
                 Some(Card::Media(card)) => card.name.clone(),
                 Some(Card::Action(card)) => card.name.clone(),
                 Some(Card::Camera(card)) => card.name.clone(),
+                Some(Card::Options(card)) => card.name.clone(),
+                Some(Card::Cover(card)) => card.name.clone(),
                 Some(Card::Unknown) | None => String::new(),
             },
             None => String::new(),
@@ -674,6 +676,8 @@ impl Runtime {
                     Screen::ActionCard { card, done: self.machine.ran.is_some_and(|(ran, _)| ran == slot) }
                 }
                 Some(Card::Camera(card)) => Screen::CameraCard { card },
+                Some(Card::Options(card)) => Screen::OptionsCard { card },
+                Some(Card::Cover(card)) => Screen::CoverCard { card },
                 Some(Card::Unknown) | None => return,
             },
             _ => Screen::SettingsCard,
@@ -708,6 +712,7 @@ impl Runtime {
                 _ => None,
             },
             Mode::LightHue { value, .. } => Some(*value as f32 / 360.0),
+            Mode::CoverSet { value, .. } => Some(*value as f32 / 100.0),
             _ => None,
         }
     }
@@ -867,6 +872,18 @@ impl Runtime {
                 Card::Lights(card) => Screen::LightList { card, selected: *selected },
                 _ => return None,
             },
+            Mode::Members { slot, selected } => match card(*slot)? {
+                Card::Lights(card) => Screen::Members { card, selected: *selected },
+                _ => return None,
+            },
+            Mode::OptionList { slot, selected } => match card(*slot)? {
+                Card::Options(card) => Screen::OptionList { card, selected: *selected },
+                _ => return None,
+            },
+            Mode::CoverSet { slot, value } => match card(*slot)? {
+                Card::Cover(card) => Screen::CoverSet { card, value: *value },
+                _ => return None,
+            },
             Mode::LightDim { slot, light, on, value } => match card(*slot)? {
                 Card::Lights(card) => Screen::LightDim { light: card.lights.get(*light)?, on: *on, value: *value },
                 _ => return None,
@@ -902,18 +919,37 @@ impl Runtime {
         let title = match &screen {
             Screen::LightDim { light, .. } => light.name.clone(),
             Screen::Volume { card, .. } => card.name.clone(),
+            Screen::ClimateSet { card, .. } => card.name.clone(),
+            Screen::CoverSet { card, .. } => card.name.clone(),
             _ => String::new(),
         };
+        let presets = match &screen {
+            Screen::ClimateSet { card, .. } => card.presets.clone(),
+            _ => Vec::new(),
+        };
         let mut canvas = screens::draw(&self.fonts, &screen, None);
-        let items: Vec<(&str, &str)> = actions.iter().map(|action| match action {
-            Action::Back => ("mdi:arrow-left", "Back to devices"),
-            Action::Switch(true) => ("mdi:power", "Turn on"),
-            Action::Switch(false) => ("mdi:power", "Turn off"),
-            Action::Play(true) => ("mdi:play", "Play"),
-            Action::Play(false) => ("mdi:pause", "Pause"),
-            Action::Warmth => ("mdi:white-balance-sunny", "Warmth"),
-            Action::Colour => ("mdi:palette", "Colour"),
+        let items: Vec<(String, String)> = actions.iter().map(|action| {
+            let (icon, label) = match action {
+                Action::Back => ("mdi:arrow-left", "Back to devices"),
+                Action::Switch(true) => ("mdi:power", "Turn on"),
+                Action::Switch(false) => ("mdi:power", "Turn off"),
+                Action::Play(true) => ("mdi:play", "Play"),
+                Action::Play(false) => ("mdi:pause", "Pause"),
+                Action::Warmth => ("mdi:white-balance-sunny", "Warmth"),
+                Action::Colour => ("mdi:palette", "Colour"),
+                Action::Next => ("mdi:skip-next", "Next"),
+                Action::Previous => ("mdi:skip-previous", "Previous"),
+                Action::Members => ("mdi:format-list-bulleted", "Each light"),
+                Action::Open => ("mdi:arrow-up-bold", "Open"),
+                Action::Close => ("mdi:arrow-down-bold", "Close"),
+                Action::Preset(i) => {
+                    let name = presets.get(*i as usize).cloned().unwrap_or_default();
+                    return (screens::preset_icon(&name).to_owned(), screens::capitalise(&name.replace('_', " ")));
+                }
+            };
+            (icon.to_owned(), label.to_owned())
         }).collect();
+        let items: Vec<(&str, &str)> = items.iter().map(|(i, l)| (i.as_str(), l.as_str())).collect();
         screens::menu(&mut canvas, &self.fonts, &title, &items, selected);
         let frame = device::frame(canvas);
         // The device's screen redraws whole when the menu closes.
@@ -992,6 +1028,7 @@ fn sweep_key(mode: &Mode) -> Option<SweepKey> {
         Mode::LightDim { slot, light, .. } => Some((0, slot, light)),
         Mode::LightWarmth { slot, light, .. } => Some((3, slot, light)),
         Mode::LightHue { slot, light, .. } => Some((4, slot, light)),
+        Mode::CoverSet { slot, .. } => Some((5, slot, 0)),
         Mode::Volume { slot, .. } => Some((1, slot, 0)),
         Mode::ClimateSet { slot, .. } => Some((2, slot, 0)),
         _ => None,
@@ -1227,7 +1264,7 @@ mod shots {
         let mut menu = screens::draw(&fonts, &Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, None);
         screens::menu(&mut menu, &fonts, "Reading Lamp", &[("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off")], 0);
         save(&menu, &format!("{out}/9-menu.png"));
-        let lamp = model::LightsCard { name: "Reading Lamp".into(), icon: String::new(), lights: vec![lights.lights[0].clone()] };
+        let lamp = model::LightsCard { name: "Reading Lamp".into(), icon: String::new(), lights: vec![lights.lights[0].clone()], members: vec![] };
         save(&screens::draw(&fonts, &Screen::LightsCard { card: &lamp }, None), &format!("{out}/1b-lamp.png"));
         let scene = model::ActionCard { id: "scene.goodnight".into(), name: "Goodnight".into(), icon: "mdi:weather-night".into() };
         save(&screens::draw(&fonts, &Screen::ActionCard { card: &scene, done: false }, None), &format!("{out}/a1-scene.png"));
@@ -1244,6 +1281,18 @@ mod shots {
         save(&screens::draw(&fonts, &Screen::Alert { alert: &note }, None), &format!("{out}/a4-alert.png"));
         let ring = model::Alert { id: "door".into(), title: "Someone's at the front door".into(), art: Some(still), ..Default::default() };
         save(&screens::draw(&fonts, &Screen::Alert { alert: &ring }, None), &format!("{out}/a5-doorbell.png"));
+        let boost = model::OptionsCard { id: "select.hot_water_boost".into(), name: "Hot water boost".into(),
+            icon: "mdi:water-boiler".into(), options: vec!["Off".into(), "30 minutes".into(), "1 hour".into(), "2 hours".into()],
+            current: Some("Off".into()) };
+        save(&screens::draw(&fonts, &Screen::OptionsCard { card: &boost }, None), &format!("{out}/b1-options.png"));
+        save(&screens::draw(&fonts, &Screen::OptionList { card: &boost, selected: 2 }, None), &format!("{out}/b2-option-list.png"));
+        let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
+            state: "open".into(), position: Some(60), positionable: true };
+        save(&screens::draw(&fonts, &Screen::CoverCard { card: &blind }, None), &format!("{out}/b3-cover.png"));
+        save(&screens::draw(&fonts, &Screen::CoverSet { card: &blind, value: 60 }, None), &format!("{out}/b4-cover-set.png"));
+        let group = model::LightsCard { name: "Bedroom Lights".into(), icon: String::new(), lights: vec![lights.lights[2].clone()],
+            members: lights.lights.clone() };
+        save(&screens::draw(&fonts, &Screen::Members { card: &group, selected: 1 }, None), &format!("{out}/b5-members.png"));
         let mut tunable = lights.lights[0].clone();
         (tunable.kelvin, tunable.kelvins, tunable.hues, tunable.hue) = (Some(2700), Some([2200, 6500]), true, Some(200));
         save(&screens::draw(&fonts, &Screen::LightWarmth { light: &tunable, value: 2700 }, None), &format!("{out}/9b-warmth.png"));
