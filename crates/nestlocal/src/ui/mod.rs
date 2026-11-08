@@ -21,6 +21,7 @@ mod machine;
 mod model;
 mod paint;
 mod screens;
+mod zoom;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -103,8 +104,14 @@ struct Runtime {
     /// Where the cards show, on the way to machine.position(): a place in
     /// the deck, not wrapped, so a turn past the last card runs on.
     view: Option<f32>,
-    /// Each card drawn, by its place in the deck (the thermostat is saved).
+    /// Each card drawn, by its place in the deck (the thermostat is saved),
+    /// and zoomed out (zoom::shrink; the thermostat's under 0).
     cards: std::collections::HashMap<usize, device::Frame>,
+    shrunk: std::collections::HashMap<usize, device::Frame>,
+    /// How big the cards show (1 full size, zoom::ZOOMED while moving).
+    zoom: f32,
+    /// A frame to compose zoomed cards in.
+    scratch: device::Frame,
     /// How far the ring shows on a screen with a value, on its way to it.
     sweep: Option<(SweepKey, f32)>,
     /// A value screen kept between frames (paint::Live): what it was drawn
@@ -113,13 +120,21 @@ struct Runtime {
     last_frame: Instant,
     last_check: Instant,
     nlclient: bool,
+    /// When the button went down, and whether its hold was taken as a
+    /// long press.
+    pressed: Option<(Instant, bool)>,
     /// Frames of the animation under way: how many, how long all told, the
     /// longest.
     frames: (u32, Duration, Duration),
 }
 
+/// How long the button is held for a long press.
+const LONG_PRESS: Duration = Duration::from_millis(600);
+
 /// How fast what shows catches up with the ring: most of the way in this.
 const FOLLOW: f32 = 0.04;
+/// How fast the cards zoom out as the ring starts, and in as they settle.
+const ZOOM_EASE: f32 = 0.05;
 
 impl Runtime {
     fn new(ui: Arc<Ui>, sender: Arc<dyn Sender>, fonts: paint::Fonts, display: device::Display,
@@ -128,8 +143,10 @@ impl Runtime {
         Runtime {
             ui, sender, fonts, display, input, beeper: device::Beeper::open(), machine: Machine::new(now),
             generation: u64::MAX, saved: None, transition: Transition::Cut, view: None,
-            cards: Default::default(), sweep: None, live: None, last_frame: now,
+            cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
+            scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
+            pressed: None,
         }
     }
 
@@ -138,7 +155,7 @@ impl Runtime {
         hold_state(false);
         loop {
             // A frame each 8 ms while anything moves; otherwise input or time.
-            let wait = if self.animating() { 8 } else { 50 };
+            let wait = if self.animating() || self.pressed.is_some() { 8 } else { 50 };
             let events = self.input.wait(Duration::from_millis(wait));
             let now = Instant::now();
             let mut effects = Vec::new();
@@ -151,6 +168,7 @@ impl Runtime {
                 self.generation = generation;
                 self.machine.set_cards(cards, &mut effects);
                 self.cards.clear();
+                self.shrunk.clear();
             }
             self.machine.set_active(self.nlclient, now, &mut effects);
             let lit = device::lit();
@@ -160,10 +178,25 @@ impl Runtime {
                 let input = match (event.kind, event.code, event.value) {
                     // The ADC counts anticlockwise up: clockwise is positive here.
                     (device::EV_REL, device::REL_DIAL, value) => Input::Turn(-value),
-                    (device::EV_KEY, device::KEY_ENTER, 1) => Input::Press,
+                    // A press is taken when the button comes up, unless it was
+                    // held long enough to be a long press.
+                    (device::EV_KEY, device::KEY_ENTER, 1) => {
+                        self.pressed = Some((now, false));
+                        continue;
+                    }
+                    (device::EV_KEY, device::KEY_ENTER, 0) => match self.pressed.take() {
+                        Some((_, false)) => Input::Press,
+                        _ => continue,
+                    },
                     _ => continue,
                 };
                 self.machine.input(input, now, lit, &mut effects);
+            }
+            if let Some((down, false)) = self.pressed {
+                if now.duration_since(down) >= LONG_PRESS {
+                    self.pressed = Some((down, true));
+                    self.machine.input(Input::LongPress, now, lit, &mut effects);
+                }
             }
             let display = &mut self.display;
             self.machine.tick(now, lit, &mut || home_dial(display), &mut effects);
@@ -178,6 +211,7 @@ impl Runtime {
             if dirty && self.machine.position().is_none() {
                 // A light switched in a list shows on its card.
                 self.cards.clear();
+                self.shrunk.clear();
             }
             if self.machine.owns() {
                 let started = Instant::now();
@@ -197,6 +231,7 @@ impl Runtime {
                 }
             } else {
                 self.view = None;
+                self.zoom = 1.0;
             }
             if !self.animating() && self.machine.mode != Mode::Idle {
                 // One card at a time while nothing moves, so the first turn
@@ -204,6 +239,9 @@ impl Runtime {
                 let deck = self.machine.deck().len();
                 if let Some(index) = (1..deck).find(|i| !self.cards.contains_key(i)) {
                     self.prepare(index as i64);
+                } else if let Some(index) = (1..deck).find(|i| !self.shrunk.contains_key(i)) {
+                    let shrunk = zoom::shrink(&self.cards[&index]);
+                    self.shrunk.insert(index, shrunk);
                 }
             }
             if !self.animating() {
@@ -224,7 +262,19 @@ impl Runtime {
             (Some(view), Some(target)) => (view - self.nearest(view, target)).abs() > 0.001,
             _ => false,
         };
-        following || self.sweeping()
+        let zooming = self.view.is_some() && (self.zoom - self.zoom_target()).abs() > 0.002;
+        following || zooming || self.sweeping()
+    }
+
+    /// Zoomed out while the cards move, full size once they settle.
+    fn zoom_target(&self) -> f32 {
+        let moving = match (self.view, self.machine.position()) {
+            (Some(view), Some(target)) => {
+                (view - self.nearest(view, target)).abs() > 0.001 || target.fract().abs() > 0.001
+            }
+            _ => false,
+        };
+        if moving { zoom::ZOOMED } else { 1.0 }
     }
 
     /// `target`'s place in the deck nearest `view`: the deck goes round.
@@ -255,15 +305,32 @@ impl Runtime {
             next = target;
         }
         self.view = Some(next);
-        if next != view || dirty {
+        let zoomed = self.step_zoom(elapsed);
+        if next != view || zoomed || dirty {
             self.show_cards(next);
             return true;
         }
         false
     }
 
-    /// Shows the cards at place `at` in the deck: one, or two side by side.
+    /// Eases the zoom towards zoom_target(); returns whether it changed.
+    fn step_zoom(&mut self, elapsed: f32) -> bool {
+        let target = self.zoom_target();
+        let mut next = self.zoom + (target - self.zoom) * (1.0 - (-elapsed / ZOOM_EASE).exp());
+        if (next - target).abs() < 0.002 {
+            next = target;
+        }
+        let changed = next != self.zoom;
+        self.zoom = next;
+        changed
+    }
+
+    /// Shows the cards at place `at` in the deck: one, or two side by side;
+    /// zoomed out, as many as show.
     fn show_cards(&mut self, at: f32) {
+        if self.zoom < 0.999 {
+            return self.show_zoomed(at);
+        }
         let whole = at.floor();
         let part = at - whole;
         let (left, right) = (whole as i64, whole as i64 + 1);
@@ -283,6 +350,36 @@ impl Runtime {
         if let (Some(from), Some(to)) = (get(left), get(right)) {
             self.display.slide(from, to, (part * paint::SIZE as f32) as usize, true);
         }
+    }
+
+    fn show_zoomed(&mut self, at: f32) {
+        // From the shrunk cards until nearly full size; see zoom::compose.
+        let shrunk = self.zoom < 0.95;
+        let z = if (self.zoom - zoom::ZOOMED).abs() < 0.003 { zoom::ZOOMED } else { self.zoom };
+        let count = self.machine.deck().len() as i64;
+        for k in at.floor() as i64 - 2..=at.ceil() as i64 + 2 {
+            self.prepare(k);
+            let index = k.rem_euclid(count) as usize;
+            if shrunk && !self.shrunk.contains_key(&index) {
+                let full = if index == 0 { self.saved.clone() } else { self.cards.get(&index).cloned() };
+                if let Some(full) = full {
+                    self.shrunk.insert(index, zoom::shrink(&full));
+                }
+            }
+        }
+        let (cards, shrunk_cards, saved) = (&self.cards, &self.shrunk, &self.saved);
+        let get = |k: i64| -> Option<&[u8]> {
+            let index = k.rem_euclid(count) as usize;
+            if shrunk {
+                shrunk_cards.get(&index).map(Vec::as_slice)
+            } else if index == 0 {
+                saved.as_deref()
+            } else {
+                cards.get(&index).map(Vec::as_slice)
+            }
+        };
+        zoom::compose(&mut self.scratch, at, z, if shrunk { zoom::ZOOMED } else { 1.0 }, get);
+        self.display.show(&self.scratch);
     }
 
     /// Draws card `at` (wrapping round the deck) if it isn't yet.
@@ -361,8 +458,14 @@ impl Runtime {
             Effect::Own(true) => {
                 self.saved = Some(self.display.save());
                 device::own(true);
+                self.display.begin();
+                // The thermostat zoomed out too, before the first frame needs it.
+                if let Some(saved) = &self.saved {
+                    self.shrunk.insert(0, zoom::shrink(saved));
+                }
             }
             Effect::Own(false) => {
+                self.shrunk.remove(&0);
                 // Back to the thermostat: the cards run on to it as the ring
                 // turned, or fade to it when left alone. Then nlclient's frame
                 // back before nlclient may present again.
@@ -375,7 +478,7 @@ impl Runtime {
                         (_, Some(_)) => self.settle(),
                         _ => {}
                     }
-                    self.display.show(&saved);
+                    self.display.end(&saved);
                 }
                 self.saved = None;
                 self.view = None;
@@ -406,7 +509,7 @@ impl Runtime {
         let mut last = Instant::now();
         while let Some(view) = self.view {
             let target = self.nearest(view, 0.0);
-            if (view - target).abs() < 0.001 {
+            if (view - target).abs() < 0.001 && self.zoom >= 1.0 {
                 return;
             }
             std::thread::sleep(Duration::from_millis(8));
@@ -417,6 +520,7 @@ impl Runtime {
                 next = target;
             }
             self.view = Some(next);
+            self.step_zoom(elapsed);
             self.show_cards(next);
         }
     }

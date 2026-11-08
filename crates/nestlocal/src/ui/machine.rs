@@ -71,6 +71,8 @@ pub enum Input {
     /// Ring counts, clockwise positive.
     Turn(i32),
     Press,
+    /// The button held (LONG_PRESS): back a level.
+    LongPress,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -231,6 +233,7 @@ impl Machine {
         }
         match input {
             Input::Press => self.press(out),
+            Input::LongPress => self.back(out),
             Input::Turn(0) => {}
             Input::Turn(value) => {
                 if pause > GESTURE && self.movement != 0 {
@@ -361,6 +364,19 @@ impl Machine {
             Mode::Idle | Mode::Native => {}
         }
         self.dirty = true;
+    }
+
+    /// A long press: out of a card's own screens to the card, and from a
+    /// card to the thermostat. On the thermostat it does nothing.
+    fn back(&mut self, out: &mut Vec<Effect>) {
+        let back = match self.mode {
+            Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::ClimateSet { slot, .. }
+            | Mode::Volume { slot, .. } => Mode::Card(slot + 1),
+            Mode::Card(_) => Mode::Home,
+            _ => return,
+        };
+        out.push(Effect::Click);
+        self.go(back, out);
     }
 
     /// Switches a light, showing it switched until Home Assistant says.
@@ -579,6 +595,22 @@ mod tests {
         rig.lit = false;
         rig.tick();
         assert_eq!(clicks(rig.input_with_clicks(Input::Turn(CARD_STEP))), 0, "waking is silent, as nlclient's");
+    }
+
+    #[test]
+    fn a_long_press_goes_back_a_level() {
+        let mut rig = Rig::new();
+        assert!(rig.input(Input::LongPress).is_empty(), "nothing above the thermostat");
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.press();
+        assert!(matches!(rig.machine.mode, Mode::LightDim { .. }));
+        rig.turn(VALUE_STEP * 3);
+        let sent = Rig::sends(&rig.input(Input::LongPress));
+        assert_eq!(sent, vec![Command::Brightness("light.lamp".into(), 63)], "what was turned is sent on the way out");
+        assert_eq!(rig.machine.mode, Mode::Card(1), "out to the card, not the list");
+        assert_eq!(rig.input(Input::LongPress), vec![Effect::Own(false)]);
+        assert_eq!(rig.machine.mode, Mode::Home);
     }
 
     #[test]

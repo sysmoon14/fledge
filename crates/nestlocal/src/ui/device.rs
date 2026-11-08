@@ -79,10 +79,35 @@ pub fn lit() -> bool {
 }
 
 pub struct Display {
-    _file: File,
+    file: File,
     map: *mut u8,
     len: usize,
     stride: usize,
+    /// While the UI owns the display, it draws into the page that isn't
+    /// shown and then pans to it, so no frame shows half drawn.
+    flip: Option<Flip>,
+}
+
+/// The two pages, as nlclient's EGL flips between them: which one shows,
+/// which one nlclient showed (its own again when the UI is done), and the
+/// rows each lacks of the newest frame.
+struct Flip {
+    pages: [usize; 2],
+    front: usize,
+    home: usize,
+    stale: [Option<(usize, usize)>; 2],
+}
+
+const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
+const CAPTURE_REQUEST: &str = "/var/run/unfr0zen/capture.request";
+const FBIOPAN_DISPLAY: libc::c_ulong = 0x4606;
+
+fn union(a: Option<(usize, usize)>, b: Option<(usize, usize)>) -> Option<(usize, usize)> {
+    match (a, b) {
+        (Some((a0, a1)), Some((b0, b1))) => Some((a0.min(b0), a1.max(b1))),
+        (a, None) => a,
+        (None, b) => b,
+    }
 }
 
 // SAFETY: the mapping is only touched by the UI thread that owns Display.
@@ -109,13 +134,100 @@ impl Display {
         if map == libc::MAP_FAILED {
             return Err(format!("/dev/fb0: mmap: {}", std::io::Error::last_os_error()));
         }
-        Ok(Display { _file: file, map: map.cast(), len, stride })
+        Ok(Display { file, map: map.cast(), len, stride, flip: None })
+    }
+
+    /// The panning offset's row: the page shown.
+    fn pan(&self) -> usize {
+        sys("pan").ok().and_then(|s| s.split(',').nth(1)?.parse().ok()).unwrap_or(0)
     }
 
     /// The first byte of the visible page.
     fn page(&self) -> usize {
-        let y: usize = sys("pan").ok().and_then(|s| s.split(',').nth(1)?.parse().ok()).unwrap_or(0);
-        (y * self.stride).min(self.len.saturating_sub(self.stride * 480))
+        match &self.flip {
+            Some(flip) => flip.pages[flip.front] * self.stride,
+            None => (self.pan() * self.stride).min(self.len.saturating_sub(self.stride * 480)),
+        }
+    }
+
+    /// Pans the display to the page starting at row `y`.
+    fn pan_to(&mut self, y: usize) -> std::io::Result<()> {
+        let mut var = [0u32; 40];
+        // SAFETY: fb_var_screeninfo is 160 bytes; yoffset its sixth word.
+        unsafe {
+            if libc::ioctl(self.file.as_raw_fd(), FBIOGET_VSCREENINFO as _, var.as_mut_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            var[5] = y as u32;
+            if libc::ioctl(self.file.as_raw_fd(), FBIOPAN_DISPLAY as _, var.as_mut_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// The UI takes the display: from now on frames are drawn unseen and
+    /// flipped to. Without two pages it draws straight on the shown one.
+    pub fn begin(&mut self) {
+        let rows = self.len / self.stride;
+        if rows < 2 * SIDE {
+            return;
+        }
+        let pages = [0, rows / 2];
+        let home = usize::from(self.pan() >= rows / 2);
+        self.flip = Some(Flip { pages, front: home, home, stale: [Some((0, SIDE - 1)); 2] });
+    }
+
+    /// Gives the display back showing `frame` (nlclient's) on nlclient's
+    /// own page, as its EGL left it.
+    pub fn end(&mut self, frame: &[u8]) {
+        let Some(flip) = self.flip.take() else { return self.show(frame) };
+        let start = flip.pages[flip.home] * self.stride;
+        let stride = self.stride;
+        let page = &mut self.bytes()[start..];
+        for y in 0..SIDE {
+            page[y * stride..y * stride + ROW].copy_from_slice(&frame[y * ROW..(y + 1) * ROW]);
+        }
+        if let Err(e) = self.pan_to(flip.pages[flip.home]) {
+            crate::logf!("ui: pan: {e}");
+        }
+    }
+
+    /// Writes rows into the page to show next and flips to it: `rows`
+    /// those changed (None, all), each given by `each`.
+    fn present(&mut self, rows: Option<(usize, usize)>, mut each: impl FnMut(usize, &mut [u8])) {
+        let stride = self.stride;
+        let Some(flip) = self.flip.as_mut() else {
+            let start = self.page();
+            let (first, last) = rows.unwrap_or((0, SIDE - 1));
+            let page = &mut self.bytes()[start..];
+            for y in first..=last.min(SIDE - 1) {
+                each(y, &mut page[y * stride..y * stride + ROW]);
+            }
+            return;
+        };
+        let back = 1 - flip.front;
+        let all = Some((0, SIDE - 1));
+        let changed = if rows.is_none() { all } else { rows };
+        let (first, last) = union(changed, flip.stale[back]).unwrap_or((0, SIDE - 1));
+        flip.stale[back] = None;
+        flip.stale[flip.front] = union(flip.stale[flip.front], changed);
+        flip.front = back;
+        let y = flip.pages[back];
+        let start = y * stride;
+        let page = &mut self.bytes()[start..];
+        for row in first..=last.min(SIDE - 1) {
+            each(row, &mut page[row * stride..row * stride + ROW]);
+        }
+        // For tools (utils/nest-screen.py): the frame about to show, whole,
+        // where reading the framebuffer could catch the next one being drawn.
+        if std::fs::remove_file(CAPTURE_REQUEST).is_ok() {
+            let frame: Vec<u8> = (0..SIDE).flat_map(|row| page[row * stride..row * stride + ROW].to_vec()).collect();
+            let _ = crate::settings_ui::publish("capture.raw", &frame);
+        }
+        if let Err(e) = self.pan_to(y) {
+            crate::logf!("ui: pan: {e}");
+        }
     }
 
     fn bytes(&mut self) -> &mut [u8] {
@@ -134,25 +246,21 @@ impl Display {
         frame
     }
 
-    /// Shows a Frame on the visible page.
+    /// Shows a Frame.
     pub fn show(&mut self, frame: &[u8]) {
-        self.rows(|y, row| row.copy_from_slice(&frame[y * ROW..(y + 1) * ROW]));
+        self.present(None, |y, row| row.copy_from_slice(&frame[y * ROW..(y + 1) * ROW]));
     }
 
-    /// Shows rows `first` to `last` of a Frame: what changed.
+    /// Shows a Frame of which only rows `first` to `last` changed.
     pub fn show_rows(&mut self, frame: &[u8], first: usize, last: usize) {
-        let (start, stride) = (self.page(), self.stride);
-        let page = &mut self.bytes()[start..];
-        for y in first..=last.min(SIDE - 1) {
-            page[y * stride..y * stride + ROW].copy_from_slice(&frame[y * ROW..(y + 1) * ROW]);
-        }
+        self.present(Some((first, last)), |y, row| row.copy_from_slice(&frame[y * ROW..(y + 1) * ROW]));
     }
 
     /// `from` sliding out and `to` in by `by` pixels of 480, sideways as the
     /// display stands: the framebuffer's rows, as it is mounted turned.
     pub fn slide(&mut self, from: &[u8], to: &[u8], by: usize, clockwise: bool) {
         let by = by.min(SIDE);
-        self.rows(|y, row| {
+        self.present(None, |y, row| {
             let (source, at) = if clockwise {
                 if y + by < SIDE { (from, y + by) } else { (to, y + by - SIDE) }
             } else if y >= by { (from, y - by) } else { (to, y + SIDE - by) };
@@ -163,7 +271,7 @@ impl Display {
     /// `to` over `from` at `alpha` of 256.
     pub fn fade(&mut self, from: &[u8], to: &[u8], alpha: u16) {
         let alpha = alpha.min(256);
-        self.rows(|y, row| {
+        self.present(None, |y, row| {
             let (a, b) = (&from[y * ROW..(y + 1) * ROW], &to[y * ROW..(y + 1) * ROW]);
             for ((out, &a), &b) in row.iter_mut().zip(a).zip(b) {
                 *out = ((a as u16 * (256 - alpha) + b as u16 * alpha) >> 8) as u8;
@@ -171,13 +279,6 @@ impl Display {
         });
     }
 
-    fn rows(&mut self, mut each: impl FnMut(usize, &mut [u8])) {
-        let (start, stride) = (self.page(), self.stride);
-        let page = &mut self.bytes()[start..];
-        for y in 0..SIDE {
-            each(y, &mut page[y * stride..y * stride + ROW]);
-        }
-    }
 }
 
 /// The display's side, and a framebuffer row of it in bytes.
