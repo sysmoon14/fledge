@@ -1,0 +1,202 @@
+blueprint:
+  name: Nest home screen cards (unfr0zen)
+  description: >-
+    Puts Home Assistant on a Nest thermostat running unfr0zen. Turning the
+    ring moves from the thermostat to a card for your lights, one for each
+    other thermostat and one for each media player; pressing controls the
+    card. Icons and light colours come from Home Assistant. Change any of it
+    here, with no new build for the thermostat.
+  domain: automation
+  source_url: https://github.com/sysmoon14/unfr0zen/blob/ben/integrations/home-assistant/nest_ui.yaml
+  input:
+    thermostat:
+      name: Thermostat
+      description: The Nest thermostat running unfr0zen's nestlocal, with MQTT.
+      selector:
+        device:
+          filter:
+            - integration: mqtt
+              manufacturer: Google Nest
+    lights_name:
+      name: Lights card name
+      default: Lights
+      selector:
+        text:
+    lights_icon:
+      name: Lights card icon
+      default: mdi:lightbulb-group
+      selector:
+        icon:
+    lights:
+      name: Lights
+      description: >-
+        Listed on the lights card in this order. Lights with brightness dim
+        with the ring.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain:
+                - light
+                - switch
+                - input_boolean
+                - fan
+    climates:
+      name: Other thermostats
+      description: Each gets a card; pressing sets its temperature with the ring.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: climate
+    media:
+      name: Media players
+      description: Each gets a card; pressing turns the ring into its volume.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: media_player
+
+# nestlocal keeps the cards retained on nestlocal/<serial>/set/ui, so they are
+# published again whenever anything on them changes. The thermostat asks for
+# changes on nestlocal/<serial>/ui/command:
+#   {"id": "light.x", "action": "on"|"off"|"brightness"|"temperature"|"volume"|"play_pause",
+#    "value": <number>}
+# Only the entities chosen here can be changed from it, and only that way.
+mode: queued
+max: 30
+triggers:
+  - trigger: state
+    entity_id: !input lights
+  - trigger: state
+    entity_id: !input climates
+  - trigger: state
+    entity_id: !input media
+  - trigger: homeassistant
+    event: start
+  - trigger: event
+    event_type: automation_reloaded
+  - trigger: mqtt
+    topic: nestlocal/+/ui/command
+    id: command
+variables:
+  thermostat: !input thermostat
+  lights: !input lights
+  climates: !input climates
+  media: !input media
+  lights_name: !input lights_name
+  lights_icon: !input lights_icon
+  serial: "{{ device_attr(thermostat, 'serial_number') }}"
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: command
+          - condition: template
+            value_template: >-
+              {{ trigger.topic.split('/')[1] == serial
+                 and trigger.payload_json is mapping
+                 and trigger.payload_json.get('id') in lights + climates + media }}
+        sequence:
+          - variables:
+              entity: "{{ trigger.payload_json.id }}"
+              what: "{{ trigger.payload_json.get('action', '') }}"
+              value: "{{ trigger.payload_json.get('value', 0) | float(0) }}"
+          - choose:
+              - conditions: "{{ entity in lights and what == 'off' }}"
+                sequence:
+                  - action: homeassistant.turn_off
+                    target:
+                      entity_id: "{{ entity }}"
+              - conditions: "{{ entity in lights and what == 'on' }}"
+                sequence:
+                  - action: homeassistant.turn_on
+                    target:
+                      entity_id: "{{ entity }}"
+              - conditions: "{{ entity in lights and what == 'brightness' and entity.startswith('light.') and 1 <= value <= 100 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ entity }}"
+                    data:
+                      brightness_pct: "{{ value | int }}"
+              - conditions: "{{ entity in climates and what == 'temperature' and 5 <= value <= 35 }}"
+                sequence:
+                  - action: climate.set_temperature
+                    target:
+                      entity_id: "{{ entity }}"
+                    data:
+                      temperature: "{{ value }}"
+              - conditions: "{{ entity in media and what == 'volume' and 0 <= value <= 100 }}"
+                sequence:
+                  - action: media_player.volume_set
+                    target:
+                      entity_id: "{{ entity }}"
+                    data:
+                      volume_level: "{{ value / 100 }}"
+              - conditions: "{{ entity in media and what == 'play_pause' }}"
+                sequence:
+                  - action: media_player.media_play_pause
+                    target:
+                      entity_id: "{{ entity }}"
+    default:
+      # The cards. A light's colour is its rgb_color, which Home Assistant
+      # also gives colour-temperature lights; brightness is in percent, 1 at
+      # least while it is on.
+      - action: mqtt.publish
+        data:
+          topic: "nestlocal/{{ serial }}/set/ui"
+          retain: true
+          payload: >-
+            {%- set ns = namespace(cards=[], items=[]) -%}
+            {%- for entity in lights[:8] -%}
+              {%- set modes = state_attr(entity, 'supported_color_modes') or [] -%}
+              {%- set level = state_attr(entity, 'brightness') -%}
+              {%- set rgb = state_attr(entity, 'rgb_color') -%}
+              {%- set ns.items = ns.items + [{
+                    'id': entity,
+                    'name': state_attr(entity, 'friendly_name') or entity,
+                    'icon': state_attr(entity, 'icon') or '',
+                    'on': is_state(entity, 'on'),
+                    'dimmable': entity.startswith('light.')
+                                and modes | reject('in', ['onoff', 'unknown']) | list | count > 0,
+                    'brightness': [(level * 100 / 255) | round(0) | int, 1] | max
+                                  if level is number and is_state(entity, 'on') else none,
+                    'rgb': rgb | list if rgb else none
+                  }] -%}
+            {%- endfor -%}
+            {%- if ns.items -%}
+              {%- set ns.cards = ns.cards + [{'kind': 'lights', 'name': lights_name,
+                                              'icon': lights_icon, 'lights': ns.items}] -%}
+            {%- endif -%}
+            {%- for entity in climates -%}
+              {%- set ns.cards = ns.cards + [{
+                    'kind': 'climate', 'id': entity,
+                    'name': state_attr(entity, 'friendly_name') or entity,
+                    'icon': state_attr(entity, 'icon') or '',
+                    'mode': states(entity),
+                    'action': state_attr(entity, 'hvac_action') or '',
+                    'target': state_attr(entity, 'temperature'),
+                    'current': state_attr(entity, 'current_temperature'),
+                    'min': state_attr(entity, 'min_temp') or 7,
+                    'max': state_attr(entity, 'max_temp') or 30,
+                    'step': state_attr(entity, 'target_temp_step') or 0.5
+                  }] -%}
+            {%- endfor -%}
+            {%- for entity in media -%}
+              {%- set volume = state_attr(entity, 'volume_level') -%}
+              {%- set ns.cards = ns.cards + [{
+                    'kind': 'media', 'id': entity,
+                    'name': state_attr(entity, 'friendly_name') or entity,
+                    'icon': state_attr(entity, 'icon') or '',
+                    'state': states(entity),
+                    'title': state_attr(entity, 'media_title') or '',
+                    'artist': state_attr(entity, 'media_artist') or '',
+                    'volume': (volume * 100) | round(0) | int if volume is number else none
+                  }] -%}
+            {%- endfor -%}
+            {{ {'cards': ns.cards} | to_json }}

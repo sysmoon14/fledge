@@ -3356,6 +3356,7 @@ dependencies = [
 name = "nestlocal"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "aes",
  "async-channel",
  "async-io",
@@ -3371,9 +3372,11 @@ dependencies = [
  "hyper",
  "hyper-util",
  "if-addrs",
+ "kurbo",
  "libc",
  "log",
  "md-5",
+ "miniz_oxide 0.8.9",
  "png 0.17.16",
  "rand 0.10.3",
  "ring",
@@ -3383,6 +3386,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "tiny-skia",
  "tokio",
  "tokio-rustls",
  "webpki-roots",

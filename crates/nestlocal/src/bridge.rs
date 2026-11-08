@@ -56,6 +56,8 @@ pub struct Bridge {
     sensors: std::sync::atomic::AtomicBool, // motion.rs follows nlclient's log
     /// Home Assistant's lights, for the UNFR0ZEN screen (lights.rs).
     pub lights: crate::lights::Lights,
+    /// Home Assistant's home screen cards (ui/).
+    pub ui: Arc<crate::ui::Ui>,
     /// The releases the update entity offers, with -update-repo (update.rs).
     updates: OnceLock<crate::update::Updates>,
     /// This bridge, for what a command starts that outlives it.
@@ -82,6 +84,7 @@ impl Bridge {
             time_ok_rx: Mutex::new(Some(time_ok_rx)),
             sensors: std::sync::atomic::AtomicBool::new(false),
             lights: Default::default(),
+            ui: Default::default(),
             updates: OnceLock::new(),
             me: me.clone(),
         })
@@ -885,6 +888,15 @@ pub fn state(dev: &Fields, sh: &Fields) -> Fields {
     s
 }
 
+/// The home screen cards' commands, to Home Assistant's nest_ui blueprint.
+impl crate::ui::Sender for Bridge {
+    fn send(&self, command: &crate::ui::Command) {
+        let payload = command.payload().to_string();
+        logf!("ui: {payload}");
+        self.publish(&format!("{}/ui/command", self.base), false, payload.as_bytes());
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -1254,3 +1266,4 @@ pub mod tests {
         assert_eq!(serde_json::from_slice::<Value>(&payload).unwrap()["unique_id"], json!("nestlocal_s_leaf"));
     }
 }
+

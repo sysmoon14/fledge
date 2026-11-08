@@ -88,6 +88,12 @@ impl Bridge {
             }
             return;
         }
+        if name == "ui" {
+            if let Err(e) = self.ui.configure(payload) {
+                logf!("mqtt: ui: {e}");
+            }
+            return;
+        }
         if name == "lights" {
             if let Err(e) = self.lights.configure(payload) {
                 logf!("mqtt: lights: {e}");

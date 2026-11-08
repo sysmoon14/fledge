@@ -10,6 +10,11 @@ aes = "0.9"
 bytes = "1"
 ccm = "0.6"
 png = "0.17"
+# The home screen cards (ui/): drawing, the unit's own fonts, icons' SVG paths.
+ab_glyph = "0.2"
+kurbo = "0.13"
+miniz_oxide = "0.8"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 http-body = "1"
 http-body-util = "0.1"

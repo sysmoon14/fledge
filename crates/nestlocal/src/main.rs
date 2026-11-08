@@ -29,6 +29,7 @@ mod store;
 mod settings_ui;
 mod structure;
 mod thread_sleep;
+mod ui;
 mod update;
 mod wake;
 mod weather;
@@ -235,6 +236,9 @@ async fn run(config: flags::Config) {
     if let Err(e) = settings_ui::init(config.matter, config.zigbee, config.doom) { logf!("settings UI: {e}"); }
     if config.doom {
         doom::start();
+    }
+    if let (Some(bridge), true) = (&bridge, device::current().display == 480) {
+        ui::start(bridge.ui.clone(), bridge.clone());
     }
     if let (true, Some(bridge)) = (config.zigbee, &bridge) {
         zigbee::start(bridge.clone(), config.zigbee_store.clone().into());
