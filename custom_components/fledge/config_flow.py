@@ -11,18 +11,21 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
 from homeassistant.helpers.service_info.mqtt import MqttServiceInfo
 
-from .const import CONF_AREAS, CONF_CLIMATES, CONF_MEDIA, CONF_SERIAL, DOMAIN, TOPIC_PREFIX
+from .const import CONF_AREAS, CONF_CLIMATES, CONF_EXCLUDE, CONF_MEDIA, CONF_SERIAL, DOMAIN, TOPIC_PREFIX
 
 
 def thermostats(hass: HomeAssistant) -> dict[str, dr.DeviceEntry]:
     """Nests running Fledge that Home Assistant knows, by serial: the devices
     nestlocal announces over MQTT discovery."""
     found = {}
-    for device in dr.async_get(hass).devices.values():
-        for domain, identifier in device.identifiers:
-            if domain == "mqtt" and identifier.startswith("nestlocal_"):
-                serial = device.serial_number or identifier.removeprefix("nestlocal_").upper()
-                found[serial] = device
+    devices = dr.async_get(hass)
+    for mqtt_entry in hass.config_entries.async_entries("mqtt"):
+        for device in dr.async_entries_for_config_entry(devices, mqtt_entry.entry_id):
+            # An identifier is (domain, id), or longer for some integrations.
+            for identifier in device.identifiers:
+                if len(identifier) >= 2 and identifier[0] == "mqtt" and str(identifier[1]).startswith("nestlocal_"):
+                    serial = device.serial_number or str(identifier[1]).removeprefix("nestlocal_").upper()
+                    found[serial] = device
     return found
 
 
@@ -39,6 +42,8 @@ def _cards_schema(hass: HomeAssistant, serial: str, current: dict[str, Any]) -> 
     return vol.Schema({
         vol.Optional(CONF_AREAS, default=current.get(CONF_AREAS, [])):
             selector.AreaSelector(selector.AreaSelectorConfig(multiple=True)),
+        vol.Optional(CONF_EXCLUDE, default=current.get(CONF_EXCLUDE, [])):
+            selector.EntitySelector(selector.EntitySelectorConfig(domain="light", multiple=True)),
         vol.Optional(CONF_CLIMATES, default=current.get(CONF_CLIMATES, [])):
             selector.EntitySelector(selector.EntitySelectorConfig(domain="climate", multiple=True,
                                                                   exclude_entities=own)),

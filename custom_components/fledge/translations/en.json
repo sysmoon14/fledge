@@ -19,12 +19,14 @@
         "data": {
           "areas": "Rooms whose lights it shows",
           "climates": "Other thermostats",
-          "media": "Media players"
+          "media": "Media players",
+          "exclude": "Lights to leave out"
         },
         "data_description": {
           "areas": "Each room becomes a lights card with the room's lights.",
           "climates": "Heating zones or other thermostats to set from this one.",
-          "media": "Speakers whose volume the ring sets."
+          "media": "Speakers whose volume the ring sets.",
+          "exclude": "Lights in those rooms not to list, such as a screen's backlight."
         }
       }
     },
@@ -42,12 +44,14 @@
         "data": {
           "areas": "Rooms whose lights it shows",
           "climates": "Other thermostats",
-          "media": "Media players"
+          "media": "Media players",
+          "exclude": "Lights to leave out"
         },
         "data_description": {
           "areas": "Each room becomes a lights card with the room's lights.",
           "climates": "Heating zones or other thermostats to set from this one.",
-          "media": "Speakers whose volume the ring sets."
+          "media": "Speakers whose volume the ring sets.",
+          "exclude": "Lights in those rooms not to list, such as a screen's backlight."
         }
       }
     }

@@ -22,8 +22,8 @@ from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.event import async_track_state_change_event
 
 from . import cards
-from .const import (CARDS_TOPIC, COMMAND_TOPIC, CONF_AREAS, CONF_CLIMATES, CONF_MEDIA, CONF_SERIAL,
-                    TOPIC_PREFIX)
+from .const import (CARDS_TOPIC, COMMAND_TOPIC, CONF_AREAS, CONF_CLIMATES, CONF_EXCLUDE, CONF_MEDIA,
+                    CONF_SERIAL, TOPIC_PREFIX)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,6 +99,7 @@ class Thermostat:
         icon, its lights by name."""
         areas, devices, entities = ar.async_get(self.hass), dr.async_get(self.hass), er.async_get(self.hass)
         rooms = []
+        left_out = set(self.entry.options.get(CONF_EXCLUDE, []))
         for area_id in self.entry.options.get(CONF_AREAS, []):
             area = areas.async_get_area(area_id)
             if area is None:
@@ -108,8 +109,8 @@ class Thermostat:
                 for e in er.async_entries_for_device(entities, device.id):
                     if e.area_id in (None, area_id):
                         found.setdefault(e.entity_id, e)
-            lights = [e for e in found.values()
-                      if e.domain == "light" and not e.disabled_by and not e.hidden_by]
+            lights = [e for e in found.values() if e.domain == "light" and not e.disabled_by
+                      and not e.hidden_by and e.entity_id not in left_out]
             lights.sort(key=lambda e: (e.name or e.original_name or e.entity_id).lower())
             rooms.append(cards.LightsCard(area.name, area.icon or "mdi:lightbulb-group",
                                           [e.entity_id for e in lights]))

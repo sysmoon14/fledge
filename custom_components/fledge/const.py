@@ -9,6 +9,7 @@ CONF_SERIAL = "serial"
 CONF_AREAS = "areas"
 CONF_CLIMATES = "climates"
 CONF_MEDIA = "media"
+CONF_EXCLUDE = "exclude"
 
 # The cards the thermostat shows (retained) and what it asks for.
 CARDS_TOPIC = "{prefix}/{serial}/set/ui"

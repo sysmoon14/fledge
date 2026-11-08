@@ -77,7 +77,10 @@ def _thermostat(hass: HomeAssistant) -> dr.DeviceEntry:
 
 
 async def test_choosing_the_thermostat_and_its_cards(hass: HomeAssistant, mqtt_mock) -> None:
-    _thermostat(hass)
+    thermostat = _thermostat(hass)
+    # Other MQTT devices, one with an identifier of three parts.
+    dr.async_get(hass).async_get_or_create(config_entry_id=next(iter(thermostat.config_entries)),
+                                           identifiers={("mqtt", "zigbee2mqtt_0x1", "extra")}, name="Other")
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "user"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"serial": SERIAL})
@@ -119,14 +122,14 @@ def _published(mqtt_mock) -> list:
 async def test_a_room_s_lights_are_kept_on_the_thermostat(hass: HomeAssistant, mqtt_mock) -> None:
     bedroom = ar.async_get(hass).async_create("Bedroom", icon="mdi:bed")
     entities = er.async_get(hass)
-    for name in ("lamp", "ceiling"):
+    for name in ("lamp", "ceiling", "screen"):
         entities.async_get_or_create("light", "test", name, suggested_object_id=name)
         entities.async_update_entity(f"light.{name}", area_id=bedroom.id)
     hass.states.async_set("light.lamp", "on", {"friendly_name": "Lamp", "brightness": 255,
                                                "supported_color_modes": ["brightness"]})
     hass.states.async_set("light.ceiling", "off", {"friendly_name": "Ceiling"})
     entry = MockConfigEntry(domain=DOMAIN, unique_id=SERIAL, data={"serial": SERIAL},
-                            options={"areas": [bedroom.id], "climates": [], "media": []})
+                            options={"areas": [bedroom.id], "exclude": ["light.screen"], "climates": [], "media": []})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
