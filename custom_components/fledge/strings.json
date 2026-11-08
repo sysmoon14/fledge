@@ -1,0 +1,55 @@
+{
+  "config": {
+    "flow_title": "Nest {serial}",
+    "step": {
+      "user": {
+        "title": "Fledge",
+        "description": "Choose the Nest thermostat running Fledge. It has to be connected to Home Assistant over MQTT first.",
+        "data": {
+          "serial": "Thermostat"
+        }
+      },
+      "confirm": {
+        "title": "Fledge",
+        "description": "A Nest thermostat running Fledge was found (serial {serial}). Put Home Assistant on its screen?"
+      },
+      "cards": {
+        "title": "What the thermostat shows",
+        "description": "Turning the ring moves from the thermostat to these cards: one for each room's lights, then each other thermostat and media player. Change them any time from Configure.",
+        "data": {
+          "areas": "Rooms whose lights it shows",
+          "climates": "Other thermostats",
+          "media": "Media players"
+        },
+        "data_description": {
+          "areas": "Each room becomes a lights card with the room's lights.",
+          "climates": "Heating zones or other thermostats to set from this one.",
+          "media": "Speakers whose volume the ring sets."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This thermostat is already set up.",
+      "no_thermostats": "No Nest running Fledge was found. Connect it to Home Assistant over MQTT first.",
+      "not_fledge": "This isn't a thermostat running Fledge."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "What the thermostat shows",
+        "description": "Turning the ring moves from the thermostat to these cards: one for each room's lights, then each other thermostat and media player.",
+        "data": {
+          "areas": "Rooms whose lights it shows",
+          "climates": "Other thermostats",
+          "media": "Media players"
+        },
+        "data_description": {
+          "areas": "Each room becomes a lights card with the room's lights.",
+          "climates": "Heating zones or other thermostats to set from this one.",
+          "media": "Speakers whose volume the ring sets."
+        }
+      }
+    }
+  }
+}
