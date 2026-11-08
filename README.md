@@ -1,9 +1,12 @@
-# unfr0zen
-[![Build](https://dl.circleci.com/status-badge/img/gh/unfr0zen/unfr0zen/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/unfr0zen/unfr0zen/tree/main)
-[![GitHub Release](https://img.shields.io/github/v/release/unfr0zen/unfr0zen?include_prereleases&color=06b6d4)](https://github.com/unfr0zen/unfr0zen/releases)
-[![GitHub License](https://img.shields.io/github/license/unfr0zen/unfr0zen?v=1)](LICENSE)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/4YC7Yj3Tx)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-donate-yellow.svg)](https://buymeacoffee.com/willtm)
+# fledge
+[![GitHub Release](https://img.shields.io/github/v/release/sysmoon14/fledge?include_prereleases&color=06b6d4)](https://github.com/sysmoon14/fledge/releases)
+[![GitHub License](https://img.shields.io/github/license/sysmoon14/fledge?v=1)](LICENSE)
+
+Fledge started as a fork of [unfr0zen](https://github.com/unfr0zen/unfr0zen), by
+willtm and its contributors, and has grown its own way: Home Assistant on the
+thermostat's own screen, signed updates from Home Assistant, and more. The app,
+its executable and the paths on the thermostat keep unfr0zen's names for now, so
+units and backups made with either keep working.
 
 Root and free the Nest Learning Thermostat (1st, 2nd and 3rd generation) over USB.
 Local control over MQTT, Matter (Wi-Fi, Thread) or Zigbee, no Google cloud needed.
@@ -16,7 +19,7 @@ Local control over MQTT, Matter (Wi-Fi, Thread) or Zigbee, no Google cloud neede
 > test.
 >
 > Claude Code has been used to speed up the app's GUI, the documentation and the
-> tests. unfr0zen comes **without any warranty**: you use it at your own risk
+> tests. Fledge comes **without any warranty**: you use it at your own risk
 > ([Disclaimers](#disclaimers)).
 
 <picture>
@@ -26,7 +29,7 @@ Local control over MQTT, Matter (Wi-Fi, Thread) or Zigbee, no Google cloud neede
 
 ## What you get
 
-| | Stock | With unfr0zen |
+| | Stock | With Fledge |
 |-|-|-|
 | Control from | the Nest/Google Home app, through Google's cloud | Home Assistant or any MQTT client, Matter controller or Zigbee coordinator, on your network |
 | Internet access | required | not needed: the unit only has to join your Wi-Fi |
@@ -63,7 +66,7 @@ network doesn't need internet access.
 2. **Windows (x86_64, arm64), macOS 13+ (universal, arm64, x86_64) or Linux (x86_64, arm64, riscv64; glibc 2.28+).**
 
 ## Install
-Download the latest build from the [releases page](https://github.com/unfr0zen/unfr0zen/releases).
+Download the latest build from the [releases page](https://github.com/sysmoon14/fledge/releases).
 
 - **Windows:** unzip and run `unfr0zen.exe`. 1st and 2nd generation: bind the WinUSB
   driver to the boot ROM (`0451:d00e`) once with [Zadig](https://zadig.akeo.ie).
@@ -146,7 +149,7 @@ Common options:
   --matter-thread       Serve Matter over Thread too (replaces Heat Link; excludes --zigbee)
   --zigbee              Join a Zigbee network as a router (replaces Heat Link)
   --external-temperature  Regulate from temperatures sent to it; turns off Bluetooth (3rd generation)
-  --doom                Install Doom, launched from UNFR0ZEN → Doom
+  --doom                Install Doom, launched from FLEDGE → Doom
   --ssh                 Run an SSH server on the unit
   --block-cloud         Cut the unit off from Nest's and Google's servers
 ```

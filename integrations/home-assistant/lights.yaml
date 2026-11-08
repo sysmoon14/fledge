@@ -1,7 +1,7 @@
 blueprint:
-  name: Nest lights (unfr0zen)
+  name: Nest lights (Fledge)
   description: >-
-    Puts lights on a Nest thermostat running unfr0zen: Settings → UNFR0ZEN →
+    Puts lights on a Nest thermostat running Fledge: Settings → FLEDGE →
     Lights lists them. Pressing an on/off light toggles it; a dimmable one
     opens a page where turning the ring sets its brightness and pressing
     toggles it. Change the lights here at any time, with no new build for

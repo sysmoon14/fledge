@@ -895,7 +895,7 @@ static int draw_common(void *base, void *context) {
     return draw((u8 *)base - COMMON_OFFSET, context);
 }
 static void title(void *screen) {
-    native_string_copy((nl_string *)((u8 *)screen + 0x54), "\nUNFR0ZEN");
+    native_string_copy((nl_string *)((u8 *)screen + 0x54), "\nFLEDGE");
     native_string_copy((nl_string *)((u8 *)screen + 0x70), "");
     native_rebuild_title(screen);
 }
