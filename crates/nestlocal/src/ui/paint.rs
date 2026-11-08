@@ -558,6 +558,29 @@ fn icon_mask(icon: Icon, size: f32) -> (usize, Vec<u8>) {
     (side as usize, pixmap.data().as_chunks::<4>().0.iter().map(|p| p[3]).collect())
 }
 
+/// Dims the whole canvas to `keep` of its brightness: under a menu.
+pub fn dim(canvas: &mut Canvas, keep: f32) {
+    let keep = (keep.clamp(0.0, 1.0) * 256.0) as u16;
+    for pixel in canvas.pixmap.data_mut().as_chunks_mut::<4>().0 {
+        for channel in &mut pixel[..3] {
+            *channel = ((*channel as u16 * keep) >> 8) as u8;
+        }
+    }
+}
+
+/// A hint on a frame for the panel (device::Frame): a pill low on the
+/// display, its text centred.
+pub fn hint(frame: &mut Vec<u8>, fonts: &Fonts, text: &str) {
+    let Some(pixmap) = Pixmap::from_vec(std::mem::take(frame), tiny_skia::IntSize::from_wh(SIZE, SIZE).expect("480")) else {
+        return;
+    };
+    let mut canvas = Canvas { pixmap, panel: true };
+    let width = measure(&fonts.medium, 15.0, text, 0.2) + 28.0;
+    pill(&mut canvas, CENTRE - width / 2.0, 424.0, width, 30.0, Color::from_rgba8(36, 38, 42, 255));
+    self::text(&mut canvas, &fonts.medium, 15.0, CENTRE, 444.0, text, 0.2, [230, 233, 238]);
+    *frame = canvas.pixmap.take();
+}
+
 /// Where the cards are: a dot each along the bottom, `active` white.
 pub fn dots(canvas: &mut Canvas, count: usize, active: usize, on: [u8; 3]) {
     if count < 2 {

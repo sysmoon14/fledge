@@ -8,6 +8,34 @@ use serde_json::{json, Value};
 pub struct Cards {
     #[serde(default)]
     pub cards: Vec<Card>,
+    /// What the thermostat wakes to: "chooser" (the default), "thermostat",
+    /// or a card's place in `cards`, opened.
+    #[serde(default)]
+    wake: Option<serde_json::Value>,
+}
+
+/// What waking shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Wake {
+    /// The cards, zoomed out on the thermostat.
+    Chooser,
+    /// The thermostat, its ring setting the temperature: the Nest as it was.
+    Thermostat,
+    /// A card, opened.
+    Card(usize),
+}
+
+impl Cards {
+    pub fn wake(&self) -> Wake {
+        match &self.wake {
+            Some(Value::String(s)) if s == "thermostat" => Wake::Thermostat,
+            Some(Value::Number(n)) => match n.as_u64() {
+                Some(i) if (i as usize) < self.cards.len() => Wake::Card(i as usize),
+                _ => Wake::Chooser,
+            },
+            _ => Wake::Chooser,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -176,6 +204,10 @@ mod tests {
         let Card::Climate(climate) = &cards.cards[1] else { panic!() };
         assert_eq!(climate.target, Some(19.0));
         assert_eq!(Cards::parse(b"").unwrap(), Cards::default());
+        assert_eq!(cards.wake(), Wake::Chooser, "the chooser by default");
+        let wake = |w: &str| Cards::parse(format!(r#"{{"cards":[{{"kind":"climate","id":"climate.x"}}],"wake":{w}}}"#).as_bytes()).unwrap().wake();
+        assert_eq!((wake(r#""thermostat""#), wake("0"), wake("5"), wake(r#""chooser""#)),
+                   (Wake::Thermostat, Wake::Card(0), Wake::Chooser, Wake::Chooser));
         assert!(Cards::parse(b"{").is_err());
     }
 

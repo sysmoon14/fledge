@@ -166,6 +166,15 @@ impl Display {
         Ok(())
     }
 
+    /// Whether the display shows a page other than the UI's own last frame:
+    /// waking can pan it back to nlclient's.
+    pub fn lost(&self) -> bool {
+        match &self.flip {
+            Some(flip) => self.pan() != flip.pages[flip.front],
+            None => false,
+        }
+    }
+
     /// The UI takes the display: from now on frames are drawn unseen and
     /// flipped to. Without two pages it draws straight on the shown one.
     pub fn begin(&mut self) {

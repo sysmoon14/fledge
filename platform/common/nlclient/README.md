@@ -68,14 +68,14 @@ live (`kill(pid, 0)` on every frame), so the display returns to nlclient the
 moment the owner exits or dies; a stale file does nothing.
 
 nestlocal's home screen cards (`crates/nestlocal/src/ui/`) use this. With
-cards from Home Assistant (`integrations/home-assistant/nest_ui.yaml`), it
-holds the ring and button while nlclient's home dial shows: turning moves to
-the cards, which it draws on the visible framebuffer page; pressing on the
-thermostat hands the ring back to nlclient for the temperature, and Nest
-settings opens nlclient's menu. Net-zero ring reports (+1, −1) keep nlclient's
-display awake while a card shows, and wake it from dark. Without cards, or
-while nlclient is stopped (Doom), nothing is held and the unit behaves as
-stock.
+cards from Home Assistant (the Fledge integration, `custom_components/fledge`),
+waking the unit shows the device chooser: the thermostat among the cards,
+zoomed out (or the device Fledge was told to wake to). Turning browses,
+pressing opens; the thermostat hands the ring back to nlclient, and choosing
+Back in nlclient's menu returns to the chooser. While a card shows, a thread
+inside nlclient keeps its display awake; no ring input is ever injected.
+Without cards, or while nlclient is stopped (Doom), nothing is held and the
+unit behaves as stock.
 
 ## Runtime and build requirements
 

@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use model::Command;
-use machine::{Effect, Input, Machine, Mode, Slot};
+use machine::{Action, Effect, Input, Machine, Mode, Slot};
 use model::{Card, Cards};
 use screens::{Position, Screen};
 
@@ -122,9 +122,17 @@ struct Runtime {
     last_frame: Instant,
     last_check: Instant,
     nlclient: bool,
-    /// When the button went down, and whether its hold was taken as a
-    /// long press.
-    pressed: Option<(Instant, bool)>,
+    /// When the button went down, whether its hold was taken as a long
+    /// press, and whether the display was lit then.
+    pressed: Option<(Instant, bool, bool)>,
+    /// On nlclient's screens: whether its menu's Back was chosen as the
+    /// button went down, and since when the press has waited for its dial.
+    back_chosen: bool,
+    back_since: Option<Instant>,
+    /// nlclient's dial as it last showed lit, and when: the thermostat's
+    /// card when the display wakes, its own page dark until nlclient draws.
+    dial: Option<device::Frame>,
+    last_dial: Instant,
     /// Frames of the animation under way: how many, how long all told, the
     /// longest.
     frames: (u32, Duration, Duration),
@@ -148,7 +156,7 @@ impl Runtime {
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
-            pressed: None,
+            pressed: None, back_chosen: false, back_since: None, dial: None, last_dial: now - Duration::from_secs(60),
         }
     }
 
@@ -157,7 +165,7 @@ impl Runtime {
         hold_state(false);
         loop {
             // A frame each 8 ms while anything moves; otherwise input or time.
-            let wait = if self.animating() || self.pressed.is_some() { 8 } else { 50 };
+            let wait = if self.animating() || self.pressed.is_some() || self.back_since.is_some() { 8 } else { 50 };
             let events = self.input.wait(Duration::from_millis(wait));
             let now = Instant::now();
             let mut effects = Vec::new();
@@ -182,34 +190,68 @@ impl Runtime {
                     (device::EV_REL, device::REL_DIAL, value) => Input::Turn(-value),
                     // A press is taken when the button comes up, unless it was
                     // held long enough to be a long press.
+                    // Whether the display was lit is taken as the button goes
+                    // down: pressing it lights the display before it comes up.
                     (device::EV_KEY, device::KEY_ENTER, 1) => {
-                        self.pressed = Some((now, false));
+                        self.pressed = Some((now, false, lit));
+                        if self.machine.mode == Mode::Native {
+                            self.back_chosen = back_chosen(&self.display.save());
+                        }
                         continue;
                     }
                     (device::EV_KEY, device::KEY_ENTER, 0) => match self.pressed.take() {
-                        Some((_, false)) => Input::Press,
+                        Some((_, false, was_lit)) => {
+                            if self.machine.mode == Mode::Native && std::mem::take(&mut self.back_chosen) {
+                                self.back_since = Some(now);
+                            }
+                            self.machine.input(Input::Press, now, was_lit, &mut effects);
+                            continue;
+                        }
                         _ => continue,
                     },
                     _ => continue,
                 };
                 self.machine.input(input, now, lit, &mut effects);
             }
-            if let Some((down, false)) = self.pressed {
+            if let Some((down, false, was_lit)) = self.pressed {
                 if now.duration_since(down) >= LONG_PRESS {
-                    self.pressed = Some((down, true));
-                    self.machine.input(Input::LongPress, now, lit, &mut effects);
+                    self.pressed = Some((down, true, was_lit));
+                    self.machine.input(Input::LongPress, now, was_lit, &mut effects);
+                }
+            }
+            if let Some(since) = self.back_since {
+                // Back pressed in nlclient's menu: once its dial shows, the cards.
+                if self.machine.mode != Mode::Native || now.duration_since(since) > Duration::from_millis(1500) {
+                    self.back_since = None;
+                } else if now.duration_since(since) > Duration::from_millis(250) && home_dial(&mut self.display) {
+                    self.back_since = None;
+                    self.machine.input(Input::NativeBack, now, lit, &mut effects);
                 }
             }
             let display = &mut self.display;
             self.machine.tick(now, lit, &mut || home_dial(display), &mut effects);
             self.transition = transition(&before, &self.machine.mode, turned && lit);
+            if std::mem::take(&mut self.machine.woke) {
+                // Woken: the thermostat as it lit, zooming out to the cards.
+                self.zoom = 1.0;
+                self.transition = Transition::Cut;
+            }
+            if matches!(before, Mode::Chooser(_)) && !matches!(self.machine.mode, Mode::Chooser(_) | Mode::Home) {
+                // Opened: into the card before what it opens shows.
+                self.zoom_in();
+            }
             for effect in effects {
                 self.apply(effect);
             }
             let elapsed = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
             self.last_frame = now;
             let swept = self.sweep(elapsed);
-            let dirty = self.machine.take_dirty();
+            let mut dirty = self.machine.take_dirty();
+            if self.machine.owns() && self.display.lost() {
+                // The display was panned away (as it lit): show the UI again, whole.
+                dirty = true;
+                self.live = None;
+            }
             if dirty && self.machine.position().is_none() {
                 // A light switched in a list shows on its card.
                 self.cards.clear();
@@ -234,6 +276,15 @@ impl Runtime {
             } else {
                 self.view = None;
                 self.zoom = 1.0;
+            }
+            if matches!(self.machine.mode, Mode::Home | Mode::Native) && lit && !self.machine.owns()
+                && now.duration_since(self.last_dial) >= Duration::from_secs(3) {
+                // The thermostat as it shows, for the next wake.
+                self.last_dial = now;
+                let page = self.display.save();
+                if dial(&page) {
+                    self.dial = Some(page);
+                }
             }
             if !self.animating() && self.machine.mode != Mode::Idle {
                 // One card at a time while nothing moves, so the first turn
@@ -268,15 +319,33 @@ impl Runtime {
         following || zooming || self.sweeping()
     }
 
-    /// Zoomed out while the cards move, full size once they settle.
+    /// Zoomed out on the cards, the chooser; full size settling back onto
+    /// the thermostat, or opening a card (zoom_in).
     fn zoom_target(&self) -> f32 {
-        let moving = match (self.view, self.machine.position()) {
-            (Some(view), Some(target)) => {
-                (view - self.nearest(view, target)).abs() > 0.001 || target.fract().abs() > 0.001
+        match self.machine.mode {
+            Mode::Chooser(_) => zoom::ZOOMED,
+            Mode::Home if self.machine.owns() => zoom::ZOOMED,
+            _ => 1.0,
+        }
+    }
+
+    /// Zooms into the card the cards rest on, to full size: a card opening.
+    fn zoom_in(&mut self) {
+        let Some(view) = self.view else { return };
+        let at = view.round();
+        let mut last = Instant::now();
+        while self.zoom < 1.0 {
+            std::thread::sleep(Duration::from_millis(8));
+            let elapsed = last.elapsed().as_secs_f32();
+            last = Instant::now();
+            let mut next = self.zoom + (1.0 - self.zoom) * (1.0 - (-elapsed / ZOOM_EASE).exp());
+            if 1.0 - next < 0.002 {
+                next = 1.0;
             }
-            _ => false,
-        };
-        if moving { zoom::ZOOMED } else { 1.0 }
+            self.zoom = next;
+            self.show_cards(at);
+        }
+        self.view = Some(at);
     }
 
     /// `target`'s place in the deck nearest `view`: the deck goes round.
@@ -381,6 +450,9 @@ impl Runtime {
             }
         };
         zoom::compose(&mut self.scratch, at, z, if shrunk { zoom::ZOOMED } else { 1.0 }, get);
+        if self.machine.hint {
+            paint::hint(&mut self.scratch, &self.fonts, "Turn to browse · press to open");
+        }
         self.display.show(&self.scratch);
     }
 
@@ -459,7 +531,19 @@ impl Runtime {
     fn apply(&mut self, effect: Effect) {
         match effect {
             Effect::Own(true) => {
-                self.saved = Some(self.display.save());
+                // nlclient's page. Just woken, its page is dark until
+                // nlclient draws its dial: wait for that (as the display
+                // lights), else use the dial as it last showed.
+                let mut page = self.display.save();
+                let waiting = Instant::now();
+                while !dial(&page) && waiting.elapsed() < Duration::from_millis(1200) {
+                    std::thread::sleep(Duration::from_millis(40));
+                    page = self.display.save();
+                }
+                self.saved = Some(match &self.dial {
+                    Some(last) if !dial(&page) => last.clone(),
+                    _ => page,
+                });
                 device::own(true);
                 self.display.begin();
                 // The thermostat as a card, and zoomed out, before the first
@@ -474,10 +558,12 @@ impl Runtime {
             Effect::Own(false) => {
                 self.shrunk.remove(&0);
                 // Back to the thermostat: the cards run on to it as the ring
-                // turned, or fade to it when left alone. Then nlclient's frame
-                // back before nlclient may present again.
+                // turned, or fade to it when left alone; opened, it is already
+                // there. Then nlclient's frame back before nlclient may
+                // present again.
                 if let Some(saved) = self.saved.clone() {
                     match (self.transition, self.view) {
+                        _ if self.machine.mode == Mode::Native => {}
                         (Transition::Fade, _) => {
                             let from = self.display.save();
                             self.animate(&from, &saved, Transition::Fade);
@@ -533,31 +619,66 @@ impl Runtime {
         }
     }
 
-    fn draw(&mut self) {
-        let machine = &self.machine;
-        let deck = machine.deck();
-        let position = |index: usize| Position { index, count: deck.len() };
+    /// A device's own screen for `mode`, and its card's place in the deck.
+    fn screen<'a>(machine: &'a Machine, mode: &Mode) -> Option<(Screen<'a>, Position)> {
+        let deck = machine.deck().len();
+        let position = |slot: usize| Position { index: slot + 1, count: deck };
         let card = |slot: usize| machine.cards.cards.get(slot);
-        let (screen, at) = match &machine.mode {
-            Mode::LightList { slot, selected } => match card(*slot) {
-                Some(Card::Lights(card)) => (Screen::LightList { card, selected: *selected }, position(slot + 1)),
-                _ => return,
+        Some(match mode {
+            Mode::LightList { slot, selected } => match card(*slot)? {
+                Card::Lights(card) => (Screen::LightList { card, selected: *selected }, position(*slot)),
+                _ => return None,
             },
-            Mode::LightDim { slot, light, on, value } => match card(*slot) {
-                Some(Card::Lights(card)) => (Screen::LightDim { light: &card.lights[*light], on: *on, value: *value },
-                                             position(slot + 1)),
-                _ => return,
+            Mode::LightDim { slot, light, on, value } => match card(*slot)? {
+                Card::Lights(card) => (Screen::LightDim { light: card.lights.get(*light)?, on: *on, value: *value },
+                                       position(*slot)),
+                _ => return None,
             },
-            Mode::ClimateSet { slot, target } => match card(*slot) {
-                Some(Card::Climate(card)) => (Screen::ClimateSet { card, target: *target }, position(slot + 1)),
-                _ => return,
+            Mode::ClimateSet { slot, target } => match card(*slot)? {
+                Card::Climate(card) => (Screen::ClimateSet { card, target: *target }, position(*slot)),
+                _ => return None,
             },
-            Mode::Volume { slot, value } => match card(*slot) {
-                Some(Card::Media(card)) => (Screen::Volume { card, value: *value }, position(slot + 1)),
-                _ => return,
+            Mode::Volume { slot, value } => match card(*slot)? {
+                Card::Media(card) => (Screen::Volume { card, value: *value }, position(*slot)),
+                _ => return None,
             },
-            _ => return,
+            _ => return None,
+        })
+    }
+
+    /// A device's ring of actions, over its dimmed screen.
+    fn draw_menu(&mut self, view: &Mode, actions: &[Action], selected: usize) {
+        let Some((screen, at)) = Self::screen(&self.machine, view) else { return };
+        let title = match &screen {
+            Screen::LightDim { light, .. } => light.name.clone(),
+            Screen::Volume { card, .. } => card.name.clone(),
+            _ => String::new(),
         };
+        let mut canvas = screens::draw(&self.fonts, &screen, at, None);
+        let items: Vec<(&str, &str)> = actions.iter().map(|action| match action {
+            Action::Back => ("mdi:arrow-left", "Back to devices"),
+            Action::Switch(true) => ("mdi:power", "Turn on"),
+            Action::Switch(false) => ("mdi:power", "Turn off"),
+            Action::Play(true) => ("mdi:play", "Play"),
+            Action::Play(false) => ("mdi:pause", "Pause"),
+        }).collect();
+        screens::menu(&mut canvas, &self.fonts, &title, &items, selected);
+        let frame = device::frame(canvas);
+        // The device's screen redraws whole when the menu closes.
+        self.live = None;
+        if std::mem::replace(&mut self.transition, Transition::Cut) == Transition::Fade {
+            let from = self.display.save();
+            self.animate(&from, &frame, Transition::Fade);
+        }
+        self.display.show(&frame);
+    }
+
+    fn draw(&mut self) {
+        if let Mode::Menu { view, actions, selected } = self.machine.mode.clone() {
+            return self.draw_menu(&view, &actions, selected);
+        }
+        let mode = self.machine.mode.clone();
+        let Some((screen, at)) = Self::screen(&self.machine, &mode) else { return };
         let sweep = self.sweep.as_ref().map(|(_, shown)| *shown);
         let fade = self.transition == Transition::Fade;
         self.transition = Transition::Cut;
@@ -634,7 +755,7 @@ enum Transition {
 /// Going into a card or back out of one fades, as does going back when left
 /// alone; handing nlclient its menus, and anything within one view, cuts.
 fn transition(before: &Mode, after: &Mode, turned: bool) -> Transition {
-    let cards = |mode: &Mode| matches!(mode, Mode::Home | Mode::Card(_));
+    let cards = |mode: &Mode| matches!(mode, Mode::Home | Mode::Chooser(_));
     let same_view = std::mem::discriminant(before) == std::mem::discriminant(after) && !cards(before);
     if before == after || same_view || !(before.owning() || after.owning()) || *after == Mode::Native {
         return Transition::Cut;
@@ -655,13 +776,13 @@ mod tests {
 
     #[test]
     fn going_in_and_out_fades_and_the_rest_cuts() {
-        assert_eq!(transition(&Mode::Home, &Mode::Card(1), true), Transition::Cut, "the cards follow the ring");
-        assert_eq!(transition(&Mode::Card(4), &Mode::Home, true), Transition::Cut);
-        assert_eq!(transition(&Mode::Card(2), &Mode::Home, false), Transition::Fade, "left alone");
+        assert_eq!(transition(&Mode::Home, &Mode::Chooser(1), true), Transition::Cut, "the cards follow the ring");
+        assert_eq!(transition(&Mode::Chooser(4), &Mode::Home, true), Transition::Cut);
+        assert_eq!(transition(&Mode::Chooser(2), &Mode::Home, false), Transition::Fade, "left alone");
         let list = Mode::LightList { slot: 0, selected: 0 };
-        assert_eq!(transition(&Mode::Card(1), &list, true), Transition::Fade);
-        assert_eq!(transition(&list, &Mode::Card(1), false), Transition::Fade);
-        assert_eq!(transition(&Mode::Card(4), &Mode::Native, true), Transition::Cut, "nlclient's menu");
+        assert_eq!(transition(&Mode::Chooser(1), &list, true), Transition::Fade);
+        assert_eq!(transition(&list, &Mode::Chooser(1), false), Transition::Fade);
+        assert_eq!(transition(&Mode::Chooser(4), &Mode::Native, true), Transition::Cut, "nlclient's menu");
         assert_eq!(transition(&list, &Mode::LightList { slot: 0, selected: 1 }, true), Transition::Cut);
     }
 }
@@ -674,7 +795,27 @@ fn hold_state(hold: bool) {
 
 /// Whether nlclient shows its home dial: its ring lit around the edge.
 fn home_dial(display: &mut device::Display) -> bool {
-    let page = display.save();
+    dial(&display.save())
+}
+
+/// Whether nlclient's menu shows with Back chosen: its arrow, lower left,
+/// blue (unchosen it is grey).
+fn back_chosen(page: &[u8]) -> bool {
+    let stride = page.len() / 480;
+    let mut blue = 0;
+    for x in 78..146 {
+        for y in 330..404 {
+            // Upright (x, y) is framebuffer row x, column 479 - y, as BGRX.
+            let at = x * stride + (479 - y) * 4;
+            let (b, r) = (page[at] as i32, page[at + 2] as i32);
+            blue += (b > 150 && b > r + 80) as u32;
+        }
+    }
+    blue > 300
+}
+
+/// Whether a frame shows nlclient's home dial: its ring lit around the edge.
+fn dial(page: &[u8]) -> bool {
     let stride = page.len() / 480;
     let (mut lit, mut total) = (0, 0);
     for angle in (0..360).step_by(3) {
@@ -734,5 +875,8 @@ mod shots {
         for (name, screen, at) in shots {
             save(&screens::draw(&fonts, &screen, at, None), &format!("{out}/{name}.png"));
         }
+        let mut menu = screens::draw(&fonts, &Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, at(1), None);
+        screens::menu(&mut menu, &fonts, "Reading Lamp", &[("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off")], 0);
+        save(&menu, &format!("{out}/9-menu.png"));
     }
 }

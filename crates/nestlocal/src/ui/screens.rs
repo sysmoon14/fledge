@@ -335,6 +335,25 @@ fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fon
     big_number_on(p, live, fonts, value as f64, false, "", WHITE);
 }
 
+/// A device's ring of actions, as the Nest's own press menu: the device's
+/// screen dimmed, the actions' icons around the ring from lower left, the
+/// chosen one blue and named under the device's name.
+pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], selected: usize) {
+    paint::dim(p, 0.06);
+    for (i, (name, _)) in items.iter().enumerate() {
+        let angle = (-135.0 + 55.0 * i as f32).to_radians();
+        let (x, y) = (HALF + 178.0 * angle.sin(), HALF - 178.0 * angle.cos());
+        let chosen = i == selected;
+        let colour = if chosen { [26, 115, 232] } else { [138, 143, 152] };
+        icon(p, name, "back", x, y, if chosen { 52.0 } else { 44.0 }, colour);
+    }
+    let title = paint::fit(&fonts.regular, 30.0, title, 0.0, 300.0);
+    paint::text(p, &fonts.regular, 30.0, HALF, 232.0, &title, 0.0, WHITE);
+    if let Some((_, label)) = items.get(selected) {
+        paint::text(p, &fonts.medium, 19.0, HALF, 270.0, label, 0.2, [74, 144, 226]);
+    }
+}
+
 fn capitalise(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
