@@ -125,6 +125,8 @@ async def test_a_room_s_lights_are_kept_on_the_thermostat(hass: HomeAssistant, m
     for name in ("lamp", "ceiling", "screen"):
         entities.async_get_or_create("light", "test", name, suggested_object_id=name)
         entities.async_update_entity(f"light.{name}", area_id=bedroom.id)
+    # A light group hidden from dashboards is still a room's light.
+    entities.async_update_entity("light.ceiling", hidden_by=er.RegistryEntryHider.USER)
     hass.states.async_set("light.lamp", "on", {"friendly_name": "Lamp", "brightness": 255,
                                                "supported_color_modes": ["brightness"]})
     hass.states.async_set("light.ceiling", "off", {"friendly_name": "Ceiling"})

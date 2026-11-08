@@ -109,8 +109,9 @@ class Thermostat:
                 for e in er.async_entries_for_device(entities, device.id):
                     if e.area_id in (None, area_id):
                         found.setdefault(e.entity_id, e)
+            # Hidden is about dashboards (a light group often is): still listed.
             lights = [e for e in found.values() if e.domain == "light" and not e.disabled_by
-                      and not e.hidden_by and e.entity_id not in left_out]
+                      and e.entity_id not in left_out]
             lights.sort(key=lambda e: (e.name or e.original_name or e.entity_id).lower())
             rooms.append(cards.LightsCard(area.name, area.icon or "mdi:lightbulb-group",
                                           [e.entity_id for e in lights]))
