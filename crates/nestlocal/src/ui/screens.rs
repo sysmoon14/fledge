@@ -306,9 +306,9 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, progress: Opt
 /// Scenes' and scripts' accent: a warm gold.
 const ACTION: [u8; 3] = [255, 196, 87];
 
+/// No ring: there's nothing to turn. Done, its icon and words turn gold.
 fn action_card(fonts: &Fonts, card: &ActionCard, done: bool) -> Canvas {
     let mut p = paint::canvas(BLACK);
-    paint::ring(&mut p, |_| if done { colour(ACTION) } else { colour(DIM) }, &[]);
     // Its own icon if the thermostat has it, else a play button.
     let found = icons::lookup(&card.icon, &card.id).or_else(|| icons::lookup("mdi:play-circle-outline", ""));
     if let Some(found) = found {
@@ -390,7 +390,6 @@ fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
             }
         }
         None => {
-            paint::ring(&mut p, |_| colour(ACTION), &[]);
             let icon_name = if alert.icon.is_empty() { "mdi:bell-ring" } else { &alert.icon };
             icon(&mut p, icon_name, "alert", HALF, 132.0, 80.0, ACTION);
             let mut y = 222.0;
