@@ -307,8 +307,10 @@ extern int native_close(int);
 extern int native_kill(int, int);
 #define SCREEN_OWNER "/var/run/unfr0zen/screen.owner"
 static int read_pid(const char *path);
+static int read_owner(int *beat);
 static int screen_owned(void) {
-    int pid = read_pid(SCREEN_OWNER);
+    int beat;
+    int pid = read_owner(&beat);
     return pid > 1 && native_kill(pid, 0) == 0;
 }
 u32 custom_swap(void *display, void *surface) {
@@ -318,20 +320,63 @@ u32 custom_swap(void *display, void *surface) {
 /* While the UI owns the display, nlclient sees none of the ring and button,
  * so it would let its display go dark. A thread of nlclient's own lights it
  * as a command from Home Assistant does (wake_display): every 2 s while the
- * UI owns the display, and at once when the UI leaves display.wake (a turn
- * on a dark display). nlclient is never sent input it didn't get. */
+ * UI owns the display, unless the UI leaves SCREEN_REST (it holds the screen
+ * but lets nlclient's own timing put it out), and at once when the UI leaves
+ * display.wake (a turn on a dark display). nlclient is never sent input it
+ * didn't get.
+ *
+ * An owner that writes a heartbeat ("pid beat") must change it within
+ * STALE_TICKS of the thread running (time awake: suspended, neither runs);
+ * a hung owner's file is moved aside, so nlclient presents again. KEEPER_RESTS
+ * tells the UI this build knows both. */
 extern int native_pthread_create(void *, void *, void *(*)(void *), void *);
 extern int native_usleep(unsigned int);
 extern int native_getpid(void);
 #define DISPLAY_WAKE "/var/run/unfr0zen/display.wake"
+#define SCREEN_REST "/var/run/unfr0zen/screen.rest"
 #define KEEPER "/var/run/unfr0zen/keeper.pid"
+#define KEEPER_RESTS "/var/run/unfr0zen/keeper.rests"
+#define STALE_TICKS 50
+static int exists(const char *path) {
+    int fd = native_open(path, 0);
+    if (fd < 0) return 0;
+    native_close(fd);
+    return 1;
+}
 static void *keeper(void *globals) {
+    int last_beat = -1;
+    unsigned int still = 0;
     for (unsigned int ticks = 1;; ticks++) {
         native_usleep(100000);
         int wake = !rename_setting(DISPLAY_WAKE, "/var/run/unfr0zen/display.woken");
-        if (wake || (ticks % 20 == 0 && screen_owned())) wake_display(globals);
+        int beat;
+        int pid = read_owner(&beat);
+        if (pid <= 1 || beat < 0 || beat != last_beat) {
+            last_beat = beat;
+            still = 0;
+        } else if (++still >= STALE_TICKS) {
+            rename_setting(SCREEN_OWNER, "/var/run/unfr0zen/screen.stale");
+            still = 0;
+        }
+        if (wake || (ticks % 20 == 0 && screen_owned() && !exists(SCREEN_REST))) wake_display(globals);
     }
     return 0;
+}
+/* The owner's pid, and its heartbeat after a space (-1 without one). */
+static int read_owner(int *beat) {
+    char text[32];
+    *beat = -1;
+    int fd = native_open(SCREEN_OWNER, 0);
+    if (fd < 0) return 0;
+    int count = native_read(fd, text, sizeof(text) - 1);
+    native_close(fd);
+    int pid = 0, i = 0;
+    for (; i < count && text[i] >= '0' && text[i] <= '9'; i++) pid = pid * 10 + (text[i] - '0');
+    if (i < count && text[i] == ' ' && i + 1 < count && text[i + 1] >= '0' && text[i + 1] <= '9') {
+        *beat = 0;
+        for (i++; i < count && text[i] >= '0' && text[i] <= '9'; i++) *beat = (*beat * 10 + (text[i] - '0')) & 0xfffffff;
+    }
+    return pid;
 }
 static int read_pid(const char *path) {
     char text[16];
@@ -356,6 +401,8 @@ static void keeper_start(void *bucket) {
     if (!file) return;
     native_fwrite(text, 1, length, file);
     native_fclose(file);
+    void *rests = native_fopen(KEEPER_RESTS, "w");
+    if (rests) native_fclose(rests);
     unsigned int thread;
     native_pthread_create(&thread, 0, keeper, PTR(bucket, BUCKET_GLOBALS_OFFSET));
 }

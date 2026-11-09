@@ -74,6 +74,15 @@ zoomed out (or the device Fledge was told to wake to). Turning browses,
 pressing opens; the thermostat hands the ring back to nlclient, and choosing
 Back in nlclient's menu returns to the chooser. While a card shows, a thread
 inside nlclient keeps its display awake; no ring input is ever injected.
+
+The UI may hold the display at rest too, showing black or its glance while
+nlclient's own timing (Farsight, wake on approach, the dark-room check) puts
+the display out: it leaves `/var/run/unfr0zen/screen.rest` and the thread
+stops keeping the display lit. An owner that writes `pid beat` must change the
+beat within 5 s of the thread running, or its file is moved aside and nlclient
+presents again, so a hung UI can't freeze the screen. The thread leaves
+`/var/run/unfr0zen/keeper.rests` to say this build knows both; without it,
+nestlocal hands the display back at rest as before.
 Without cards, or while nlclient is stopped (Doom), nothing is held and the
 unit behaves as stock.
 
