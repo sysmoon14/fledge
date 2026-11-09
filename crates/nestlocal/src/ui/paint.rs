@@ -228,6 +228,22 @@ impl Canvas {
     }
 }
 
+impl Canvas {
+    /// The picture upright, as RGB (a preview drawn small elsewhere).
+    pub fn rgb_upright(&self) -> Vec<u8> {
+        let data = self.pixmap.data();
+        let mut out = Vec::with_capacity((SIZE * SIZE * 3) as usize);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let at = self.at(x, y);
+                let px = [data[at], data[at + 1], data[at + 2]];
+                out.extend(if self.panel { [px[2], px[1], px[0]] } else { px });
+            }
+        }
+        out
+    }
+}
+
 pub fn canvas(background: [u8; 3]) -> Canvas {
     canvas_for(background, PANEL.load(std::sync::atomic::Ordering::Relaxed))
 }
@@ -840,6 +856,25 @@ pub fn circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, c: Color) {
                 data[at + k] = (old + (v as f32 - old) * cover).round() as u8;
             }
         }
+    }
+}
+
+/// A rectangle with its corners rounded to `r`.
+pub fn rounded(canvas: &mut Canvas, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color) {
+    let r = r.min(w / 2.0).min(h / 2.0);
+    let mut path = PathBuilder::new();
+    path.move_to(x + r, y);
+    path.line_to(x + w - r, y);
+    path.quad_to(x + w, y, x + w, y + r);
+    path.line_to(x + w, y + h - r);
+    path.quad_to(x + w, y + h, x + w - r, y + h);
+    path.line_to(x + r, y + h);
+    path.quad_to(x, y + h, x, y + h - r);
+    path.line_to(x, y + r);
+    path.quad_to(x, y, x + r, y);
+    path.close();
+    if let Some(path) = path.finish() {
+        canvas.fill_path(&path, c);
     }
 }
 

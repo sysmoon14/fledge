@@ -483,7 +483,7 @@ impl Runtime {
             let display = &mut self.display;
             self.machine.tick(now, lit, &mut || home_dial(display), &mut effects);
             if std::mem::discriminant(&before) != std::mem::discriminant(&self.machine.mode)
-                || matches!(self.machine.mode, Mode::Chooser(_)) && before != self.machine.mode {
+                || matches!(self.machine.mode, Mode::Chooser(_) | Mode::Settings { .. }) && before != self.machine.mode {
                 mode_state(&self.machine.mode);
             }
             self.schedule_pulse(&before, now);
@@ -1236,6 +1236,7 @@ impl Runtime {
                                                               nest_dial: machine.nest_dial, selected: *selected },
             Mode::SettingSet { setting, value } => Screen::SettingSet { setting: *setting, nest: machine.nest.as_ref()?,
                                                                         value: *value },
+            Mode::ThemePick { fledge } => Screen::ThemePick { fledge: *fledge },
             _ => return None,
         })
     }
@@ -1600,6 +1601,7 @@ fn hold_state(hold: bool) {
 fn mode_state(mode: &Mode) {
     let name = match mode {
         Mode::Chooser(index) => format!("Chooser {index}"),
+        Mode::Settings { selected } => format!("Settings {selected}"),
         Mode::Menu { view, .. } => format!("Menu {}", format!("{view:?}").split([' ', '{', '(']).next().unwrap_or("")),
         other => format!("{other:?}").split([' ', '{', '(']).next().unwrap_or("").to_owned(),
     };
@@ -1824,6 +1826,7 @@ mod shots {
         }
         save(&screens::draw(&fonts, &Screen::SettingSet { setting: Setting::EcoLow, nest: &idle, value: 12.0 }, None),
              &format!("{out}/t9-eco-set.png"));
+        save(&screens::draw(&fonts, &Screen::ThemePick { fledge: true }, None), &format!("{out}/t10-theme.png"));
         let cold = state(serde_json::json!({"action": "heating", "target": 22.0, "current_temperature": 19.5,
             "time_to_target": "2026-11-09T08:13:00Z"}));
         for (name, phase) in [("p1-pulse-start", Some(0.15)), ("p2-pulse-mid", Some(0.4)), ("p3-pulse-fade", Some(0.85)), ("p0-rest", None)] {

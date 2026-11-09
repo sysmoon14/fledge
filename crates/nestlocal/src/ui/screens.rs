@@ -54,6 +54,9 @@ pub enum Screen<'a> {
     Settings { rows: Vec<Setting>, nest: Option<&'a Nest>, nest_dial: bool, selected: usize },
     /// A setting's temperature, on its own dial.
     SettingSet { setting: Setting, nest: &'a Nest, value: f64 },
+    /// Settings' Theme: the Nest's and Fledge's side by side, each a small
+    /// dial in its own look, `fledge` chosen.
+    ThemePick { fledge: bool },
 }
 
 const HALF: f32 = 240.0;
@@ -118,6 +121,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::Glance { glance, cards, now } => glance_screen(fonts, glance, cards, *now),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
+        Screen::ThemePick { fledge } => theme_pick(fonts, *fledge),
         Screen::Settings { rows, nest, nest_dial, selected } => settings_list(fonts, rows, *nest, *nest_dial, *selected, Layer::Whole),
         _ => {
             let mut p = still(fonts, screen);
@@ -668,6 +672,43 @@ fn settings_card(fonts: &Fonts) -> Canvas {
     icon(&mut p, "mdi:cog", "settings", HALF, 168.0, 96.0, WHITE);
     paint::text(&mut p, fonts.regular(), 40.0, HALF, 278.0, "Settings", 0.0, WHITE);
     line(&mut p, fonts, 316.0, "Eco · Home/Away · Fledge", GREY);
+    p
+}
+
+/// A heating thermostat as `theme` draws it, small: a theme's preview.
+fn theme_preview(fonts: &Fonts, theme: paint::Theme) -> (Vec<u8>, u32) {
+    let shown = if paint::fledge() { paint::Theme::Fledge } else { paint::Theme::Nest };
+    paint::set_theme(theme);
+    let card = ClimateCard { id: "preview".into(), name: String::new(), icon: String::new(), mode: "heat".into(),
+                             action: "heating".into(), target: Some(22.0), current: Some(20.5), min: 9.0, max: 32.0,
+                             step: 0.5, presets: Vec::new(), preset: None };
+    let mut p = paint::face(climate_colours(&card).0);
+    climate_moving(&mut p, None, fonts, &card, card.target, None, None, Some((0.0, 22.0)));
+    let rgb = p.rgb_upright();
+    paint::set_theme(shown);
+    // The whole dial, its ring round the edge.
+    (rgb, paint::SIZE)
+}
+
+/// Settings' Theme, as its mockup: the two looks side by side, each a small
+/// live dial, the chosen one on the highlight; turn to choose, press to keep.
+fn theme_pick(fonts: &Fonts, fledge: bool) -> Canvas {
+    let mut p = paint::face(BLACK);
+    label(&mut p, fonts, 128.0, "Theme", GREY);
+    let side = 112.0;
+    for (i, (theme, name)) in [(paint::Theme::Nest, "Nest"), (paint::Theme::Fledge, "Fledge")].into_iter().enumerate() {
+        let chosen = (i == 1) == fledge;
+        let cx = HALF + if i == 0 { -84.0 } else { 84.0 };
+        if chosen {
+            paint::rounded(&mut p, cx - 76.0, 160.0, 152.0, 196.0, 30.0, colour(paint::select()));
+        }
+        let (rgb, size) = theme_preview(fonts, theme);
+        paint::picture_scaled(&mut p, &rgb, size, side as u32, cx, 240.0, side / 2.0);
+        let tint = if chosen { WHITE } else { GREY };
+        let font = if chosen { fonts.medium() } else { fonts.regular() };
+        paint::text(&mut p, font, 22.0, cx, 332.0, name, 0.0, tint);
+    }
+    line(&mut p, fonts, 392.0, "Turn to choose · press to keep", GREY);
     p
 }
 

@@ -41,6 +41,10 @@ use crate::mqtt;
 use crate::store::{Object, Store};
 use crate::weather::Outdoor;
 
+/// The update entity's discovery components and keys (update.rs): the
+/// update itself, and its check button.
+const UPDATE_ENTITIES: [(&str, &str); 2] = [("update", "nestlocal"), ("button", "check_update")];
+
 pub struct Bridge {
     pub serial: String,
     pub base: String,
@@ -218,6 +222,17 @@ impl Bridge {
 
     pub fn me(&self) -> Option<Arc<Self>> {
         self.me.upgrade()
+    }
+
+    /// Without -update-repo, the update entity a run with it left retained
+    /// on the broker: its discovery configs and its state. Cleared once, at
+    /// the first announce, so turning updates off removes the entities.
+    fn stale_update_topics(&self, id: &str) -> Vec<String> {
+        if self.updates.get().is_some() {
+            return Vec::new();
+        }
+        UPDATE_ENTITIES.iter().map(|(component, key)| format!("{}/{component}/{id}/{key}/config", self.discovery))
+            .chain([format!("{}/update", self.base)]).collect()
     }
 
     pub fn updates(&self) -> Option<&crate::update::Updates> {
@@ -703,8 +718,8 @@ impl Bridge {
                 update.insert("command_topic".into(), format!("{set}update").into());
                 update.insert("payload_install".into(), "install".into());
             }
-            add("update", "nestlocal", "nestlocal", update);
-            add("button", "check_update", "Check for nestlocal update", fields!{
+            add(UPDATE_ENTITIES[0].0, UPDATE_ENTITIES[0].1, "nestlocal", update);
+            add(UPDATE_ENTITIES[1].0, UPDATE_ENTITIES[1].1, "Check for nestlocal update", fields!{
                 "command_topic" => format!("{set}check_update"),
                 "entity_category" => "config",
                 "icon" => "mdi:update",
@@ -717,8 +732,13 @@ impl Bridge {
         });
 
         // Publish what changed; remove what the equipment no longer offers.
+        let first = self.announced.lock().unwrap().is_none();
         let old = self.announced.lock().unwrap().replace(configs.clone()).unwrap_or_default();
-        for topic in old.keys().filter(|t| !configs.contains_key(*t)) {
+        let mut gone: Vec<String> = old.keys().filter(|t| !configs.contains_key(*t)).cloned().collect();
+        if first {
+            gone.extend(self.stale_update_topics(&id));
+        }
+        for topic in &gone {
             self.publish(topic, true, b"");
         }
         let mut n = 0;
@@ -1044,6 +1064,19 @@ pub mod tests {
         let update: Value = serde_json::from_str(&configs["homeassistant/update/nestlocal_s/nestlocal/config"]).unwrap();
         assert_eq!(update["command_topic"], json!("nestlocal/S/set/update"));
         assert_eq!(update["payload_install"], json!("install"));
+    }
+
+    #[test]
+    fn without_an_update_repo_the_retained_update_entity_is_cleared() {
+        let b = test_bridge();
+        assert_eq!(b.stale_update_topics("nestlocal_s"), vec![
+            "homeassistant/update/nestlocal_s/nestlocal/config".to_string(),
+            "homeassistant/button/nestlocal_s/check_update/config".to_string(),
+            "nestlocal/S/update".to_string(),
+        ]);
+        let b = test_bridge();
+        assert!(b.updates.set(crate::update::Updates::new("sysmoon14/fledge", None)).is_ok());
+        assert!(b.stale_update_topics("nestlocal_s").is_empty());
     }
 
     #[test]

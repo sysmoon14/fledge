@@ -185,6 +185,8 @@ pub enum Mode {
     /// Its Settings, `selected` highlighted, and one set on its own dial.
     Settings { selected: usize },
     SettingSet { setting: Setting, value: f64 },
+    /// Settings' Theme: the two side by side, `fledge` chosen.
+    ThemePick { fledge: bool },
     /// A notification over `back`, which shows again once it goes.
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -584,7 +586,7 @@ impl Machine {
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
                     Mode::LightList { .. } | Mode::Menu { .. } | Mode::OptionList { .. } | Mode::Members { .. }
-                    | Mode::Settings { .. } => ROW_STEP,
+                    | Mode::Settings { .. } | Mode::ThemePick { .. } => ROW_STEP,
                     Mode::ClimateSet { .. } | Mode::Thermostat { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
@@ -766,6 +768,7 @@ impl Machine {
                 let rows = self.settings().len() as i32;
                 self.mode = Mode::Settings { selected: (selected as i32 + steps).clamp(0, rows - 1) as usize };
             }
+            Mode::ThemePick { .. } => self.mode = Mode::ThemePick { fledge: steps > 0 },
             Mode::SettingSet { setting, value } => {
                 let fahrenheit = self.nest.as_ref().is_some_and(|n| n.fahrenheit);
                 if let Some((low, high, step)) = setting.range(fahrenheit) {
@@ -938,6 +941,14 @@ impl Machine {
                 let Some(&setting) = self.settings().get(selected) else { return };
                 self.choose_setting(setting, out);
             }
+            Mode::ThemePick { fledge } => {
+                // Kept: the screens in it from now on.
+                if fledge != self.fledge {
+                    self.fledge = fledge;
+                    out.push(Effect::Theme(fledge));
+                }
+                self.mode = self.settings_at(Setting::Theme);
+            }
             Mode::SettingSet { setting, value } => {
                 if let Some(nest) = &mut self.nest {
                     let celsius = nest.celsius(value);
@@ -963,11 +974,7 @@ impl Machine {
             match setting {
                 Setting::Done => self.go(Mode::Chooser(self.deck().len() - 1), out),
                 Setting::More => self.open_nest_settings(out),
-                Setting::Theme => {
-                    self.fledge = !self.fledge;
-                    out.push(Effect::Theme(self.fledge));
-                    self.dirty = true;
-                }
+                Setting::Theme => self.mode = Mode::ThemePick { fledge: self.fledge },
                 _ => {}
             }
             return;
@@ -1009,11 +1016,7 @@ impl Machine {
                 out.push(Effect::NestDial(self.nest_dial));
                 self.dirty = true;
             }
-            Setting::Theme => {
-                self.fledge = !self.fledge;
-                out.push(Effect::Theme(self.fledge));
-                self.dirty = true;
-            }
+            Setting::Theme => self.mode = Mode::ThemePick { fledge: self.fledge },
             Setting::Software => match nest.update {
                 Some(_) => self.nest_command("update", "install", out),
                 None => self.nest_command("check_update", "", out),
@@ -1242,6 +1245,7 @@ impl Machine {
             Mode::Chooser(_) => Mode::Home,
             Mode::Settings { .. } => Mode::Chooser(self.deck().len() - 1),
             Mode::SettingSet { setting, .. } => self.settings_at(setting),
+            Mode::ThemePick { .. } => self.settings_at(Setting::Theme),
             mode => match mode.card_index() {
                 Some(index) => Mode::Chooser(index),
                 None => return,
@@ -1350,6 +1354,7 @@ impl Machine {
             Mode::Thermostat { .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(0)),
             Mode::Settings { .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.deck().len() - 1)),
             Mode::SettingSet { setting, .. } if idle >= CONTROL_IDLE => Some(self.settings_at(setting)),
+            Mode::ThemePick { .. } if idle >= LIST_IDLE => Some(self.settings_at(Setting::Theme)),
             _ => None,
         };
         if let Some(mode) = back {
@@ -2006,8 +2011,12 @@ mod tests {
         assert_eq!(sent(&rig.press()), vec![("learning_mode".into(), "OFF".into())], "Auto-Schedule off");
         assert!(!rig.machine.nest.as_ref().unwrap().learning);
         rig.turn(ROW_STEP * 4);
-        assert_eq!(rig.press(), vec![Effect::Theme(true)], "the Fledge theme");
+        assert!(rig.press().is_empty() && rig.machine.mode == Mode::ThemePick { fledge: false }, "the two themes");
+        rig.turn(ROW_STEP);
+        assert_eq!(rig.machine.mode, Mode::ThemePick { fledge: true });
+        assert_eq!(rig.press(), vec![Effect::Theme(true)], "Fledge's kept");
         assert!(rig.machine.fledge);
+        assert_eq!(rig.machine.mode, Mode::Settings { selected: 6 }, "back on its row");
         rig.turn(ROW_STEP * 2);
         assert_eq!(rig.press(), vec![Effect::NestDial(true)]);
         assert!(rig.machine.nest_dial);

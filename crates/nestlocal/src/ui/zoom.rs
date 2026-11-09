@@ -32,13 +32,15 @@ fn backdrop_frame() -> Frame {
 /// smaller, with room round them for the name and dots and more of the
 /// next ones showing.
 pub fn zoomed() -> f32 {
-    if super::paint::fledge() { 0.66 } else { 0.8 }
+    if super::paint::fledge() { 0.62 } else { 0.8 }
 }
 
 /// From one card's centre to the next at zoom `z`: side by side at full
 /// size, and a little apart when zoomed out, the next one's edge showing.
 pub fn spacing(z: f32) -> f32 {
-    let pull = if super::paint::fledge() { 470.0 } else { 400.0 };
+    // Fledge's: about 24 px between the cards, as its mockups space them,
+    // and some 67 px of the next ones showing at the sides.
+    let pull = if super::paint::fledge() { 416.0 } else { 400.0 };
     SIDE as f32 - (1.0 - z) * pull
 }
 
