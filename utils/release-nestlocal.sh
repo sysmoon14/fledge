@@ -84,7 +84,7 @@ mkdir -p "$out"
 log=$out/build.log
 echo "Releasing $(git rev-parse --short HEAD) on $branch as $tag ($repo), since $previous"
 
-git tag -a "$tag" -m "nestlocal $tag"
+git tag -a "$tag" -m "Fledge $tag"
 published=0
 untag() { [ $published = 1 ] || git tag -d "$tag" > /dev/null 2>&1 || true; }
 trap untag EXIT
@@ -134,7 +134,7 @@ fi
 # --- publish ------------------------------------------------------------------------
 git push -q origin "refs/tags/$tag" || fail "cannot push tag $tag to origin"
 published=1
-gh release create "$tag" --repo "$repo" --verify-tag --latest --title "nestlocal $tag" \
+gh release create "$tag" --repo "$repo" --verify-tag --latest --title "Fledge $tag" \
     --notes-file "$out/notes.md" "$binary" "$binary.sig" "$binary.sha256" ||
     fail "the tag is pushed but the release was not created: gh release create $tag --repo $repo ..."
 echo "Released: https://github.com/$repo/releases/tag/$tag"
