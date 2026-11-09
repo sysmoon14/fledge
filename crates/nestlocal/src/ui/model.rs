@@ -16,6 +16,10 @@ pub struct Cards {
     /// or a card's place in `cards`, opened.
     #[serde(default)]
     wake: Option<serde_json::Value>,
+    /// Where the thermostat goes among the cards: before `cards[n]` (0,
+    /// the default, first; past the end, last before settings).
+    #[serde(default)]
+    thermostat: Option<usize>,
     /// Shown as the display lights by itself (someone near), if Home
     /// Assistant asks for it: the time, the weather, what's on.
     #[serde(default)]
@@ -54,6 +58,11 @@ pub enum Wake {
 }
 
 impl Cards {
+    /// The thermostat's place among the cards.
+    pub fn thermostat(&self) -> usize {
+        self.thermostat.unwrap_or(0)
+    }
+
     pub fn wake(&self) -> Wake {
         match &self.wake {
             Some(Value::String(s)) if s == "thermostat" => Wake::Thermostat,

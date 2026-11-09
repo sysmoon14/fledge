@@ -203,15 +203,15 @@ impl Mode {
         !matches!(self, Mode::Idle | Mode::Native)
     }
 
-    /// The card a device's own screen belongs to, by its place in the deck.
-    pub fn card_index(&self) -> Option<usize> {
+    /// The card a device's own screen belongs to.
+    pub fn card_slot(&self) -> Option<Slot> {
         match self {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
             | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
-            | Mode::CoverSet { slot, .. } => Some(slot + 1),
-            Mode::Thermostat { .. } => Some(0),
-            Mode::Menu { view, .. } => view.card_index(),
+            | Mode::CoverSet { slot, .. } => Some(Slot::Card(*slot)),
+            Mode::Thermostat { .. } => Some(Slot::Thermostat),
+            Mode::Menu { view, .. } => view.card_slot(),
             _ => None,
         }
     }
@@ -376,12 +376,19 @@ impl Machine {
         out.push(Effect::Send(Command::Nest(name.into(), arg.into())));
     }
 
-    /// The cards in turning order: the thermostat, Home Assistant's, settings.
+    /// The cards in turning order: Home Assistant's, with the thermostat
+    /// where it put it (first, unless it says), then settings.
     pub fn deck(&self) -> Vec<Slot> {
-        let mut deck = vec![Slot::Thermostat];
-        deck.extend((0..self.cards.cards.len()).map(Slot::Card));
+        let count = self.cards.cards.len();
+        let mut deck: Vec<Slot> = (0..count).map(Slot::Card).collect();
+        deck.insert(self.cards.thermostat().min(count), Slot::Thermostat);
         deck.push(Slot::Settings);
         deck
+    }
+
+    /// Where `slot` is in the deck.
+    pub fn place(&self, slot: Slot) -> usize {
+        self.deck().iter().position(|s| *s == slot).unwrap_or(0)
     }
 
     /// Whether the display needs drawing; clears it.
@@ -449,7 +456,7 @@ impl Machine {
     pub fn position(&self) -> Option<f32> {
         let partial = self.turn as f32 / CARD_STEP as f32;
         match self.mode {
-            Mode::Home => Some(partial),
+            Mode::Home => Some(self.place(Slot::Thermostat) as f32 + partial),
             Mode::Chooser(index) => Some(index as f32 + partial),
             _ => None,
         }
@@ -516,12 +523,12 @@ impl Machine {
             // or a long press, brings the cards back.
             (Mode::Native, Input::LongPress) => {
                 out.push(Effect::Click);
-                let back = if std::mem::take(&mut self.settings_open) { self.settings_at(Setting::More) } else { Mode::Chooser(0) };
+                let back = if std::mem::take(&mut self.settings_open) { self.settings_at(Setting::More) } else { Mode::Chooser(self.place(Slot::Thermostat)) };
                 self.go(back, out);
                 return;
             }
             (Mode::Native, Input::NativeBack) => {
-                self.go(Mode::Chooser(0), out);
+                self.go(Mode::Chooser(self.place(Slot::Thermostat)), out);
                 return;
             }
             (Mode::Native, Input::SettingsDone) => {
@@ -564,7 +571,7 @@ impl Machine {
                 self.turn += value;
                 if cards {
                     // At an end the cards give a little, then spring back.
-                    let at = if let Mode::Chooser(index) = self.mode { index } else { 0 };
+                    let at = if let Mode::Chooser(index) = self.mode { index } else { self.place(Slot::Thermostat) };
                     if at == 0 {
                         self.turn = self.turn.max(-END_GIVE);
                     }
@@ -623,7 +630,7 @@ impl Machine {
         match self.cards.wake() {
             Wake::Chooser => {
                 self.hint = true;
-                self.go(Mode::Chooser(0), out);
+                self.go(Mode::Chooser(self.place(Slot::Thermostat)), out);
             }
             Wake::Thermostat => {
                 let mode = self.thermostat();
@@ -631,9 +638,9 @@ impl Machine {
             }
             // A scene or a camera isn't opened: that would run it.
             Wake::Card(slot) if matches!(self.card(slot), Some(Card::Action(_) | Card::Camera(_))) => {
-                self.go(Mode::Chooser(slot + 1), out);
+                self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
             }
-            Wake::Card(slot) => self.open(slot + 1, out),
+            Wake::Card(slot) => self.open(self.place(Slot::Card(slot)), out),
         }
     }
 
@@ -682,7 +689,7 @@ impl Machine {
         let deck = self.deck().len() as i32;
         if let Mode::Home | Mode::Chooser(_) = self.mode {
             // The cards stop at either end, as Nest settings do.
-            let from = if let Mode::Chooser(index) = self.mode { index as i32 } else { 0 };
+            let from = if let Mode::Chooser(index) = self.mode { index } else { self.place(Slot::Thermostat) } as i32;
             let index = (from + steps).clamp(0, deck - 1);
             if index != from {
                 out.push(Effect::Click);
@@ -848,7 +855,7 @@ impl Machine {
             Mode::LightList { slot, selected } => {
                 let Some(Card::Lights(card)) = self.card(slot) else { return };
                 match card.lights.get(selected).cloned() {
-                    None => self.go(Mode::Chooser(slot + 1), out),
+                    None => self.go(Mode::Chooser(self.place(Slot::Card(slot))), out),
                     Some(light) if light.dimmable => {
                         self.mode = Mode::LightDim { slot, light: selected, on: light.on,
                                                      value: light.brightness.unwrap_or(100) };
@@ -888,9 +895,9 @@ impl Machine {
                     actions.extend((0..card.presets.len().min(4)).map(|i| Action::Preset(i as u8)));
                     self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
                 }
-                _ => self.go(Mode::Chooser(slot + 1), out),
+                _ => self.go(Mode::Chooser(self.place(Slot::Card(slot))), out),
             },
-            Mode::Camera { slot } => self.go(Mode::Chooser(slot + 1), out),
+            Mode::Camera { slot } => self.go(Mode::Chooser(self.place(Slot::Card(slot))), out),
             Mode::OptionList { slot, selected } => {
                 if let Some(Card::Options(card)) = self.cards.cards.get_mut(slot) {
                     if let Some(option) = card.options.get(selected).cloned() {
@@ -898,7 +905,7 @@ impl Machine {
                         card.current = Some(option);
                     }
                 }
-                self.go(Mode::Chooser(slot + 1), out);
+                self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
             }
             Mode::Members { slot, selected } => {
                 let member = match self.cards.cards.get_mut(slot) {
@@ -1093,8 +1100,8 @@ impl Machine {
     fn act(&mut self, view: Mode, action: Action, out: &mut Vec<Effect>) {
         match (action, view) {
             (Action::Back, view) => {
-                if let Some(index) = view.card_index() {
-                    self.go(Mode::Chooser(index), out);
+                if let Some(slot) = view.card_slot() {
+                    self.go(Mode::Chooser(self.place(slot)), out);
                 }
             }
             (Action::Switch(on), Mode::LightDim { slot, light, value, .. }) => {
@@ -1132,7 +1139,7 @@ impl Machine {
                         card.preset = Some(preset);
                     }
                 }
-                self.go(Mode::Chooser(slot + 1), out);
+                self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
             }
             (Action::Members, Mode::LightDim { slot, .. }) => self.mode = Mode::Members { slot, selected: 0 },
             (Action::Eco(on), Mode::Thermostat { .. }) => {
@@ -1141,7 +1148,7 @@ impl Machine {
                     nest.eco = on;
                     nest.card.preset = on.then(|| "eco".to_owned());
                 }
-                self.go(Mode::Chooser(0), out);
+                self.go(Mode::Chooser(self.place(Slot::Thermostat)), out);
             }
             (Action::Power(on), view @ Mode::Thermostat { .. }) => {
                 if let Some(nest) = &mut self.nest {
@@ -1152,7 +1159,7 @@ impl Machine {
                 if on {
                     self.mode = view;
                 } else {
-                    self.go(Mode::Chooser(0), out);
+                    self.go(Mode::Chooser(self.place(Slot::Thermostat)), out);
                 }
             }
             (Action::Boost(on), view @ Mode::Thermostat { .. }) => {
@@ -1246,8 +1253,8 @@ impl Machine {
             Mode::Settings { .. } => Mode::Chooser(self.deck().len() - 1),
             Mode::SettingSet { setting, .. } => self.settings_at(setting),
             Mode::ThemePick { .. } => self.settings_at(Setting::Theme),
-            mode => match mode.card_index() {
-                Some(index) => Mode::Chooser(index),
+            mode => match mode.card_slot() {
+                Some(slot) => Mode::Chooser(self.place(slot)),
                 None => return,
             },
         };
@@ -1336,22 +1343,22 @@ impl Machine {
         }
         let back = match self.mode.clone() {
             Mode::Chooser(_) if idle >= CARD_IDLE => Some(Mode::Home),
-            Mode::LightList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(slot + 1)),
+            Mode::LightList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
             Mode::LightDim { slot, light, .. } if idle >= CONTROL_IDLE => Some(match self.card(slot) {
                 Some(Card::Lights(card)) if card.lights.len() > 1 => Mode::LightList { slot, selected: light },
-                _ => Mode::Chooser(slot + 1),
+                _ => Mode::Chooser(self.place(Slot::Card(slot))),
             }),
             Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } if idle >= CONTROL_IDLE => {
                 Some(self.dimmer(slot, light))
             }
-            Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
-            Mode::Camera { slot } if idle >= CAMERA_IDLE => Some(Mode::Chooser(slot + 1)),
+            Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
+            Mode::Camera { slot } if idle >= CAMERA_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
             Mode::Glance if idle >= GLANCE_IDLE => Some(Mode::Home),
-            Mode::OptionList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(slot + 1)),
+            Mode::OptionList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
             Mode::Members { slot, .. } if idle >= LIST_IDLE => Some(self.dimmer(slot, 0)),
-            Mode::CoverSet { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
+            Mode::CoverSet { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
             Mode::Menu { view, .. } if idle >= CONTROL_IDLE => Some(*view),
-            Mode::Thermostat { .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(0)),
+            Mode::Thermostat { .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(self.place(Slot::Thermostat))),
             Mode::Settings { .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.deck().len() - 1)),
             Mode::SettingSet { setting, .. } if idle >= CONTROL_IDLE => Some(self.settings_at(setting)),
             Mode::ThemePick { .. } if idle >= LIST_IDLE => Some(self.settings_at(Setting::Theme)),
@@ -1677,6 +1684,27 @@ mod tests {
         rig.press();
         rig.lit = true;
         rig
+    }
+
+    #[test]
+    fn the_thermostat_goes_where_home_assistant_puts_it() {
+        let two = r#"{"kind":"action","id":"scene.a","name":"A"},{"kind":"action","id":"scene.b","name":"B"}"#;
+        let cards = |extra: &str| Cards::parse(format!(r#"{{"cards":[{two}]{extra}}}"#).as_bytes()).unwrap();
+        let mut rig = Rig::with(cards(""));
+        assert_eq!(rig.machine.deck(), vec![Slot::Thermostat, Slot::Card(0), Slot::Card(1), Slot::Settings], "first, unless it says");
+        rig.machine.set_cards(cards(r#","thermostat":1"#), &mut vec![]);
+        assert_eq!(rig.machine.deck(), vec![Slot::Card(0), Slot::Thermostat, Slot::Card(1), Slot::Settings]);
+        rig.machine.set_cards(cards(r#","thermostat":9"#), &mut vec![]);
+        assert_eq!(rig.machine.deck(), vec![Slot::Card(0), Slot::Card(1), Slot::Thermostat, Slot::Settings], "past the end: last before settings");
+
+        let mut rig = deck_of(format!(r#"{{"cards":[{two}],"thermostat":1}}"#).as_bytes());
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "waking to the chooser: on the thermostat, where it is");
+        assert_eq!(rig.machine.position(), Some(1.0));
+        rig.turn(-CARD_STEP);
+        assert_eq!(rig.machine.mode, Mode::Chooser(0), "a card before it");
+        rig.input(Input::LongPress);
+        assert_eq!(rig.machine.mode, Mode::Home);
+        assert_eq!(rig.machine.position(), Some(1.0), "the thermostat's dial is its card");
     }
 
     #[test]

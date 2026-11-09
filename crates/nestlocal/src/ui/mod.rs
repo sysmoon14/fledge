@@ -48,7 +48,8 @@ use crate::logf;
 ///   4  option (select) and cover cards (select, position, open, close),
 ///      presets (preset), previous and next, a light group's members, and
 ///      the glance
-pub const PROTOCOL: u32 = 4;
+///   5  the thermostat anywhere among the cards (thermostat)
+pub const PROTOCOL: u32 = 5;
 
 #[derive(Default)]
 pub struct Ui {
@@ -591,7 +592,7 @@ impl Runtime {
                 // finds them all drawn.
                 let deck = self.machine.deck().len();
                 if let Some(index) = (1..deck).find(|i| !self.cards.contains_key(i)) {
-                    self.prepare(index as i64);
+                    self.prepare_key(index);
                 } else if let Some(index) = (1..deck).find(|i| !self.shrunk.contains_key(i)) {
                     let shrunk = zoom::shrink(&self.cards[&index]);
                     self.shrunk.insert(index, shrunk);
@@ -795,12 +796,13 @@ impl Runtime {
             return;
         }
         self.prepare(right);
+        let (from, to) = (self.key(left), self.key(right));
         let (cards, home) = (&self.cards, &self.home);
-        let get = |at: i64| match at.rem_euclid(count) as usize {
+        let get = |key: usize| match key {
             0 => home.as_deref(),
-            index => cards.get(&index).map(Vec::as_slice),
+            key => cards.get(&key).map(Vec::as_slice),
         };
-        if let (Some(from), Some(to)) = (get(left), get(right)) {
+        if let (Some(from), Some(to)) = (get(from), get(to)) {
             self.display.slide(from, to, (part * paint::SIZE as f32) as usize, true);
         }
     }
@@ -812,7 +814,7 @@ impl Runtime {
         let count = self.machine.deck().len() as i64;
         for k in (at.floor() as i64 - 2).max(0)..=(at.ceil() as i64 + 2).min(count - 1) {
             self.prepare(k);
-            let index = k.rem_euclid(count) as usize;
+            let index = self.key(k);
             if shrunk && !self.shrunk.contains_key(&index) {
                 let full = if index == 0 { self.home.clone() } else { self.cards.get(&index).cloned() };
                 if let Some(full) = full {
@@ -820,12 +822,13 @@ impl Runtime {
                 }
             }
         }
+        let keys: Vec<usize> = (0..count).map(|k| self.key(k)).collect();
         let (cards, shrunk_cards, home) = (&self.cards, &self.shrunk, &self.home);
         let get = |k: i64| -> Option<&[u8]> {
             if !(0..count).contains(&k) {
                 return None; // the cards stop at either end
             }
-            let index = k as usize;
+            let index = keys[k as usize];
             if shrunk {
                 shrunk_cards.get(&index).map(Vec::as_slice)
             } else if index == 0 {
@@ -872,8 +875,9 @@ impl Runtime {
     fn progress_moved(&mut self) -> bool {
         let now = unix_now();
         let mut moved = false;
-        for (index, slot) in self.machine.deck().into_iter().enumerate() {
+        for slot in self.machine.deck() {
             let Slot::Card(slot) = slot else { continue };
+            let index = slot + 1;
             let Some(Card::Media(card)) = self.machine.cards.cards.get(slot) else { continue };
             let Some(done) = card.progress(now) else { continue };
             let pixels = (done * screens::PROGRESS_WIDTH) as u32;
@@ -886,15 +890,31 @@ impl Runtime {
         moved
     }
 
+    /// Card `at`'s key (wrapping round the deck) in the frames drawn: the
+    /// thermostat 0, a card its slot + 1, settings after the cards. They
+    /// keep their keys wherever the thermostat goes.
+    fn key(&self, at: i64) -> usize {
+        let deck = self.machine.deck();
+        match deck[at.rem_euclid(deck.len() as i64) as usize] {
+            Slot::Thermostat => 0,
+            Slot::Card(slot) => slot + 1,
+            Slot::Settings => deck.len() - 1,
+        }
+    }
+
     /// Draws card `at` (wrapping round the deck) if it isn't yet.
     fn prepare(&mut self, at: i64) {
-        let deck = self.machine.deck();
-        let index = at.rem_euclid(deck.len() as i64) as usize;
+        self.prepare_key(self.key(at));
+    }
+
+    /// Draws the card with frame key `index` if it isn't yet.
+    fn prepare_key(&mut self, index: usize) {
         if index == 0 || self.cards.contains_key(&index) {
             return;
         }
+        let count = self.machine.cards.cards.len();
         let card = |slot: usize| self.machine.cards.cards.get(slot);
-        let screen = match deck[index] {
+        let screen = match if index > count { Slot::Settings } else { Slot::Card(index - 1) } {
             Slot::Card(slot) => match card(slot) {
                 Some(Card::Lights(card)) => Screen::LightsCard { card },
                 Some(Card::Climate(card)) => Screen::ClimateCard { card, target: None },
@@ -917,7 +937,7 @@ impl Runtime {
     /// Card `at` as a frame (nlclient's for the thermostat).
     fn card_frame(&mut self, at: i64) -> device::Frame {
         self.prepare(at);
-        let index = at.rem_euclid(self.machine.deck().len() as i64) as usize;
+        let index = self.key(at);
         let frame = if index == 0 { self.home.clone() } else { self.cards.get(&index).cloned() };
         frame.unwrap_or_else(|| vec![0; (paint::SIZE * paint::SIZE * 4) as usize])
     }
