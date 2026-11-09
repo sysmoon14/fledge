@@ -1,0 +1,110 @@
+name: Tried it on my thermostat
+description: Tell us how Fledge went on your Nest, whether it worked or not. Every report helps fill in what's been tested.
+title: "[Report] Gen <N>, firmware <version>, <works / problems / failed>"
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for trying Fledge. So far it has been tested on exactly one thermostat, so a report from yours, good or bad, is the most useful thing you can send.
+
+        If something is broken and you need help, use **Something went wrong** instead.
+  - type: dropdown
+    id: result
+    attributes:
+      label: How did it go?
+      options:
+        - Works, everything I tried
+        - Works, with some problems
+        - Patching failed, the thermostat is fine
+        - The thermostat stopped working or controlling the heating
+    validations:
+      required: true
+  - type: dropdown
+    id: generation
+    attributes:
+      label: Thermostat
+      options:
+        - Nest Learning Thermostat, 3rd generation
+        - Nest Learning Thermostat, 2nd generation
+        - Nest Learning Thermostat, 1st generation
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Nest firmware before patching
+      description: On the thermostat, Settings → Technical info → Software. The Fledge app's log also records it.
+      placeholder: "6.4-8"
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: Heating system
+      options:
+        - European, with a Heat Link
+        - US or other direct wiring
+        - Not sure
+    validations:
+      required: true
+  - type: checkboxes
+    id: controls
+    attributes:
+      label: What it controls
+      options:
+        - label: Heating
+        - label: Hot water
+        - label: Cooling
+        - label: Heat pump
+        - label: Multi-stage heating or cooling
+  - type: checkboxes
+    id: features
+    attributes:
+      label: What you turned on
+      options:
+        - label: MQTT with Home Assistant
+        - label: The Fledge Home Assistant integration (cards on the screen)
+        - label: Updates from Home Assistant
+        - label: Block cloud
+        - label: Matter over Wi-Fi
+        - label: Matter over Thread
+        - label: Zigbee
+        - label: SSH
+  - type: input
+    id: version
+    attributes:
+      label: Fledge version
+      description: From the app's About page or the release you downloaded.
+      placeholder: "v0.5.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: computer
+    attributes:
+      label: Computer you patched from
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: What worked, and what didn't
+      description: Anything that surprised you, looked wrong on the screen, or took more than one try.
+  - type: textarea
+    id: log
+    attributes:
+      label: Run log
+      description: |
+        Optional when everything worked; essential when it didn't. Find it on the app's **Logs** page (on Linux, `~/.local/share/fledge/logs/<timestamp>/fledge.log`). Drag the file into this box rather than pasting it.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before you send
+      options:
+        - label: I've removed passwords, MQTT credentials and Wi-Fi keys from anything I attached.
+          required: true

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Home Assistant cards, notifications or schedule cards
+    url: https://github.com/sysmoon14/fledge-homeassistant/issues/new/choose
+    about: Problems and ideas for the Fledge integration in Home Assistant.
+  - name: A security problem
+    url: https://github.com/sysmoon14/fledge/security/advisories/new
+    about: Report it privately, please, not in a public issue.
+  - name: Running unfr0zen, not Fledge?
+    url: https://github.com/unfr0zen/unfr0zen
+    about: Fledge is a fork. Problems with stock unfr0zen belong with its maintainers.

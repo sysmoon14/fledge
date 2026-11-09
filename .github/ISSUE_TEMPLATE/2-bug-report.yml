@@ -1,0 +1,100 @@
+name: Something went wrong
+description: The app, the patch or the thermostat isn't doing what it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If your heating isn't working right now:** restore the NAND backup from the app's **Backups** page (or `fledge restore`) to get back to stock, then come back here.
+
+        A problem with the cards, notifications or schedule cards in Home Assistant? That may belong in [fledge-homeassistant](https://github.com/sysmoon14/fledge-homeassistant/issues) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: screen
+    attributes:
+      label: What the thermostat screen showed
+      description: A photo helps a lot.
+  - type: dropdown
+    id: generation
+    attributes:
+      label: Thermostat
+      options:
+        - Nest Learning Thermostat, 3rd generation
+        - Nest Learning Thermostat, 2nd generation
+        - Nest Learning Thermostat, 1st generation
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Nest firmware
+      description: On the thermostat, Settings → Technical info → Software, or from the run log.
+      placeholder: "6.4-8"
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: Heating system
+      options:
+        - European, with a Heat Link
+        - US or other direct wiring
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Fledge version
+      placeholder: "v0.5.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How you ran it
+      options:
+        - The app
+        - The command line
+    validations:
+      required: true
+  - type: dropdown
+    id: computer
+    attributes:
+      label: Computer
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Features or options chosen
+      description: In the app, the choices on the Review page. On the command line, the full command.
+      placeholder: "--mqtt mqtts://… --updates --block-cloud --ssh"
+  - type: textarea
+    id: log
+    attributes:
+      label: Run log
+      description: |
+        From the app's **Logs** page (on Linux, `~/.local/share/fledge/logs/<timestamp>/fledge.log`). Drag the file into this box rather than pasting it.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send
+      options:
+        - label: I've removed passwords, MQTT credentials and Wi-Fi keys from anything I attached.
+          required: true
+        - label: I've looked through the existing issues for this.
+          required: true
