@@ -56,8 +56,16 @@ fn third_party_licenses(root: &std::path::Path) {
         std::fs::write(&dest, "pub static THIRD_PARTY: &[(&str, &str)] = &[];\n").unwrap();
     };
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let output = std::process::Command::new(cargo)
-        .args(["metadata", "--format-version", "1", "--frozen"]).current_dir(root).output();
+    // For the platform being built only: that is what the binary links, and
+    // the other platforms' crates need not be downloaded (--frozen fails on
+    // any that isn't, which left the list empty off Linux).
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let mut metadata = std::process::Command::new(cargo);
+    metadata.args(["metadata", "--format-version", "1", "--frozen"]);
+    if !target.is_empty() {
+        metadata.args(["--filter-platform", &target]);
+    }
+    let output = metadata.current_dir(root).output();
     let json = match output {
         Ok(out) if out.status.success() => out.stdout,
         result => return empty(&format!("cargo metadata failed ({result:?})")),
