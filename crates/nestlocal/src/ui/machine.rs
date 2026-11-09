@@ -5,8 +5,9 @@
 //! moves between devices; opened, it works the device. Waking shows the
 //! chooser on the thermostat, or what Home Assistant chose (Wake). A press
 //! opens the card; inside, a press acts, or opens a ring of actions whose
-//! first is Back. A long press goes back a level. Left alone, each level
-//! goes back to the one above.
+//! first is Back. A long press goes back a level. Going back is the hand's
+//! alone: left untouched, the screen times out wherever it is, and the next
+//! wake starts again from the top.
 
 use std::time::{Duration, Instant};
 
@@ -52,9 +53,8 @@ pub const HUE_STEP: i32 = 4;
 /// How far the cards follow a turn past either end, in counts.
 pub const END_GIVE: i32 = CARD_STEP / 6;
 pub const SNAP: Duration = Duration::from_millis(250);
-/// How long each level waits, untouched, before going back to the one above.
-pub const CONTROL_IDLE: Duration = Duration::from_secs(8);
-pub const LIST_IDLE: Duration = Duration::from_secs(12);
+/// How long the screen stays, untouched, on the cards or anything opened
+/// from them, before it times out (Home Assistant's card_idle, if set).
 pub const CARD_IDLE: Duration = Duration::from_secs(20);
 /// Back to the thermostat this long after the last input on nlclient's
 /// screens, once nlclient shows its home dial again.
@@ -1442,27 +1442,16 @@ impl Machine {
         }
         // Someone close keeps what shows, as a touch would.
         let idle = self.near_at.map_or(idle, |at| idle.min(now.duration_since(at)));
-        let back = match self.mode.clone() {
-            Mode::Chooser(_) if idle >= self.cards.card_idle().unwrap_or(CARD_IDLE) => Some(self.left_alone()),
-            Mode::LightList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
-            Mode::LightDim { slot, light, .. } if idle >= CONTROL_IDLE => Some(match self.card(slot) {
-                Some(Card::Lights(card)) if card.lights.len() > 1 => Mode::LightList { slot, selected: light },
-                _ => Mode::Chooser(self.place(Slot::Card(slot))),
-            }),
-            Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } if idle >= CONTROL_IDLE => {
-                Some(self.dimmer(slot, light))
-            }
-            Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
-            Mode::Camera { slot } if idle >= CAMERA_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
+        // Left alone, the screen times out: the cards, or a device opened
+        // from them, stay until then (going back is the hand's), and the
+        // journey starts again from what waking shows.
+        let timeout = self.cards.card_idle().unwrap_or(CARD_IDLE);
+        let back = match self.mode {
             Mode::Glance if idle >= GLANCE_IDLE && !self.holds_screen() => Some(Mode::Home),
-            Mode::OptionList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
-            Mode::Members { slot, .. } if idle >= LIST_IDLE => Some(self.dimmer(slot, 0)),
-            Mode::CoverSet { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
-            Mode::Menu { view, .. } if idle >= CONTROL_IDLE => Some(*view),
-            Mode::Thermostat { .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(self.place(Slot::Thermostat))),
-            Mode::Settings { .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.deck().len() - 1)),
-            Mode::SettingSet { setting, .. } if idle >= CONTROL_IDLE => Some(self.settings_at(setting)),
-            Mode::ThemePick { .. } if idle >= LIST_IDLE => Some(self.settings_at(Setting::Theme)),
+            Mode::Glance | Mode::Alert { .. } => None,
+            Mode::Camera { .. } if idle >= timeout.max(CAMERA_IDLE) => Some(self.left_alone()),
+            Mode::Camera { .. } => None,
+            _ if idle >= timeout => Some(self.left_alone()),
             _ => None,
         };
         if let Some(mode) = back {
@@ -1647,8 +1636,9 @@ mod tests {
         rig.turn(CARD_STEP);
         rig.press();
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 60 }, "straight to its dimmer");
-        rig.wait(CONTROL_IDLE);
-        assert_eq!(rig.machine.mode, Mode::Chooser(1), "left: back to the cards, no list");
+        rig.press();
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "Back: to the cards, no list");
         rig.turn(CARD_STEP);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::On("switch.fan".into())], "switched where it is");
         assert_eq!(rig.machine.mode, Mode::Chooser(2));
@@ -1687,8 +1677,10 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::LightHue { slot: 0, light: 0, value: 350 });
         rig.turn(VALUE_STEP * 4);
         assert_eq!(rig.machine.mode, Mode::LightHue { slot: 0, light: 0, value: 6 }, "round the wheel");
-        rig.wait(CONTROL_IDLE);
-        assert!(matches!(rig.machine.mode, Mode::LightDim { .. }), "left: its dimmer");
+        rig.wait(CARD_IDLE - Duration::from_secs(1));
+        assert!(matches!(rig.machine.mode, Mode::LightHue { .. }), "left alone: it stays");
+        rig.press();
+        assert!(matches!(rig.machine.mode, Mode::LightDim { .. }), "done: its dimmer");
         rig.press();
         rig.press();
         rig.turn(CARD_STEP);
@@ -1776,7 +1768,7 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Chooser(2), "a press: back to the cards");
         rig.press();
         rig.wait(CAMERA_IDLE);
-        assert_eq!(rig.machine.mode, Mode::Chooser(2), "left: back too");
+        assert_eq!(rig.machine.mode, Mode::Home, "left: the screen times out");
     }
 
     fn deck_of(json: &[u8]) -> Rig {
@@ -2373,19 +2365,39 @@ mod tests {
     }
 
     #[test]
-    fn each_level_goes_back_when_left() {
+    fn an_opened_card_stays_until_the_screen_times_out_then_starts_again() {
         let mut rig = Rig::woken();
         rig.turn(CARD_STEP);
         rig.press();
         rig.press();
         rig.press();
-        assert!(matches!(rig.machine.mode, Mode::Menu { .. }));
-        rig.wait(CONTROL_IDLE);
-        assert!(matches!(rig.machine.mode, Mode::LightDim { .. }));
-        rig.wait(CONTROL_IDLE);
-        assert_eq!(rig.machine.mode, Mode::LightList { slot: 0, selected: 0 });
-        rig.wait(LIST_IDLE);
-        assert_eq!(rig.machine.mode, Mode::Chooser(1));
+        let menu = rig.machine.mode.clone();
+        assert!(matches!(menu, Mode::Menu { .. }));
+        rig.wait(CARD_IDLE - Duration::from_secs(1));
+        assert_eq!(rig.machine.mode, menu, "left alone, it stays: going back is the hand's");
+        rig.wait(Duration::from_secs(1));
+        assert_eq!(rig.machine.mode, Mode::Home, "the screen times out");
+        rig.lit = false;
+        rig.tick();
+        rig.press();
+        rig.lit = true;
+        rig.tick();
+        assert_eq!(rig.machine.mode, Mode::Chooser(0), "woken again: from the start");
+    }
+
+    #[test]
+    fn a_camera_stays_at_least_its_minute() {
+        let mut rig = Rig::with(Cards::parse(br#"{"cards":[{"kind":"camera","id":"camera.front","name":"Front"}]}"#).unwrap());
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Camera { slot: 0 });
+        rig.wait(CARD_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Camera { slot: 0 });
+        rig.wait(CAMERA_IDLE - CARD_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Home);
     }
 
     #[test]
