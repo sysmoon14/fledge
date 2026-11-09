@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: apps-${{ github.event.release.tag_name || inputs.tag }}
@@ -27,8 +28,8 @@ env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
-  # The build image for this Dockerfile, as the Dockerfile's first twelve hex
-  # of SHA-256 tags it on Docker Hub (utils/ci/configs.py).
+  # The build image for this Dockerfile, from this repository's own registry
+  # (the Build image workflow pushes it there).
   image:
     runs-on: ubuntu-latest
     outputs:
@@ -44,11 +45,13 @@ jobs:
         env:
           DIGEST: ${{ vars.BUILD_IMAGE_DIGEST || 'sha256:b6a69cc0a5d416b6021b64e57df79bbc069b718f6d3fd514fd1646129cb071cd' }}
           FOR: 81db106ef2f9
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           [ "$(sha256sum utils/ci/Dockerfile | cut -c1-12)" = "$FOR" ] \
-            || { echo "::error::utils/ci/Dockerfile changed: pin the new build image's digest in apps.yml"; exit 1; }
-          image=unfr0zen/unfr0zen-build@$DIGEST
-          docker manifest inspect "$image" > /dev/null || { echo "::error::$image is not on Docker Hub"; exit 1; }
+            || { echo "::error::utils/ci/Dockerfile changed: run the Build image workflow and pin its digest in apps.yml"; exit 1; }
+          image=ghcr.io/sysmoon14/fledge-build@$DIGEST
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker manifest inspect "$image" > /dev/null || { echo "::error::$image is not in the registry: run the Build image workflow"; exit 1; }
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
   # What the app installs on the thermostat, under build/.
@@ -80,7 +83,9 @@ jobs:
       - name: Everything else, in the build image
         env:
           IMAGE: ${{ needs.image.outputs.image }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker run --rm -v "$PWD:$PWD" -w "$PWD" -e JOBS=4 -e CARGO_HOME="$PWD/.work/cargo" \
             -e UNFR0ZEN_BUILD_VERSION="$TAG" "$IMAGE" \
             sh -c 'git config --global --add safe.directory "$PWD" && utils/build-firmware.sh'
@@ -106,6 +111,7 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: write
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -138,8 +144,10 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
           TARGET: ${{ matrix.target }}
           BUILD: ${{ matrix.build }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tar xf firmware.tar && rm firmware.tar
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker run --rm -v "$PWD:$PWD" -w "$PWD" -e PLATFORM -e TARGET -e BUILD -e TAG \
             -e CARGO_BUILD_JOBS=4 -e UNFR0ZEN_BUILD_VERSION="$TAG" "$IMAGE" sh -ec '
               git config --global --add safe.directory "$PWD"
