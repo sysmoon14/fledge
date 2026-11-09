@@ -65,6 +65,28 @@ pub fn simple(bucket: &Fields, scale: &str) -> Value {
     })
 }
 
+/// When the schedule next changes the target from `target` (°C), from
+/// `day` (0 Monday) at `now` seconds after midnight: "HH:MM", as the Nest's
+/// dial says "until 18:00". None with no change in the week ahead.
+pub fn next_change(bucket: &Fields, target: Option<f64>, day: usize, now: f64) -> Option<String> {
+    let days = bucket.get("days");
+    for ahead in 0..8 {
+        let today = (day + ahead) % 7;
+        for e in setpoints(days.and_then(|d| d.get(today.to_string()))) {
+            let Some(time) = number(e.get("time")) else { continue };
+            if ahead == 0 && time <= now {
+                continue;
+            }
+            let temp = number(e.get("temp"));
+            let same = matches!((temp, target), (Some(a), Some(b)) if (a - b).abs() < 0.25);
+            if !same {
+                return Some(hhmm(time));
+            }
+        }
+    }
+    None
+}
+
 /// "HH:MM" as seconds after midnight.
 fn seconds(s: &str) -> Option<i64> {
     let (h, m) = s.split_once(':')?;
@@ -159,6 +181,21 @@ pub fn write(bucket: &Fields, arg: &str, now: i64) -> Result<Fields, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_next_change_is_the_next_setpoint_to_another_temperature() {
+        let bucket = serde_json::json!({"days": {
+            "0": {"0": {"entry_type": "continuation", "time": 0, "temp": 16.0},
+                  "1": {"entry_type": "setpoint", "time": 21600, "temp": 20.0},
+                  "2": {"entry_type": "setpoint", "time": 32400, "temp": 20.0},
+                  "3": {"entry_type": "setpoint", "time": 79200, "temp": 16.0}},
+            "1": {"1": {"entry_type": "setpoint", "time": 25200, "temp": 21.0}}}});
+        let bucket = bucket.as_object().unwrap();
+        assert_eq!(next_change(bucket, Some(20.0), 0, 30000.0).as_deref(), Some("22:00"), "09:00 keeps 20");
+        assert_eq!(next_change(bucket, Some(16.0), 0, 3600.0).as_deref(), Some("06:00"));
+        assert_eq!(next_change(bucket, Some(16.0), 0, 80000.0).as_deref(), Some("07:00"), "tomorrow's");
+        assert_eq!(next_change(&Fields::new(), Some(16.0), 0, 0.0), None, "no schedule");
+    }
     use crate::json::canonical;
     use serde_json::json;
 

@@ -10,9 +10,11 @@ use super::icons::Icon;
 pub const SIZE: u32 = 480;
 const CENTRE: f32 = SIZE as f32 / 2.0;
 /// The ring's outer edge, and how long its ticks are: as nlclient's dial.
-pub const RING: f32 = 236.0;
-pub const TICK: f32 = 46.0;
-pub const MARK: f32 = 64.0;
+/// Measured from nlclient's own dial: ticks from 179 to 232 out, the
+/// target's mark from 160.
+pub const RING: f32 = 233.0;
+pub const TICK: f32 = 54.0;
+pub const MARK: f32 = 73.0;
 /// The ring's ticks span 300°, open at the bottom.
 pub const TICKS: usize = 150;
 const SPAN: f32 = 300.0;
@@ -343,7 +345,11 @@ fn ring_pixels_unsorted() -> Vec<RingPixel> {
     {
         let mut pixels = Vec::new();
         let (inner, outer) = (RING - MARK - 1.0, RING + 1.0);
-        let cover = |distance: f32, radius: f32, half: f32, length: f32| {
+        // Each tick a wedge, as the Nest's: `half` its half width at its
+        // inner end and at the rim.
+        let cover = |distance: f32, radius: f32, (inner, rim): (f32, f32), length: f32| {
+            let along_tick = ((radius - (RING - length)) / length).clamp(0.0, 1.0);
+            let half = inner + (rim - inner) * along_tick;
             let across = (half + 0.5 - distance).clamp(0.0, 1.0);
             let along = (radius - (RING - length) + 0.5).clamp(0.0, 1.0) * (RING + 0.5 - radius).clamp(0.0, 1.0);
             (across * along * 255.0).round() as u8
@@ -361,8 +367,10 @@ fn ring_pixels_unsorted() -> Vec<RingPixel> {
                     continue;
                 }
                 let distance = radius * (angle - tick_angle(tick as usize, TICKS)).to_radians().sin().abs();
-                let (short, long) = (cover(distance, radius, 1.5, TICK), cover(distance, radius, 2.5, MARK));
-                let wide = cover(distance, radius, 3.6, TICK);
+                // The ring's ticks slim, as the Nest's; its marks wedges,
+                // broadest at the rim.
+                let (short, long) = (cover(distance, radius, (1.2, 1.2), TICK), cover(distance, radius, (2.3, 4.3), MARK));
+                let wide = cover(distance, radius, (2.8, 3.3), TICK);
                 if short > 0 || long > 0 || wide > 0 {
                     pixels.push(RingPixel { upright: y * SIZE + x, panel: x * SIZE + (SIZE - 1 - y),
                                             tick: tick as u8, short, long, wide });

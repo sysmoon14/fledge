@@ -56,6 +56,8 @@ pub const LIGHTING: Duration = Duration::from_millis(1500);
 /// The thermostat's target goes to nlclient once the ring has rested this
 /// long, not at every step: each change is a bucket write it acts on.
 pub const SETTLE: Duration = Duration::from_millis(700);
+/// How long the thermostat's dial says "Heat set to" after the ring turns.
+pub const SET_SHOWN: Duration = Duration::from_secs(3);
 /// The minutes a hot water boost runs from the thermostat's menu.
 pub const BOOST_MINUTES: u32 = 60;
 
@@ -277,6 +279,9 @@ pub struct Machine {
     /// card gives way to Nest's own dial (the thermostat as it was).
     pub nest: Option<Nest>,
     pub nest_dial: bool,
+    /// When the thermostat's ring last turned: its dial says what it's set
+    /// to for SET_SHOWN after.
+    pub set_at: Option<Instant>,
 }
 
 impl Machine {
@@ -285,7 +290,7 @@ impl Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
-            nest: None, nest_dial: false,
+            nest: None, nest_dial: false, set_at: None,
         }
     }
 
@@ -538,6 +543,9 @@ impl Machine {
                     }
                 }
                 self.movement += value;
+                if matches!(self.mode, Mode::Thermostat { .. }) {
+                    self.set_at = Some(now);
+                }
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
                     Mode::LightList { .. } | Mode::Menu { .. } | Mode::OptionList { .. } | Mode::Members { .. }

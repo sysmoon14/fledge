@@ -899,6 +899,15 @@ impl crate::ui::Sender for Bridge {
         let newer = self.updates().and_then(|u| u.latest.lock().unwrap().clone())
             .filter(|r| crate::update::newer(&r.tag, crate::update::VERSION));
         s.insert("update".into(), newer.map_or(Value::Null, |r| r.tag.into()));
+        // When the schedule next changes the target, by the unit's clock.
+        let next = buckets.get("schedule").and_then(|schedule| {
+            use chrono::{Datelike, Timelike};
+            let now = chrono::Local::now();
+            let target = number(sh.get("target_temperature"));
+            crate::schedule::next_change(schedule, target, now.weekday().num_days_from_monday() as usize,
+                                         now.num_seconds_from_midnight() as f64)
+        });
+        s.insert("next_change".into(), next.map_or(Value::Null, Value::from));
         Some(s)
     }
 

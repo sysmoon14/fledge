@@ -272,6 +272,8 @@ pub struct Nest {
     /// This build of nestlocal, and a newer release to install, if any.
     pub version: String,
     pub update: Option<String>,
+    /// When its schedule next changes the target ("HH:MM", its own clock).
+    pub next_change: Option<String>,
 }
 
 impl Nest {
@@ -320,6 +322,7 @@ impl Nest {
             sunblock: on("sunlight_correction_enabled"),
             version: text("version"),
             update: s.get("update").and_then(Value::as_str).map(str::to_owned),
+            next_change: s.get("next_change").and_then(Value::as_str).map(str::to_owned),
         }
     }
 

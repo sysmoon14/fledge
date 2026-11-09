@@ -253,6 +253,8 @@ struct Runtime {
     glide: Option<Glide>,
     /// Something changed that the machine doesn't know of: draw.
     force_draw: bool,
+    /// Whether the thermostat's dial says what it's set to (machine.set_at).
+    set_words: bool,
     /// nlclient's dial as it last showed lit, and when: the thermostat's
     /// card when the display wakes, its own page dark until nlclient draws.
     dial: Option<device::Frame>,
@@ -304,7 +306,7 @@ impl Runtime {
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
-            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false,
+            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, set_words: false,
             dial: None, last_dial: now - Duration::from_secs(60),
         }
     }
@@ -453,6 +455,10 @@ impl Runtime {
                 mode_state(&self.machine.mode);
             }
             self.schedule_pulse(&before, now);
+            let set_words = self.machine.set_at.is_some_and(|at| now.duration_since(at) < machine::SET_SHOWN);
+            if std::mem::replace(&mut self.set_words, set_words) != set_words {
+                self.force_draw = true;
+            }
             self.transition = transition(&before, &self.machine.mode, turned && lit);
             if std::mem::take(&mut self.machine.woke) {
                 // Woken: the thermostat as it lit, zooming out to the cards.
@@ -1097,7 +1103,10 @@ impl Runtime {
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
             Mode::Glance => Screen::Glance { glance: machine.cards.glance.as_ref()?, cards: &machine.cards.cards,
                                              now: unix_now() as i64 },
-            Mode::Thermostat { target } => Screen::NestSet { nest: machine.nest.as_ref()?, target: *target, pulse: None },
+            Mode::Thermostat { target } => Screen::NestSet {
+                nest: machine.nest.as_ref()?, target: *target, pulse: None,
+                setting: machine.set_at.is_some_and(|at| at.elapsed() < machine::SET_SHOWN),
+            },
             Mode::Settings { selected } => Screen::Settings { rows: machine.settings(), nest: machine.nest.as_ref(),
                                                               nest_dial: machine.nest_dial, selected: *selected },
             Mode::SettingSet { setting, value } => Screen::SettingSet { setting: *setting, nest: machine.nest.as_ref()?,
@@ -1188,6 +1197,11 @@ impl Runtime {
         // A value screen draws its still part once, then only what changes.
         if let Some(key) = screens::still_key(&screen) {
             let fresh = !matches!(&self.live, Some((kept, ..)) if *kept == key);
+            // The thermostat's dial turning orange (or blue, or black) as the
+            // target passes the temperature now: faded, as the Nest's.
+            let recolour = matches!(&self.live, Some((kept, ..))
+                if kept.starts_with("nest ") && key.starts_with("nest ") && kept.split(' ').nth(1) != key.split(' ').nth(1));
+            let fade = fade || recolour;
             if fresh {
                 let still = screens::still(&self.fonts, &screen);
                 let live = paint::Live::new(&still);
@@ -1615,8 +1629,8 @@ mod shots {
         for (name, nest) in &shots {
             save(&screens::draw(&fonts, &Screen::NestCard { nest, now }, None), &format!("{out}/{name}.png"));
         }
-        save(&screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 22.0, pulse: None }, None), &format!("{out}/t5-nest-set.png"));
-        let mut menu = screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 21.5, pulse: None }, None);
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 22.0, pulse: None, setting: true }, None), &format!("{out}/t5-nest-set.png"));
+        let mut menu = screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 21.5, pulse: None, setting: false }, None);
         screens::menu(&mut menu, &fonts, "Thermostat", &[("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"),
             ("mdi:power", "Turn off"), ("mdi:water-boiler", "Stop the boost"), ("mdi:thermometer", "Nest's own dial")], 1);
         save(&menu, &format!("{out}/t6-nest-menu.png"));
@@ -1632,9 +1646,18 @@ mod shots {
         let cold = state(serde_json::json!({"action": "heating", "target": 22.0, "current_temperature": 19.5,
             "time_to_target": "2026-11-09T08:13:00Z"}));
         for (name, phase) in [("p1-pulse-start", Some(0.15)), ("p2-pulse-mid", Some(0.4)), ("p3-pulse-fade", Some(0.85)), ("p0-rest", None)] {
-            save(&screens::draw(&fonts, &Screen::NestSet { nest: &cold, target: 22.0, pulse: phase }, None),
+            save(&screens::draw(&fonts, &Screen::NestSet { nest: &cold, target: 22.0, pulse: phase, setting: false }, None),
                  &format!("{out}/{name}.png"));
         }
+        let scheduled = state(serde_json::json!({"action": "heating", "target": 22.0, "current_temperature": 21.0,
+            "time_to_target": "2026-11-09T08:13:00Z", "next_change": "18:00"}));
+        save(&screens::draw(&fonts, &Screen::NestCard { nest: &scheduled, now }, None), &format!("{out}/n1-card.png"));
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: &scheduled, target: 22.5, pulse: None, setting: true }, None),
+             &format!("{out}/n2-set-up.png"));
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: &scheduled, target: 20.0, pulse: None, setting: true }, None),
+             &format!("{out}/n3-set-down.png"));
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: &scheduled, target: 22.0, pulse: None, setting: false }, None),
+             &format!("{out}/n4-open.png"));
         let mut zoomed = vec![0u8; (paint::SIZE * paint::SIZE * 4) as usize];
         let frames: Vec<device::Frame> = [Screen::NestCard { nest: &cold, now }, Screen::SettingsCard,
             Screen::ActionCard { card: &scene, done: false }].iter().map(|screen| {
