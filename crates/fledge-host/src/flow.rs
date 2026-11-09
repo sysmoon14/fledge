@@ -42,6 +42,9 @@ pub struct PatchInputs {
     pub mqtt_password: Option<String>,
     pub mqtt_tls: bool,
     pub mqtt_ca: Option<PathBuf>,
+    /// Install Fledge's signed releases from Home Assistant's update entity;
+    /// needs MQTT. Off, the unit offers no updates.
+    pub updates: bool,
     /// Serve the unit over Matter too (or instead of MQTT).
     pub matter: bool,
     /// Enable the onboard Thread transport for Matter.
@@ -64,6 +67,8 @@ pub struct PatchInputs {
     pub ssh: bool,
     /// One OpenSSH public key to authorize for root; requires SSH.
     pub ssh_public_key: Option<PathBuf>,
+    /// SSH takes keys only, refusing root's password; requires the key.
+    pub ssh_key_only: bool,
     /// The USB root shell (an ACM port); off by default. Without it the run
     /// cannot log in at the end to confirm the result.
     pub usb_shell: bool,
@@ -92,12 +97,14 @@ impl PatchInputs {
             ("root-password", secret(&self.root_password)),
             ("ssh", on(self.ssh)),
             ("ssh-public-key", file(&self.ssh_public_key)),
+            ("ssh-key-only", on(self.ssh_key_only)),
             ("usb-shell", on(self.usb_shell)),
             ("mqtt", self.mqtt.as_deref().map(mask_url)),
             ("mqtt-user", secret(&self.mqtt_user)),
             ("mqtt-password", secret(&self.mqtt_password)),
             ("mqtt-tls", on(self.mqtt_tls)),
             ("mqtt-ca", file(&self.mqtt_ca)),
+            ("updates", on(self.updates)),
             ("matter", on(self.matter)),
             ("matter-code", secret(&self.matter_code)),
             ("matter-thread", on(self.matter_thread)),
@@ -122,9 +129,15 @@ impl PatchInputs {
         if self.ssh_public_key.is_some() && !self.ssh {
             return Err(failure("--ssh-public-key needs --ssh"));
         }
+        if self.ssh_key_only && self.ssh_public_key.is_none() {
+            return Err(failure("--ssh-key-only needs --ssh-public-key: without a key nothing could log in"));
+        }
         if (self.mqtt_user.is_some() || self.mqtt_password.is_some() || self.mqtt_tls || self.mqtt_ca.is_some())
             && self.mqtt.is_none() {
             return Err(failure("--mqtt-user, --mqtt-password, --mqtt-tls and --mqtt-ca need --mqtt"));
+        }
+        if self.updates && self.mqtt.is_none() {
+            return Err(failure("--updates are offered through Home Assistant: they need --mqtt"));
         }
         let code = self.matter_code.as_deref().map(str::trim).filter(|c| !c.is_empty());
         let matter = self.matter || code.is_some();
@@ -156,6 +169,7 @@ impl PatchInputs {
             Some(url) => Some(Mqtt {
                 url: url.clone(), user: self.mqtt_user.clone(), password: self.mqtt_password.clone(),
                 tls: self.mqtt_tls, ca: self.mqtt_ca.as_deref().map(|p| read("--mqtt-ca", p)).transpose()?,
+                updates: self.updates,
             }),
             None => None,
         };
@@ -185,6 +199,7 @@ impl PatchInputs {
             external_temperature: self.external_temperature,
             ssh: self.ssh,
             ssh_public_key,
+            ssh_key_only: self.ssh_key_only,
             ssh_server: None,
             usb_shell: self.usb_shell,
         })

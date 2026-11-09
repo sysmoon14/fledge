@@ -164,6 +164,7 @@ impl Form {
             mqtt_tls: self.mqtt.on && self.mqtt_tls,
             // The CA field only shows under TLS, so it only sends under TLS.
             mqtt_ca: (self.mqtt.on && self.mqtt_tls).then(|| self.mqtt_ca.path.clone()).flatten(),
+            updates: false,
             matter: self.matter.on,
             matter_thread: self.matter.on && self.matter_thread,
             matter_code: self.matter.on.then(|| self.matter.code.clone()),
@@ -174,6 +175,7 @@ impl Form {
             external_temperature: self.external_temperature,
             ssh: self.ssh,
             ssh_public_key: self.ssh.then(|| self.ssh_key.path.clone()).flatten(),
+            ssh_key_only: false,
             usb_shell: self.usb_shell,
         }
     }

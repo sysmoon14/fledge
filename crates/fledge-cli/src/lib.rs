@@ -69,6 +69,9 @@ struct Args {
     /// authorize one OpenSSH public key for root (gen3's stock SSH may need ECDSA)
     #[arg(long, value_name = "FILE", requires = "ssh", help_heading = "Root filesystem options")]
     ssh_public_key: Option<PathBuf>,
+    /// SSH takes keys only: root's password is refused (needs --ssh-public-key)
+    #[arg(long, requires = "ssh_public_key", help_heading = "Root filesystem options")]
+    ssh_key_only: bool,
     /// a root shell on the unit's USB serial port, which the run then confirms (default: no USB serial port)
     #[arg(long, help_heading = "Root filesystem options")]
     usb_shell: bool,
@@ -87,6 +90,9 @@ struct Args {
     /// PEM CA certificate to verify the broker against (implies --mqtt-tls)
     #[arg(long, value_name = "FILE", help_heading = "Root filesystem options")]
     mqtt_ca: Option<PathBuf>,
+    /// install Fledge's signed releases from Home Assistant's update entity (needs --mqtt)
+    #[arg(long, help_heading = "Root filesystem options")]
+    updates: bool,
     /// serve the unit over Matter, with or without --mqtt
     #[arg(long, help_heading = "Root filesystem options")]
     matter: bool,
@@ -197,6 +203,7 @@ impl Args {
             mqtt_password: self.mqtt_password.clone(),
             mqtt_tls: self.mqtt_tls,
             mqtt_ca: self.mqtt_ca.clone(),
+            updates: self.updates,
             matter: self.matter,
             matter_thread: self.matter_thread,
             matter_code: self.matter_code.clone(),
@@ -207,6 +214,7 @@ impl Args {
             external_temperature: self.external_temperature,
             ssh: self.ssh,
             ssh_public_key: self.ssh_public_key.clone(),
+            ssh_key_only: self.ssh_key_only,
             usb_shell: self.usb_shell,
         }
     }

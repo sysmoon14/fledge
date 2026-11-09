@@ -71,7 +71,16 @@ pub struct Mqtt {
     pub password: Option<String>,
     pub tls: bool,
     pub ca: Option<Vec<u8>>,
+    /// Offer Fledge's signed releases on Home Assistant's update entity
+    /// (UPDATE_REPO, signed with UPDATE_KEY). Without it nestlocal offers none.
+    pub updates: bool,
 }
+
+/// The GitHub repository whose releases a unit with updates installs.
+pub const UPDATE_REPO: &str = "sysmoon14/fledge";
+/// The Ed25519 public key (base64) those releases are signed with
+/// (utils/release-nestlocal.sh prints it).
+pub const UPDATE_KEY: &str = "7eIg9OAPKjpPeuXdvCXlOy+VAZfnSHDGOJY4HUIdgy8=";
 
 /// host, host:port or tcp://host[:port], as the tcp:// URL nestlocal takes.
 pub fn mqtt_url(value: &str) -> Result<String> {
@@ -221,6 +230,9 @@ pub fn mqtt_options(mqtt: &Mqtt) -> Result<(Vec<u8>, Vec<NamedFile>)> {
         }
         options += &format!(" -mqtt-ca /{CA_FILE}");
         files.push((CA_FILE.to_string(), 0o644, ca.clone()));
+    }
+    if mqtt.updates {
+        options += &format!(" -update-repo {UPDATE_REPO} -update-key {UPDATE_KEY}");
     }
     Ok((format!("{options}\n").into_bytes(), files))
 }
@@ -654,6 +666,16 @@ mod tests {
         assert_eq!(options("mqtt.lan", true), "-mqtt tcp://mqtt.lan:8883 -mqtt-tls\n");
         assert_eq!(options("tcp://10.0.0.2:1884", false), "-mqtt tcp://10.0.0.2:1884\n");
         assert!(mqtt_url("bad url!").is_err());
+    }
+
+    #[test]
+    fn updates_name_fledges_releases_and_their_key() {
+        let options = |updates| String::from_utf8(mqtt_options(&Mqtt { url: "broker".into(), updates, ..Mqtt::default() })
+            .unwrap().0).unwrap();
+        assert_eq!(options(false), "-mqtt tcp://broker:1883\n", "no updates: no update entity");
+        assert_eq!(options(true), format!("-mqtt tcp://broker:1883 -update-repo sysmoon14/fledge -update-key {UPDATE_KEY}\n"));
+        // An Ed25519 key, 32 bytes, in standard base64.
+        assert!(UPDATE_KEY.len() == 44 && UPDATE_KEY.ends_with('=') && !UPDATE_KEY[..43].contains('='));
     }
 
     #[test]
