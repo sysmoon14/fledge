@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fledge: Home Assistant on your Nest thermostat's own screen</title>
+<meta name="description" content="Fledge roots a Nest Learning Thermostat over USB, runs it locally without Google's cloud, and puts Home Assistant on its own screen: lights, heating zones and speakers, on the ring.">
+<meta property="og:title" content="Fledge">
+<meta property="og:description" content="Home Assistant on your Nest thermostat's own screen.">
+<meta property="og:image" content="https://sysmoon14.github.io/fledge/fledge.png">
+<link rel="icon" href="fledge.svg" type="image/svg+xml">
+<style>
+/* Fledge's own look: its face's navy, the Nest's heating orange, and the
+   fonts the thermostat draws with (Outfit for figures, DM Sans for words). */
+@font-face { font-family: "Outfit"; src: url("Outfit-Light.ttf") format("truetype"); font-weight: 300; font-display: swap; }
+@font-face { font-family: "DM Sans"; src: url("DMSans-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "DM Sans"; src: url("DMSans-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+:root {
+  color-scheme: dark;
+  --face: #090d15; --lift: #111826; --line: #212c3d; --ink: #eef0f3; --muted: #9aa5b6;
+  --heat: #f26a12; --heat-soft: #ff9654; --warn: #f3c565;
+  --display: "Outfit", "DM Sans", system-ui, sans-serif;
+  --body: "DM Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--face); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; }
+a { color: var(--heat-soft); text-underline-offset: 3px; }
+a:focus-visible, .button:focus-visible { outline: 2px solid var(--heat-soft); outline-offset: 3px; }
+img, video { max-width: 100%; display: block; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 max(20px, env(safe-area-inset-right)) 0 max(20px, env(safe-area-inset-left)); }
+h1, h2 { font-family: var(--display); font-weight: 300; line-height: 1.08; margin: 0; text-wrap: balance; }
+h1 { font-size: clamp(40px, 7.4vw, 76px); letter-spacing: -0.01em; }
+h2 { font-size: clamp(30px, 4.6vw, 44px); }
+h3 { font-size: 18px; font-weight: 500; margin: 0 0 4px; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+
+header.top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 22px; }
+.brand { display: flex; align-items: center; gap: 10px; font-family: var(--display); font-size: 24px; color: var(--ink); text-decoration: none; }
+.brand img { width: 34px; height: 34px; border-radius: 8px; }
+nav { display: flex; gap: 22px; font-size: 15px; }
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover { color: var(--ink); }
+
+.hero { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 48px; align-items: center; padding-block: 36px 72px; }
+.hero p.lede { font-size: 20px; color: var(--muted); max-width: 34ch; margin-top: 20px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+.button { display: inline-flex; align-items: center; height: 46px; padding: 0 22px; border-radius: 23px; font-weight: 500; font-size: 16px; text-decoration: none; }
+.button.primary { background: var(--heat); color: #fff; }
+.button.primary:hover { background: #ff7a22; }
+.button.quiet { color: var(--ink); border: 1px solid #2c3748; }
+.button.quiet:hover { border-color: var(--muted); }
+.hero video { width: 100%; aspect-ratio: 1; border-radius: 28px; background: #06090e; }
+.hero .note { font-size: 13px; color: var(--muted); margin-top: 10px; text-align: center; }
+
+section { padding-block: 64px; border-top: 1px solid var(--line); }
+.intro { max-width: 60ch; margin-top: 14px; color: var(--muted); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 34px; }
+.cards.three { grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
+.card { background: var(--lift); border-radius: 16px; padding: 20px 22px; }
+.card p { color: var(--muted); font-size: 15.5px; }
+.ring { font-family: var(--display); color: var(--heat-soft); font-size: 15px; letter-spacing: 0.02em; }
+
+.looks { display: grid; gap: 14px; margin-top: 34px; }
+.looks figure { margin: 0; }
+.looks img { border-radius: 16px; width: 100%; }
+figcaption { font-size: 14px; color: var(--muted); margin-top: 8px; }
+
+.steps { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 40px; align-items: start; margin-top: 34px; }
+.steps ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 22px; counter-reset: step; }
+.steps li { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 14px; counter-increment: step; }
+.steps li::before { content: counter(step); font-family: var(--display); font-size: 32px; line-height: 1; color: var(--heat-soft); }
+.steps li p { color: var(--muted); font-size: 15.5px; }
+.steps img { border-radius: 14px; border: 1px solid var(--line); }
+
+.warning { background: #1d1708; border: 1px solid #4a3a14; border-radius: 16px; padding: 22px 24px; margin-top: 30px; }
+.warning h3 { color: var(--warn); }
+.warning p + p { margin-top: 10px; }
+.warning p { color: #e6dcc3; font-size: 15.5px; max-width: 78ch; }
+
+footer { border-top: 1px solid var(--line); padding-block: 34px 60px; color: var(--muted); font-size: 14px; display: grid; gap: 8px; }
+footer p { max-width: 80ch; }
+
+@media (max-width: 820px) {
+  .hero, .steps { grid-template-columns: minmax(0, 1fr); gap: 30px; }
+  .hero { padding-block: 16px 52px; }
+  nav a.wide { display: none; }
+  section { padding-block: 48px; }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="./"><img src="fledge.svg" alt="">Fledge</a>
+    <nav>
+      <a class="wide" href="#cards">On the screen</a>
+      <a class="wide" href="#setup">Set-up</a>
+      <a href="https://github.com/sysmoon14/fledge">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>Your Nest thermostat, out of the nest.</h1>
+      <p class="lede">Fledge roots a Nest Learning Thermostat over USB, cuts it loose from Google's cloud, and puts Home Assistant on its own screen.</p>
+      <div class="actions">
+        <a class="button primary" href="https://github.com/sysmoon14/fledge/releases/latest">Download Fledge</a>
+        <a class="button quiet" href="https://github.com/sysmoon14/fledge#get-started">How to set it up</a>
+      </div>
+    </div>
+    <div>
+      <video src="showcase.mp4" poster="poster.jpg" autoplay muted loop playsinline controls preload="metadata" aria-label="A walk through Fledge's screens on the thermostat: the glance, the cards, a lamp's dimmer, a heating zone, a speaker, and the thermostat itself, in both looks."></video>
+      <p class="note">Drawn by the code that runs on the thermostat. Not filmed.</p>
+    </div>
+  </div>
+</div>
+
+<section id="cards">
+  <div class="wrap">
+    <h2>The ring runs the house.</h2>
+    <p class="intro">Walk up, and your devices show around the thermostat. Turn to browse, press to open, and the ring becomes that device's control, with the Nest's own clicks.</p>
+    <div class="cards three">
+      <div class="card"><p class="ring">Turn: brightness</p><h3>Lights</h3><p>Dim, switch, and set warmth and colour. A light group is one card for the whole room.</p></div>
+      <div class="card"><p class="ring">Turn: temperature</p><h3>Other heating zones</h3><p>Any Home Assistant thermostat, set the way the Nest sets its own.</p></div>
+      <div class="card"><p class="ring">Turn: volume</p><h3>Speakers</h3><p>Album art, what's playing and how far through. Hold to pause.</p></div>
+      <div class="card"><p class="ring">Press: run</p><h3>Scenes and scripts</h3><p>One press for Goodnight, or anything else you've built.</p></div>
+      <div class="card"><p class="ring">Turn: how open</p><h3>Blinds and covers</h3><p>Set the position, or open and close from the card's menu.</p></div>
+      <div class="card"><p class="ring">Press: a fresh picture</p><h3>Cameras</h3><p>The latest still fills the round screen. A doorbell can put it there by itself.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Still a Nest.</h2>
+    <p class="intro">Nest's own software keeps running the heating, the schedule, the learning and the safety limits. Fledge runs beside it and stands in for Google's cloud, so the thermostat talks to Home Assistant over MQTT on your own network. No Google account, and no internet needed.</p>
+    <div class="cards">
+      <div class="card"><h3>A glance from across the room</h3><p>The time, the weather and what's on, when the Nest sees you come in. Your cards when you walk up.</p></div>
+      <div class="card"><h3>Notifications</h3><p>An automation can put a message or a camera's picture on the screen, and act on the press that answers it.</p></div>
+      <div class="card"><h3>Updates from Home Assistant</h3><p>Signed releases arrive as an ordinary update entity, and roll back by themselves if one fails to start.</p></div>
+      <div class="card"><h3>Schedules on your dashboards</h3><p>Two dashboard cards edit the Nest's own heating and hot water schedules.</p></div>
+    </div>
+    <div class="looks">
+      <figure><img src="cards.png" alt="Five screens in the Nest's own look: the device chooser on a lamp's card, the lamp's warmth dial, a heating zone that is heating, a speaker's album art, and the lamp's colour dial." loading="lazy"><figcaption>The Nest's own look.</figcaption></figure>
+      <figure><img src="fledge.png" alt="Five screens in Fledge's look: the thermostat heating, a lamp at 60 percent, a speaker's album art, the glance, and Settings." loading="lazy"><figcaption>Fledge's look. You choose on the thermostat.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="setup">
+  <div class="wrap">
+    <h2>Set-up is one guided flow.</h2>
+    <div class="steps">
+      <ol>
+        <li><div><h3>Plug the display into your computer</h3><p>Take it off its base and connect it with a micro-USB cable that carries data. The Fledge app runs on macOS, Windows and Linux.</p></div></li>
+        <li><div><h3>Follow Set up in the app</h3><p>Give it your MQTT broker and choose what you want. It offers a full backup of the thermostat first, so you can always put it back exactly as it was.</p></div></li>
+        <li><div><h3>Add the integration in Home Assistant</h3><p>The thermostat appears by itself. The <a href="https://github.com/sysmoon14/fledge-homeassistant">Fledge integration</a> puts your devices on its screen, in the order you drag them into.</p></div></li>
+      </ol>
+      <img src="app.png" alt="The Fledge app's Set up page, on its first step: Connect your thermostat, with a 3rd generation thermostat found over USB." loading="lazy">
+    </div>
+    <div class="warning">
+      <h3>Read this before you start</h3>
+      <p>Fledge has been tested on exactly one thermostat: a 3rd generation Nest Learning Thermostat on Nest firmware 6.4-8, a European model with a Heat Link driving heating and hot water, set up with MQTT and Home Assistant. On anything else, you are the first.</p>
+      <p>It rewrites the flash of the device that runs your heating. A failed run can leave the thermostat unbootable. Take the backup, and have another way to heat the house while you try it. Fledge comes without any warranty.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Fledge is a fork of <a href="https://github.com/unfr0zen/unfr0zen">unfr0zen</a>, whose authors worked out how to get into the thermostat and run it locally. Fledge adds Home Assistant on its screen. Licensed under the GNU GPL v3.0.</p>
+    <p>Fledge is not affiliated with, endorsed or sponsored by Google LLC or Nest Labs. Nest and Nest Learning Thermostat are trademarks of Google LLC. Claude Code has been used throughout its development.</p>
+    <p><a href="https://github.com/sysmoon14/fledge">sysmoon14/fledge</a> · <a href="https://github.com/sysmoon14/fledge-homeassistant">sysmoon14/fledge-homeassistant</a> · <a href="https://github.com/sysmoon14/fledge/releases">Releases</a></p>
+  </div>
+</footer>
+</body>
+</html>
