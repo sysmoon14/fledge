@@ -329,14 +329,29 @@ under its shareware terms.
 
 ## Acknowledgements
 
-Fledge is a fork of **[unfr0zen](https://github.com/unfr0zen/unfr0zen)**, by
-willtm and its contributors, and stands on everything they built: getting into
-the thermostat over USB, patching it safely and reversibly, the backups, the
-app, and nestlocal with its MQTT, Matter and Zigbee. Fledge adds Home Assistant
-on the thermostat's screen and its own releases on top. Thank you to everyone
-who made unfr0zen: none of this would exist without it. If Fledge is useful to
-you, go and give [their repository](https://github.com/unfr0zen/unfr0zen) a star
-too.
+Fledge is a fork of **[unfr0zen](https://github.com/unfr0zen/unfr0zen)**, and
+it owes almost everything to **Will ([@will-tm](https://github.com/will-tm))**,
+who wrote nearly all of unfr0zen and did the hard part:
+
+- **Getting in.** Rooting the Nest over USB through the i.MX ROM's recovery
+  mode, the gen 3 entry points and loaders, and an app that handles stalled
+  serial links, refusing ROMs and secure-boot revisions it can't touch.
+- **Doing it safely.** Full NAND backups (bad blocks and all), a patch to
+  `nlclient` that finds its own way round each firmware and can always be undone,
+  and a stock client left in place whenever a firmware isn't supported.
+- **nestlocal.** Local control without Google's cloud over MQTT, Matter (Wi-Fi
+  and Thread) and Zigbee, down to driving the gen 2's radio pins, hot water
+  boost, Works with Nest boilers and regulating from an external sensor.
+- **Knowing the hardware.** Reverse engineering the Nest's client, screen and
+  radios, and testing it all on real thermostats across firmware versions.
+
+Fledge's own work, Home Assistant on the thermostat's screen and its releases,
+sits on top of that foundation, and every Fledge release still carries it.
+Thanks also to [@calin2k](https://github.com/calin2k) for their contributions
+to unfr0zen.
+
+If Fledge is useful to you, please
+[star unfr0zen](https://github.com/unfr0zen/unfr0zen) too.
 
 ## Credits
 
