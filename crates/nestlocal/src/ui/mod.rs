@@ -261,6 +261,10 @@ struct Runtime {
     progress_drawn: Instant,
     /// The next frame fades in (the media page's track back).
     fade_next: bool,
+    /// The thermostat's dial changing colour: the frame it fades from, and
+    /// when it began; and the still parts kept for it, by still_key.
+    recolour: Option<(device::Frame, Instant)>,
+    stills: HashMap<String, paint::Canvas>,
     /// How far the dial's temperature now has faded in, and where it's going
     /// (1 while the target is another, else 0).
     now_shown: (f32, f32),
@@ -290,6 +294,8 @@ const PULSE: Duration = Duration::from_millis(1800);
 const PULSE_EVERY: Duration = Duration::from_secs(30);
 /// How fast a list's highlight glides to its row: most of the way in this.
 const GLIDE: f32 = 0.05;
+/// How long the thermostat's dial takes to change colour.
+const RECOLOUR: Duration = Duration::from_millis(220);
 /// How long fading from one screen to the next takes.
 const FADE: Duration = Duration::from_millis(280);
 
@@ -317,7 +323,8 @@ impl Runtime {
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
-            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false, now_shown: (0.0, 0.0), now_side: 1.0,
+            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
+            recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
             dial: None, last_dial: now - Duration::from_secs(60),
         }
     }
@@ -501,7 +508,7 @@ impl Runtime {
             self.last_frame = now;
             let swept = self.sweep(elapsed);
             let mut dirty = self.machine.take_dirty() | std::mem::take(&mut self.force_draw) || self.pulse.is_some()
-                || self.gliding();
+                || self.gliding() || self.recolour.is_some();
             if self.machine.mode == Mode::Glance && unix_now() as i64 / 60 != self.glance_minute {
                 // The glance's clock, as the minute turns.
                 self.glance_minute = unix_now() as i64 / 60;
@@ -550,6 +557,16 @@ impl Runtime {
                     self.dial = Some(page);
                 }
             }
+            if !self.animating() && matches!(self.machine.mode, Mode::Thermostat { .. })
+                && self.machine.idle(now) >= Duration::from_millis(400) {
+                // The dial in its other colour ready while it rests, so the
+                // target crossing the temperature now costs no more than a turn.
+                if let Some(screen) = Self::screen(&self.machine, &self.machine.mode) {
+                    if let Some((key, still)) = Self::other_still(&self.fonts, &screen, &self.stills) {
+                        self.stills.insert(key, still);
+                    }
+                }
+            }
             if !self.animating() && self.machine.mode != Mode::Idle {
                 // One card at a time while nothing moves, so the first turn
                 // finds them all drawn.
@@ -581,7 +598,7 @@ impl Runtime {
         };
         let zooming = self.view.is_some() && (self.zoom - self.zoom_target()).abs() > 0.002;
         following || zooming || self.sweeping() || self.pulse.is_some() || self.gliding()
-            || (self.now_shown.0 - self.now_shown.1).abs() > 0.01
+            || (self.now_shown.0 - self.now_shown.1).abs() > 0.01 || self.recolour.is_some()
     }
 
     /// The dial's temperature now fades out where it is as the target comes
@@ -1267,18 +1284,53 @@ impl Runtime {
         if let Some(key) = screens::still_key(&screen) {
             let fresh = !matches!(&self.live, Some((kept, ..)) if *kept == key);
             // The thermostat's dial turning orange (or blue, or black) as the
-            // target passes the temperature now: faded, as the Nest's.
+            // target passes the temperature now: faded over the next frames,
+            // as the Nest's, the ring still following the hand.
             let recolour = matches!(&self.live, Some((kept, ..))
                 if kept.starts_with("nest ") && key.starts_with("nest ") && kept.split(' ').nth(1) != key.split(' ').nth(1));
-            let fade = fade || recolour;
+            if recolour {
+                // From the frame last shown, as we drew it: reading the
+                // display back is slow (its memory isn't cached).
+                let from = match (&self.recolour, &self.live) {
+                    (Some((from, _)), _) => from.clone(),
+                    (None, Some((_, canvas, _))) => canvas.pixmap.data().to_vec(),
+                    (None, None) => self.display.save(),
+                };
+                self.recolour = Some((from, Instant::now()));
+            }
             if fresh {
-                let still = screens::still(&self.fonts, &screen);
+                if !key.starts_with("nest ") {
+                    self.stills.clear();
+                }
+                let still = match self.stills.get(&key) {
+                    Some(still) => still.clone(),
+                    None => {
+                        let still = screens::still(&self.fonts, &screen);
+                        self.stills.insert(key.clone(), still.clone());
+                        still
+                    }
+                };
                 let live = paint::Live::new(&still);
                 self.live = Some((key, still, live));
+                if self.stills.len() > 8 {
+                    let kept = self.live.as_ref().map(|(k, ..)| k.clone()).unwrap_or_default();
+                    self.stills.retain(|k, _| *k == kept);
+                }
             }
             let (_, canvas, live) = self.live.as_mut().expect("just made");
             live.columns = None;
             screens::moving(canvas, &self.fonts, &screen, sweep, Some(live));
+            if let Some((from, at)) = &self.recolour {
+                let t = at.elapsed().as_secs_f32() / RECOLOUR.as_secs_f32();
+                if t >= 1.0 {
+                    self.recolour = None;
+                    let frame = canvas.pixmap.data().to_vec();
+                    self.display.show(&frame);
+                } else {
+                    self.display.fade(from, canvas.pixmap.data(), (ease(t) * 256.0) as u16);
+                }
+                return;
+            }
             if fresh || fade {
                 let frame = canvas.pixmap.data().to_vec();
                 if fade {
@@ -1299,6 +1351,22 @@ impl Runtime {
             self.animate(&from, &frame, Transition::Fade);
         }
         self.display.show(&frame);
+    }
+
+    /// The thermostat's dial in its other colour, with the target on the
+    /// other side of the temperature now: its still part and what it's kept
+    /// by, unless it's kept already.
+    fn other_still(fonts: &paint::Fonts, screen: &Screen, stills: &HashMap<String, paint::Canvas>) -> Option<(String, paint::Canvas)> {
+        let Screen::NestSet { nest, target, setting, .. } = screen else { return None };
+        let card = &nest.card;
+        let now = card.current?;
+        let other = if *target > now { now } else { (now + card.step).min(card.max) };
+        let other = Screen::NestSet { nest, target: other, pulse: None, setting: *setting, shown: None };
+        let key = screens::still_key(&other)?;
+        if stills.contains_key(&key) {
+            return None;
+        }
+        Some((key, screens::still(fonts, &other)))
     }
 
     /// A list, its highlight on its way to row `slot` of those showing:

@@ -153,8 +153,12 @@ pub fn still_key(screen: &Screen) -> Option<String> {
         Screen::CoverSet { card, .. } => Some(format!("cover {card:?}")),
         Screen::NestSet { nest, target, setting, .. } => {
             let nest = predicted(nest, *target);
-            Some(format!("nest {:?} {:?} {} {:?} {} {} {setting} {:?}", nest.card.action, nest.card.current,
-                nest.eco, nest.hot_water_boost, nest.card.current.is_some_and(|c| *target < c),
+            // Turning only changes it in Eco (its leaf gives way).
+            let setting = *setting && nest.eco;
+            // (The temperature now's number is drawn with the ring, so which
+            // side of its tick it's on doesn't change this.)
+            Some(format!("nest {:?} {:?} {} {:?} {} {setting} {:?}", nest.card.action, nest.card.current,
+                nest.eco, nest.hot_water_boost,
                 (nest.time_to_target.unwrap_or(0.0) - unix_now()).max(0.0) as i64 / 60, nest.next_change))
         }
         Screen::SettingSet { setting, .. } => Some(format!("setting {setting:?}")),

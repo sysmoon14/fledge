@@ -289,12 +289,20 @@ impl Display {
 
     /// `to` over `from` at `alpha` of 256.
     pub fn fade(&mut self, from: &[u8], to: &[u8], alpha: u16) {
-        let alpha = alpha.min(256);
+        let alpha = alpha.min(256) as u32;
+        let mut line = [0u8; ROW];
         self.present(None, |y, row| {
             let (a, b) = (&from[y * ROW..(y + 1) * ROW], &to[y * ROW..(y + 1) * ROW]);
-            for ((out, &a), &b) in row.iter_mut().zip(a).zip(b) {
-                *out = ((a as u16 * (256 - alpha) + b as u16 * alpha) >> 8) as u8;
+            // A pixel at a time, two channels to a multiply (blue and red,
+            // then green and the unused byte), into a line written to the
+            // framebuffer whole: its memory is slow a byte at a time.
+            for ((out, a), b) in line.as_chunks_mut::<4>().0.iter_mut().zip(a.as_chunks::<4>().0).zip(b.as_chunks::<4>().0) {
+                let (a, b) = (u32::from_le_bytes(*a), u32::from_le_bytes(*b));
+                let even = ((a & 0x00ff_00ff) * (256 - alpha) + (b & 0x00ff_00ff) * alpha) >> 8 & 0x00ff_00ff;
+                let odd = (((a >> 8) & 0x00ff_00ff) * (256 - alpha) + ((b >> 8) & 0x00ff_00ff) * alpha) & 0xff00_ff00;
+                *out = (even | odd).to_le_bytes();
             }
+            row.copy_from_slice(&line);
         });
     }
 

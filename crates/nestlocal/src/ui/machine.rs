@@ -310,6 +310,11 @@ impl Machine {
         }
     }
 
+    /// How long since the last turn or press.
+    pub fn idle(&self, now: Instant) -> Duration {
+        now.duration_since(self.last_input)
+    }
+
     /// Whether the thermostat is our own card, rather than Nest's dial.
     pub fn own_thermostat(&self) -> bool {
         !self.nest_dial && self.nest.is_some()
