@@ -1,0 +1,58 @@
+name: Build image
+
+# The image the other workflows build and test in (utils/ci/Dockerfile), kept
+# in this repository's own registry as ghcr.io/sysmoon14/fledge-build, tagged
+# with the Dockerfile's first twelve hex of SHA-256. Run by hand after the
+# Dockerfile changes:
+#
+#   - with `from` empty, it builds the Dockerfile and pushes the image;
+#   - with `from` an image elsewhere (name@sha256:...), it copies that image
+#     as it is, its digest unchanged.
+#
+# Either way the run's summary gives the digest to pin in apps.yml and
+# checks.yml, with the Dockerfile's hash that apps.yml checks it against.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: Copy this image (name@sha256:...) instead of building one
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to the registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build or copy, and push
+        env:
+          FROM: ${{ inputs.from }}
+        run: |
+          tag=$(sha256sum utils/ci/Dockerfile | cut -c1-12)
+          image=ghcr.io/sysmoon14/fledge-build
+          if [ -n "$FROM" ]; then
+            docker buildx imagetools create --tag "$image:$tag" "$FROM"
+          else
+            docker buildx build --platform linux/amd64 --provenance=false --tag "$image:$tag" --push - < utils/ci/Dockerfile
+          fi
+          digest=$(docker buildx imagetools inspect "$image:$tag" --format '{{json .Manifest}}' | jq -r .digest)
+          [ -n "$digest" ] && [ "$digest" != null ] || { echo "::error::no digest for $image:$tag"; exit 1; }
+          # A copy must be the image it was copied from, byte for byte.
+          case "$FROM" in
+            *@sha256:*) [ "$digest" = "${FROM##*@}" ] || { echo "::error::copied $FROM but got $digest"; exit 1; } ;;
+          esac
+          {
+            echo "Image: \`$image@$digest\`"
+            echo "For utils/ci/Dockerfile: \`$tag\`"
+          } >> "$GITHUB_STEP_SUMMARY"
