@@ -6,7 +6,8 @@
 
 <p align="center">
   <b>Your Nest thermostat, out of the nest.</b><br>
-  Root a Nest Learning Thermostat over USB, cut it loose from Google's cloud, and put Home Assistant on its own screen.
+  Root a Nest Learning Thermostat over USB, cut it loose from Google's cloud, and put Home Assistant on its own screen.<br>
+  <a href="https://sysmoon14.github.io/fledge/">See it move: a 50-second walk through the screens</a>
 </p>
 
 <p align="center">
@@ -19,24 +20,30 @@
   <img src="assets/screens/cards.png" width="100%" alt="Five of the thermostat's screens: the device chooser on a reading lamp's card, the lamp's warmth dial, another heating zone that is heating, a speaker's album art and progress, and the lamp's colour dial.">
 </p>
 
+<p align="center">
+  <img src="assets/screens/fledge.png" width="100%" alt="Five screens in Fledge's own look: the thermostat heating with 22 minutes to go, a lamp at 60%, a speaker's album art, the glance with the time and weather, and the thermostat's Settings.">
+  <br>
+  <sub>Two looks, chosen on the thermostat: the Nest's own (top) and Fledge's (bottom).</sub>
+</p>
+
 The Nest's ring is the best physical control in the house. Fledge keeps it, and
 keeps everything the Nest does well (heating, learning, safety, its own menus),
 then hands it the rest of your home:
 
-- **🔓 Local, cloud-free control.** MQTT, Matter (over Wi-Fi or Thread) or
+- **Local, cloud-free control.** MQTT, Matter (over Wi-Fi or Thread) or
   Zigbee, on your own network. No Google account, no internet needed.
-- **🏠 Home Assistant on the thermostat's screen.** Walk up, and your devices
+- **Home Assistant on the thermostat's screen.** Walk up, and your devices
   show zoomed out around the thermostat: turn to browse, press to open. Dim
   lights, set their warmth and colour, set other heating zones, turn a
   speaker up and see what's playing, all on the ring, with the Nest's own clicks.
-- **🌡️ A thermostat card and Settings of its own.** The thermostat's dial,
+- **A thermostat card and Settings of its own.** The thermostat's dial,
   Eco, heating on or off and a hot water boost, and its everyday Settings
   (Eco temperature, Home/Away Assist, Auto-Schedule, Early-On, Sunblock,
   units, Fledge updates), in the same style. Nest's own menus are a press
   away for the rest, and Nest's own dial is a setting.
-- **⚡ It feels native.** Drawn at 60 frames a second in the Nest's own style
+- **It feels native.** Drawn at 60 frames a second in the Nest's own style
   and fonts; long press to switch a light or pause the music.
-- **🔁 Updates from Home Assistant.** The thermostat's software updates from
+- **Updates from Home Assistant.** The thermostat's software updates from
   an ordinary Home Assistant update entity, signed, with automatic rollback.
 
 The cards come with the **[Fledge integration for Home Assistant](https://github.com/sysmoon14/fledge-homeassistant)**:
@@ -94,13 +101,13 @@ screens come back for Nest's dial and More Nest settings.
 
 | Device | Codename | SoC | MQTT | Matter (Wi-Fi) | Matter (Thread) | Zigbee |
 |-|-|-|-|-|-|-|
-| Nest Learning Thermostat (3rd generation) | `diamond3` | i.MX6SoloX | ✅ | ✅ | ✅ | ✅ |
-| Nest Learning Thermostat (2nd generation) | `j49` | TI AM3703 | ✅ | ✅ | ✅ | ✅ |
-| Nest Learning Thermostat (1st generation) | `diamond` | TI AM3703 | 🧪 | 🧪 | — | — |
+| Nest Learning Thermostat (3rd generation) | `diamond3` | i.MX6SoloX | Tested | Tested | Tested | Tested |
+| Nest Learning Thermostat (2nd generation) | `j49` | TI AM3703 | Tested | Tested | Tested | Tested |
+| Nest Learning Thermostat (1st generation) | `diamond` | TI AM3703 | Built | Built | No | No |
 
-✅ tested on a unit by upstream unfr0zen · 🧪 built, not yet tested on a unit · — not available
+*Tested*: on a unit, by upstream unfr0zen. *Built*: builds, not yet tested on a unit. *No*: not available.
 
-These ticks are **unfr0zen's** testing, before Fledge's changes. Fledge itself
+This is **unfr0zen's** testing, before Fledge's changes. Fledge itself
 has only been tested on one unit:
 
 | | Generation | Nest firmware | Setup |
@@ -134,10 +141,17 @@ network doesn't need internet access.
 
 1. **A USB data cable.** Gen 1 uses mini-USB; Gen 2 and 3 use micro-USB.
    Charge-only cables won't work.
-2. **The Fledge app** for Windows (x86_64, arm64), macOS 13+ or Linux (x86_64,
-   arm64, riscv64; glibc 2.28+). Prebuilt downloads of the app aren't published
-   yet: build it with the steps in [BUILDING.md](BUILDING.md) (on macOS,
-   `sh utils/make_macos_app.sh` makes `dist/Fledge.app`).
+2. **The Fledge app.** Download it from the
+   [latest release](https://github.com/sysmoon14/fledge/releases/latest), under
+   Assets:
+
+   | Your computer | Download |
+   |-|-|
+   | Mac (macOS 13 or later) | `Fledge-macos-universal-<version>.zip` |
+   | Windows | `Fledge-windows-x86_64-<version>.zip`, or `-arm64` |
+   | Linux (glibc 2.28 or later) | `Fledge-linux-x86_64-<version>.tar.gz`, or `-arm64`, `-riscv64` |
+
+   Or build it yourself with the steps in [BUILDING.md](BUILDING.md).
 3. **Set it up:** open the app and follow **Set up**: connect the thermostat,
    give it your Home Assistant's MQTT broker, choose its features, then review
    and patch. Review offers to back up the whole NAND first (**Back up, then
@@ -145,6 +159,10 @@ network doesn't need internet access.
 4. **In Home Assistant:** the thermostat appears through MQTT. Add the
    [Fledge integration](https://github.com/sysmoon14/fledge-homeassistant) to put
    your devices on its screen.
+
+<p align="center">
+  <img src="assets/screens/app.png" width="720" alt="The Fledge app's Set up page: Connect your thermostat, with the three steps and a 3rd generation thermostat found over USB.">
+</p>
 
 - **Windows:** 1st and 2nd generation: bind the WinUSB driver to the boot ROM
   (`0451:d00e`) once with [Zadig](https://zadig.akeo.ie).

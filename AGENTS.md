@@ -13,10 +13,10 @@ This Rust 2021 workspace builds USB recovery tools for Nest thermostats:
   - `common/`: both generations. `nlclient/` (native settings screen, assets, binary discovery references, C tests), `radio/` (radio firmware, each radio's board, linker and OpenThread files in `em3581/` and `em357/`; OpenThread integration in `thread/`), `doom/` (doomgeneric submodule plus its platform layer).
   - `diamond3/`: the gen 3. `bootstrap/` (ROM stage and boot wrapper), `uboot/` (recovery U-Boot submodule, patches and build scripts), `initramfs-init`, `zbwake/` (kernel wake module for each gen 3 release).
   - `j49/`: the gen 2. x-loader build and bare-metal NAND flasher, loaded through x-loader's USB loader, its USB-serial kernel, `zbwake/` module, and dropbear for `--ssh`.
-- `utils/`: `build-firmware.sh` builds all of `platform/` into `build/`; `make_macos_app.sh` and `install_linux.sh` package the app. `ci/` holds the build image's Dockerfile and the CircleCI config that publishes it, run only when `utils/ci/` changes.
+- `utils/`: `build-firmware.sh` builds all of `platform/` into `build/`; `make_macos_app.sh` and `install_linux.sh` package the app. `ci/` holds the build image's Dockerfile.
 - `assets/`: app icons, the Linux `.desktop` entry, and the README's app screenshot and overview diagram (light and dark).
 - `integrations/`: files users install on their side: Home Assistant blueprints (`home-assistant/`) and the Zigbee2MQTT converter (`zigbee2mqtt/`).
-- `.circleci/`: `config.yml` is the setup workflow, choosing the configs to merge by the paths a push changed (`utils/ci/configs.py` holds the table and validates every selection); `common.yml` the executors and module commands they share; `release.yml` the release workflow. Each subsystem has a `.circleci/config.yml` of its own with its workflow, run when its files change: `utils/ci` (the build image), `platform/diamond3` (recovery), `platform/diamond3/zbwake`, `platform/j49`, `platform/common/radio`, `platform/common/doom`, `platform/common/nlclient`, `crates/nestlocal`, and `crates` (the app: every module, the tests and each target).
+- `.github/workflows/`: `checks.yml` runs nestlocal's tests and lints on every push and pull request; `apps.yml` builds the firmware and the app for every platform into each published release; `image.yml` builds the image both run in and pushes it to this repository's registry (`ghcr.io/sysmoon14/fledge-build`), run by hand when `utils/ci/Dockerfile` changes.
 
 Generated outputs belong in ignored `build/`, `target/`, `dist/`, or `.work/` directories.
 
@@ -65,7 +65,7 @@ Everything after the colon is **lowercase**. The subject fits in 72 columns, no 
 | `app:` | the Fledge application (GUI, CLI, self-update, host library) |
 | `nestlocal:` | the on-device service; nest deeper with `nestlocal: thread:` |
 | `client-ng:` | the thermostat UI submodule |
-| `ci:` | CircleCI configs and build infrastructure |
+| `ci:` | GitHub Actions workflows and build infrastructure |
 | `radio:` | radio firmware and Thread/Zigbee protocol |
 | `j49:` | gen 2 device-specific code |
 | `platform:` | build scripts, bootstrap, x-loader, kernel modules |
@@ -84,7 +84,7 @@ Body is optional — omit it for self-explanatory changes. When present, wrap at
 
 - A PR is one self-contained change. PRs are squash-merged: the PR title becomes the commit subject on `main` (with ` (#N)` appended), so it must follow the `subsys: lowercase summary` format above.
 - PR body is short — one or two sentences describing the change. No padding.
-- CI (`.circleci/`) runs the workflow of each subsystem a PR changes and the app's, and all of them on a push to `main`, which builds each module of the firmware (cached by its inputs), every app target and the tests above; a PR merges only when it is green. A `vX.Y.Z` tag on `main` runs the release workflow, publishing the apps as a GitHub release. After editing any config, run `utils/ci/configs.py validate`.
+- CI (`.github/workflows/`) runs nestlocal's tests and lints on every push and pull request; a PR merges only when it is green. Publishing a release (`utils/release-nestlocal.sh`) builds the firmware and every app target into it. The workflows pin the build image by digest: after changing `utils/ci/Dockerfile`, run the Build image workflow and pin the digest it reports in `apps.yml` and `checks.yml`.
 - Never describe an undisclosed vulnerability in a public issue, PR or commit.
 
 ## Security & Device Configuration

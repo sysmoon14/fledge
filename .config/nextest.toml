@@ -1,4 +1,3 @@
-# cargo nextest's profile for CI: a JUnit report, for CircleCI's test results,
-# at target/nextest/ci/junit.xml.
+# cargo nextest's profile for CI: a JUnit report at target/nextest/ci/junit.xml.
 [profile.ci.junit]
 path = "junit.xml"
