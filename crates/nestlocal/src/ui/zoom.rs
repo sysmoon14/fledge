@@ -11,19 +11,42 @@ const SIDE: usize = 480;
 const ROW: usize = SIDE * 4;
 const CENTRE: f32 = SIDE as f32 / 2.0;
 
-/// How small the cards are while the ring moves between them.
-pub const ZOOMED: f32 = 0.8;
+/// What's round and between the cards: black, or Fledge's face, as the
+/// framebuffer holds it (BGR).
+fn backdrop() -> [u8; 3] {
+    if super::paint::fledge() {
+        let [r, g, b] = super::paint::FACE;
+        [b, g, r]
+    } else {
+        [0, 0, 0]
+    }
+}
+
+/// A frame of nothing but the backdrop.
+fn backdrop_frame() -> Frame {
+    let [b, g, r] = backdrop();
+    [b, g, r, 0xff].repeat(SIDE * SIDE)
+}
+
+/// How small the cards are while the ring moves between them: Fledge's
+/// smaller, with room round them for the name and dots and more of the
+/// next ones showing.
+pub fn zoomed() -> f32 {
+    if super::paint::fledge() { 0.66 } else { 0.8 }
+}
 
 /// From one card's centre to the next at zoom `z`: side by side at full
 /// size, and a little apart when zoomed out, the next one's edge showing.
 pub fn spacing(z: f32) -> f32 {
-    SIDE as f32 - (1.0 - z) * 400.0
+    let pull = if super::paint::fledge() { 470.0 } else { 400.0 };
+    SIDE as f32 - (1.0 - z) * pull
 }
 
 /// Black outside the display's circle, the edge softened over a pixel: a
 /// card as the round display shows it, so a coloured one (a thermostat
 /// heating) shows no square corners when zoomed out beside the others.
 pub fn round(frame: &mut [u8]) {
+    let back = backdrop();
     let pixels = frame.as_chunks_mut::<4>().0;
     for r in 0..SIDE {
         let dy = r as f32 + 0.5 - CENTRE;
@@ -31,26 +54,26 @@ pub fn round(frame: &mut [u8]) {
             let dx = c as f32 + 0.5 - CENTRE;
             let cover = (CENTRE + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
             if cover < 1.0 {
-                for channel in &mut pixels[r * SIDE + c][..3] {
-                    *channel = (*channel as f32 * cover) as u8;
+                for (channel, b) in pixels[r * SIDE + c][..3].iter_mut().zip(back) {
+                    *channel = (*channel as f32 * cover + b as f32 * (1.0 - cover)) as u8;
                 }
             }
         }
     }
 }
 
-/// `frame` at ZOOMED, centred, black around it: drawn once per card, with
+/// `frame` at zoomed(), centred, black around it: drawn once per card, with
 /// each pixel the average of the four it falls between, so a card moved
 /// whole pixels at a time doesn't shimmer. In whole numbers, with each
 /// output row's and column's sources worked out once: a few milliseconds.
 pub fn shrink(frame: &[u8]) -> Frame {
-    let mut out = vec![0u8; SIDE * ROW];
-    let half = CENTRE * ZOOMED;
+    let mut out = backdrop_frame();
+    let half = CENTRE * zoomed();
     let (low, high) = ((CENTRE - half).floor() as usize, ((CENTRE + half).ceil() as usize).min(SIDE));
     // For each output line: its two source lines and the second's weight, of 256.
     let sources: Vec<(usize, usize, u32)> = (0..SIDE)
         .map(|i| {
-            let source = (i as f32 + 0.5 - CENTRE) / ZOOMED + CENTRE - 0.5;
+            let source = (i as f32 + 0.5 - CENTRE) / zoomed() + CENTRE - 0.5;
             let first = source.floor().clamp(0.0, (SIDE - 1) as f32) as usize;
             let weight = ((source - source.floor()) * 256.0).round().clamp(0.0, 256.0) as u32;
             (first, (first + 1).min(SIDE - 1), weight)
@@ -106,17 +129,24 @@ fn outline(frame: &mut [u8], radius: f32) {
 }
 
 /// The cards around place `at` in the deck, `card(k)` giving card k (any
-/// integer: the caller wraps it) drawn at zoom `scale` (1, or ZOOMED from
+/// integer: the caller wraps it) drawn at zoom `scale` (1, or zoomed() from
 /// shrink), each shown at zoom `z`, into `out`.
 ///
-/// At ZOOMED from shrunk frames: whole rows, a card's centre on a whole
+/// At zoomed() from shrunk frames: whole rows, a card's centre on a whole
 /// pixel. Otherwise (zooming in or out, briefly) scaled, nearest pixel:
 /// from shrunk frames enlarged, which loses no thin strokes, until nearly
 /// full size.
 pub fn compose<'a>(out: &mut [u8], at: f32, z: f32, scale: f32, card: impl Fn(i64) -> Option<&'a [u8]>) {
     let shrunk = scale == z;
     let factor = scale / z;
-    out.fill(0);
+    let back = backdrop();
+    if back == [0, 0, 0] {
+        out.fill(0);
+    } else {
+        for pixel in out.as_chunks_mut::<4>().0 {
+            *pixel = [back[0], back[1], back[2], 0xff];
+        }
+    }
     let gap = spacing(z);
     let half = CENTRE * z;
     let first = (at - CENTRE / gap).floor() as i64 - 1;
@@ -189,7 +219,7 @@ mod tests {
     fn zoomed_out_the_neighbours_show_at_the_edges() {
         let (a, b, c) = (shrink(&card(100)), shrink(&card(150)), shrink(&card(200)));
         let mut out = vec![0u8; SIDE * ROW];
-        compose(&mut out, 1.0, ZOOMED, ZOOMED, |k| match k {
+        compose(&mut out, 1.0, zoomed(), zoomed(), |k| match k {
             0 => Some(a.as_slice()),
             1 => Some(b.as_slice()),
             2 => Some(c.as_slice()),
@@ -207,7 +237,7 @@ mod tests {
     fn zooming_from_a_shrunk_card_enlarges_it_in_place() {
         let a = shrink(&card(100));
         let mut out = vec![0u8; SIDE * ROW];
-        compose(&mut out, 0.0, 0.9, ZOOMED, |k| (k == 0).then_some(a.as_slice()));
+        compose(&mut out, 0.0, 0.9, zoomed(), |k| (k == 0).then_some(a.as_slice()));
         let pixel = |r: usize, c: usize| out[r * ROW + c * 4];
         assert_eq!(pixel(240, 240), 100);
         assert_eq!(pixel(240, 240 - 210), 100, "0.9 of the way out from the centre");

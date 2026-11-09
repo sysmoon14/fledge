@@ -85,8 +85,10 @@ pub fn fledge() -> bool {
 }
 
 /// Fledge's face, its ring's track, and its list highlight.
-pub const FACE: [u8; 3] = [11, 14, 18];
-pub const TRACK: [u8; 3] = [29, 35, 42];
+pub const FACE: [u8; 3] = [9, 13, 21];
+pub const TRACK: [u8; 3] = [27, 35, 48];
+/// The lift in the middle of Fledge's face: a deep blue.
+const FACE_LIFT: [u8; 3] = [22, 31, 48];
 const FLEDGE_SELECT: [u8; 3] = [35, 40, 47];
 
 /// A list's highlight, in the theme's colour.
@@ -101,6 +103,7 @@ pub fn face(background: [u8; 3]) -> Canvas {
         return canvas(background);
     }
     let mut p = canvas(FACE);
+    glow(&mut p, FACE_LIFT, 240.0, 210.0, 330.0, 0.7);
     if background != BLACK {
         let strength = if background == HEAT { 0.62 } else { 0.42 };
         glow(&mut p, background, 240.0, 272.0, 300.0, strength);
@@ -449,7 +452,7 @@ fn tick_pixels(tick: usize) -> &'static [RingPixel] {
 /// out a lit band's glow reaches.
 const ARC: f32 = 212.0;
 const BAND: f32 = 8.0;
-const HALO: f32 = 20.0;
+const HALO: f32 = 30.0;
 /// Fledge's knob (where the ring is set) and dot (the temperature now).
 const KNOB: f32 = 13.0;
 const DOT: f32 = 5.5;
@@ -541,6 +544,11 @@ fn arc(canvas: &mut Canvas, mut live: Option<&mut Live>, of: impl Fn(usize) -> (
         let (x, y) = on_arc(i as f32, ARC);
         match shape {
             Shape::Long => {
+                // The knob glows with what it's set to.
+                let glow = if slices[i].1 { slices[i].0 } else { colour(WHITE) };
+                let mut soft = glow;
+                soft.set_alpha(0.22);
+                extras.push((x, y, KNOB + 9.0, soft));
                 extras.push((x, y, KNOB, colour(WHITE)));
                 if slices[i].1 {
                     extras.push((x, y, 4.5, slices[i].0));
@@ -582,7 +590,7 @@ fn arc(canvas: &mut Canvas, mut live: Option<&mut Live>, of: impl Fn(usize) -> (
         for p in &pixels[starts[tick]..starts[tick + 1]] {
             let at = 4 * if panel { p.panel } else { p.upright } as usize;
             let band = p.short as u32 * a as u32 / 255;
-            let halo = if lit { p.long as u32 * a as u32 * 56 / (255 * 255) } else { 0 };
+            let halo = if lit { p.long as u32 * a as u32 * 120 / (255 * 255) } else { 0 };
             // The band over its glow, both of one colour.
             let cover = (255 - (255 - band) * (255 - halo) / 255) as u16;
             let from = match live.as_deref() {
@@ -1016,6 +1024,17 @@ pub fn dots(canvas: &mut Canvas, count: usize, active: usize, y: f32, fade: f32)
         return;
     }
     let gap = 15.0;
+    if fledge() {
+        // Fledge's: a lozenge where you are among dots.
+        let width = gap * (count - 1) as f32 + 14.0;
+        let mut x = CENTRE - width / 2.0;
+        for i in 0..count {
+            let (w, a) = if i == active { (22.0, 1.0) } else { (8.0, 0.32) };
+            pill(canvas, x, y - 4.0, w, 8.0, alpha(WHITE, a * fade.clamp(0.0, 1.0)));
+            x += w + 7.0;
+        }
+        return;
+    }
     let start = CENTRE - gap * (count - 1) as f32 / 2.0;
     for i in 0..count {
         let a = if i == active { 1.0 } else { 0.35 };

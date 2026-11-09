@@ -220,7 +220,7 @@ struct Runtime {
     ran: Option<(usize, Instant)>,
     /// The minute the glance's clock last showed.
     glance_minute: i64,
-    /// How big the cards show (1 full size, zoom::ZOOMED while moving).
+    /// How big the cards show (1 full size, zoom::zoomed() while moving).
     zoom: f32,
     /// A frame to compose zoomed cards in.
     scratch: device::Frame,
@@ -685,8 +685,8 @@ impl Runtime {
     /// the thermostat, or opening a card (zoom_in).
     fn zoom_target(&self) -> f32 {
         match self.machine.mode {
-            Mode::Chooser(_) => zoom::ZOOMED,
-            Mode::Home if self.machine.owns() => zoom::ZOOMED,
+            Mode::Chooser(_) => zoom::zoomed(),
+            Mode::Home if self.machine.owns() => zoom::zoomed(),
             _ => 1.0,
         }
     }
@@ -794,7 +794,7 @@ impl Runtime {
     fn show_zoomed(&mut self, at: f32) {
         // From the shrunk cards until nearly full size; see zoom::compose.
         let shrunk = self.zoom < 0.95;
-        let z = if (self.zoom - zoom::ZOOMED).abs() < 0.003 { zoom::ZOOMED } else { self.zoom };
+        let z = if (self.zoom - zoom::zoomed()).abs() < 0.003 { zoom::zoomed() } else { self.zoom };
         let count = self.machine.deck().len() as i64;
         for k in (at.floor() as i64 - 2).max(0)..=(at.ceil() as i64 + 2).min(count - 1) {
             self.prepare(k);
@@ -820,10 +820,10 @@ impl Runtime {
                 cards.get(&index).map(Vec::as_slice)
             }
         };
-        zoom::compose(&mut self.scratch, at, z, if shrunk { zoom::ZOOMED } else { 1.0 }, get);
+        zoom::compose(&mut self.scratch, at, z, if shrunk { zoom::zoomed() } else { 1.0 }, get);
         // The chosen card's name above and the dots under, as they zoom
         // out; the name fades out and in between cards.
-        let fade = ((1.0 - self.zoom) / (1.0 - zoom::ZOOMED)).clamp(0.0, 1.0);
+        let fade = ((1.0 - self.zoom) / (1.0 - zoom::zoomed())).clamp(0.0, 1.0);
         let nearest = at.round().clamp(0.0, count as f32 - 1.0) as usize;
         let title = fade * (1.0 - 2.0 * (at - at.round()).abs()).clamp(0.0, 1.0);
         let name = self.name(nearest);
@@ -1834,7 +1834,7 @@ mod shots {
                 zoom::round(&mut frame);
                 zoom::shrink(&frame)
             }).collect();
-        zoom::compose(&mut zoomed, 1.0, zoom::ZOOMED, zoom::ZOOMED, |k| frames.get(k as usize).map(Vec::as_slice));
+        zoom::compose(&mut zoomed, 1.0, zoom::zoomed(), zoom::zoomed(), |k| frames.get(k as usize).map(Vec::as_slice));
         let canvas = paint::Canvas::from_frame(zoomed);
         save(&canvas, &format!("{out}/z1-zoomed.png"));
     }

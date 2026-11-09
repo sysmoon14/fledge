@@ -64,12 +64,12 @@ const ABOVE_BASELINE: f32 = 161.0;
 const UNDER_BASELINE: f32 = 343.0;
 
 /// Words above or under a dial's number, in the Nest's capitals.
-fn dial_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
+fn dial_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3], icon_name: Option<&str>) {
     if paint::fledge() {
         // Fledge's: what it's doing in a pill above the number, plain words
         // under it.
         if y < NUMBER_BASELINE {
-            pill_words(pixmap, fonts, y - 9.0, text, c);
+            pill_words(pixmap, fonts, y - 9.0, text, c, icon_name);
         } else {
             paint::text(pixmap, fonts.regular(), 21.0, HALF, y, text, 0.0, [163, 173, 184]);
         }
@@ -79,13 +79,19 @@ fn dial_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]
     paint::text(pixmap, fonts.medium(), 25.0, HALF, y, &text, 1.5, c);
 }
 
-/// Words in a soft pill centred on `y`, tinted by `c`.
-fn pill_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
+/// Words in a soft pill centred on `y`, tinted by `c`, an icon before them.
+fn pill_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3], icon_name: Option<&str>) {
     let size = 18.0;
-    let text = paint::fit(fonts.medium(), size, text, 0.0, 280.0);
-    let width = paint::measure(fonts.medium(), size, &text, 0.0) + 32.0;
-    paint::pill(pixmap, HALF - width / 2.0, y - 19.0, width, 38.0, alpha(c, 0.16));
-    paint::text(pixmap, fonts.medium(), size, HALF, y + 6.5, &text, 0.0, c);
+    let text = paint::fit(fonts.medium(), size, text, 0.0, 260.0);
+    let words = paint::measure(fonts.medium(), size, &text, 0.0);
+    let room = if icon_name.is_some() { 26.0 } else { 0.0 };
+    let width = words + room + 34.0;
+    let left = HALF - width / 2.0;
+    paint::pill(pixmap, left, y - 19.0, width, 38.0, alpha(c, 0.18));
+    if let Some(name) = icon_name {
+        icon(pixmap, name, "state", left + 17.0 + 10.0, y, 20.0, c);
+    }
+    paint::text_at(pixmap, fonts.medium(), size, left + 17.0 + room, y + 6.5, &text, 0.0, c, 1.0);
 }
 
 /// Draws `screen`; `sweep`, where it has a value on its ring, is how far the
@@ -727,10 +733,20 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
         icon(&mut p, "mdi:leaf", "eco", HALF, 148.0, 40.0, if active { WHITE } else { ECO });
     } else {
         // As the Nest's dial: heating (or cooling) towards it, when it'll
-        // get there, else Heating; short of it, what it's set to.
+        // get there, else Heating; short of it, what it's set to. Fledge's
+        // pill says both, a flame (snowflake) before them.
         let above = match card.action.as_str() {
+            "heating" | "cooling" if paint::fledge() => Some(match nest_eta(nest, now) {
+                Some(eta) => format!("{} · {}", nest_doing(nest), eta.trim_start_matches("In ")),
+                None => nest_doing(nest).to_owned(),
+            }),
             "heating" | "cooling" => nest_eta(nest, now).or_else(|| Some(nest_doing(nest).to_owned())),
             _ => Some(if card.mode == "cool" { "Cool set to" } else { "Heat set to" }.to_owned()),
+        };
+        let state_icon = match card.action.as_str() {
+            "heating" => Some("mdi:fire"),
+            "cooling" => Some("mdi:snowflake"),
+            _ => None,
         };
         if let Some(above) = above {
             let tint = match (active, paint::fledge()) {
@@ -739,10 +755,10 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
                 (true, false) => WHITE,
                 (false, _) => GREY,
             };
-            dial_words(&mut p, fonts, ABOVE_BASELINE, &above, tint);
+            dial_words(&mut p, fonts, ABOVE_BASELINE, &above, tint, state_icon);
         }
         if let Some(until) = &nest.next_change {
-            dial_words(&mut p, fonts, UNDER_BASELINE, &format!("Until {until}"), soft);
+            dial_words(&mut p, fonts, UNDER_BASELINE, &format!("Until {until}"), soft, None);
         }
     }
     if let Some(minutes) = nest.hot_water_boost {
