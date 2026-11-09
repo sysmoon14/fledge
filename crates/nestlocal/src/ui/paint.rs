@@ -23,9 +23,15 @@ const SPAN: f32 = 292.0;
 /// The unit's fonts.
 pub const FONT_DIR: &str = "/nestlabs/share/fonts";
 
+/// The screens' fonts: the Nest's own (Akkurat, from the unit), and the
+/// Fledge theme's, built in (DM Sans for words, Outfit for numbers; both
+/// under the SIL Open Font License, in fonts/).
 pub struct Fonts {
-    pub regular: FontArc,
-    pub medium: FontArc,
+    nest_regular: FontArc,
+    nest_medium: FontArc,
+    fledge_regular: FontArc,
+    fledge_medium: FontArc,
+    fledge_digits: FontArc,
 }
 
 impl Fonts {
@@ -35,7 +41,94 @@ impl Fonts {
             let data = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
             FontArc::try_from_vec(data).map_err(|e| format!("{path}: {e}"))
         };
-        Ok(Fonts { regular: load("AkkuratNest-Regular.ttf")?, medium: load("AkkuratNest-Medium.ttf")? })
+        let built_in = |data: &'static [u8]| FontArc::try_from_slice(data).map_err(|e| format!("a built-in font: {e}"));
+        Ok(Fonts {
+            nest_regular: load("AkkuratNest-Regular.ttf")?,
+            nest_medium: load("AkkuratNest-Medium.ttf")?,
+            fledge_regular: built_in(include_bytes!("fonts/DMSans-Regular.ttf"))?,
+            fledge_medium: built_in(include_bytes!("fonts/DMSans-Medium.ttf"))?,
+            fledge_digits: built_in(include_bytes!("fonts/Outfit-ExtraLight.ttf"))?,
+        })
+    }
+
+    /// Words, regular and medium, in the theme's font.
+    pub fn regular(&self) -> &FontArc {
+        if fledge() { &self.fledge_regular } else { &self.nest_regular }
+    }
+
+    pub fn medium(&self) -> &FontArc {
+        if fledge() { &self.fledge_medium } else { &self.nest_medium }
+    }
+
+    /// A dial's large number: the Nest's regular, or Outfit's extra light.
+    pub fn digits(&self) -> &FontArc {
+        if fledge() { &self.fledge_digits } else { &self.nest_regular }
+    }
+}
+
+/// How the screens look: the Nest's own, or Fledge's (a continuous arc, a
+/// dark face that glows with what's on, light numbers).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Theme {
+    Nest,
+    Fledge,
+}
+
+static THEME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_theme(theme: Theme) {
+    THEME.store(theme == Theme::Fledge, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn fledge() -> bool {
+    THEME.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Fledge's face, its ring's track, and its list highlight.
+pub const FACE: [u8; 3] = [11, 14, 18];
+pub const TRACK: [u8; 3] = [29, 35, 42];
+const FLEDGE_SELECT: [u8; 3] = [35, 40, 47];
+
+/// A list's highlight, in the theme's colour.
+pub fn select() -> [u8; 3] {
+    if fledge() { FLEDGE_SELECT } else { SELECT }
+}
+
+/// A screen's face: `background` whole (the Nest's), or Fledge's dark face
+/// glowing from within with it (heating's amber strongest).
+pub fn face(background: [u8; 3]) -> Canvas {
+    if !fledge() {
+        return canvas(background);
+    }
+    let mut p = canvas(FACE);
+    if background != BLACK {
+        let strength = if background == HEAT { 0.62 } else { 0.42 };
+        glow(&mut p, background, 240.0, 272.0, 300.0, strength);
+    }
+    p
+}
+
+/// A soft radial glow of `c` round (cx, cy), `radius` out, `strength` (0..1)
+/// at its middle.
+pub fn glow(p: &mut Canvas, c: [u8; 3], cx: f32, cy: f32, radius: f32, strength: f32) {
+    let c = p.rgb(c);
+    let panel = p.panel;
+    let data = p.pixmap.data_mut();
+    for y in 0..SIZE {
+        let dy = y as f32 + 0.5 - cy;
+        for x in 0..SIZE {
+            let dx = x as f32 + 0.5 - cx;
+            let d = (dx * dx + dy * dy).sqrt() / radius;
+            if d >= 1.0 {
+                continue;
+            }
+            let a = strength * (1.0 - d) * (1.0 - d);
+            let at = 4 * if panel { x * SIZE + (SIZE - 1 - y) } else { y * SIZE + x } as usize;
+            for k in 0..3 {
+                let old = data[at + k] as f32;
+                data[at + k] = (old + (c[k] as f32 - old) * a).round() as u8;
+            }
+        }
     }
 }
 
@@ -187,6 +280,9 @@ pub fn ring(canvas: &mut Canvas, of: impl Fn(usize) -> Color, marks: &[usize]) {
 /// frame then only blends those, where stroking 150 lines took most of a
 /// frame on the unit.
 pub fn ring_shaped(canvas: &mut Canvas, of: impl Fn(usize) -> (Color, Shape)) {
+    if fledge() {
+        return arc(canvas, None, of);
+    }
     let mut colours = [[0u16; 4]; TICKS];
     let mut shapes = [Shape::Short; TICKS];
     for (i, c) in colours.iter_mut().enumerate() {
@@ -213,6 +309,10 @@ pub fn ring_shaped(canvas: &mut Canvas, of: impl Fn(usize) -> (Color, Shape)) {
     }
 }
 
+/// Something drawn over the ring: its box (x, y, width, height, upright)
+/// and the ticks under it.
+type Drawn = ((i32, i32, usize, usize), std::ops::RangeInclusive<usize>);
+
 /// A value screen kept between frames, so a frame redraws only what
 /// changed: ticks whose colour changed, and the number when it changed,
 /// over the screen's still part.
@@ -226,12 +326,15 @@ pub struct Live {
     glyphs: Vec<(i32, i32, usize, usize)>,
     /// The upright columns (the panel's rows) this frame changed.
     pub columns: Option<(u32, u32)>,
+    /// What Fledge's arc drew over itself last frame (its knob, dots and
+    /// rounded ends): each one's box, and the ticks under it.
+    extras: Vec<Drawn>,
 }
 
 impl Live {
     pub fn new(still: &Canvas) -> Live {
         Live { still: still.clone(), drawn: [[0; 4]; TICKS], shapes: [Shape::Short; TICKS], fresh: true,
-               number: String::new(), glyphs: Vec::new(), columns: None }
+               number: String::new(), glyphs: Vec::new(), columns: None, extras: Vec::new() }
     }
 
     fn changed(&mut self, from: u32, to: u32) {
@@ -260,6 +363,9 @@ pub fn ring_live(canvas: &mut Canvas, live: &mut Live, of: impl Fn(usize) -> Col
 
 /// The ring as ring_shaped() draws it, on a Live screen: only ticks that changed.
 pub fn ring_shaped_live(canvas: &mut Canvas, live: &mut Live, of: impl Fn(usize) -> (Color, Shape)) {
+    if fledge() {
+        return arc(canvas, Some(live), of);
+    }
     let panel = canvas.panel;
     for tick in 0..TICKS {
         let (tint, shape) = of(tick);
@@ -337,6 +443,176 @@ fn ring_pixels() -> &'static [RingPixel] {
 fn tick_pixels(tick: usize) -> &'static [RingPixel] {
     let (pixels, starts) = ring_geometry();
     &pixels[starts[tick]..starts[tick + 1]]
+}
+
+/// Fledge's arc: its middle's radius, the band's half width, and how far
+/// out a lit band's glow reaches.
+const ARC: f32 = 212.0;
+const BAND: f32 = 8.0;
+const HALO: f32 = 20.0;
+/// Fledge's knob (where the ring is set) and dot (the temperature now).
+const KNOB: f32 = 13.0;
+const DOT: f32 = 5.5;
+
+/// Fledge's arc, as ring_geometry is the ticks': each pixel of the band
+/// and its glow, by the tick (the slice of the arc) it's in; `short` the
+/// band's cover, `long` the glow's.
+fn arc_geometry() -> &'static (Vec<RingPixel>, Vec<usize>) {
+    static GEOMETRY: std::sync::OnceLock<(Vec<RingPixel>, Vec<usize>)> = std::sync::OnceLock::new();
+    GEOMETRY.get_or_init(|| {
+        let mut pixels = Vec::new();
+        let step = SPAN / (TICKS - 1) as f32;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let (dx, dy) = (x as f32 + 0.5 - CENTRE, y as f32 + 0.5 - CENTRE);
+                let off = ((dx * dx + dy * dy).sqrt() - ARC).abs();
+                if off > HALO {
+                    continue;
+                }
+                let angle = dx.atan2(-dy).to_degrees();
+                let at = (angle + SPAN / 2.0) / step;
+                if !(-0.5..=(TICKS - 1) as f32 + 0.5).contains(&at) {
+                    continue; // the ends' round caps are drawn as extras
+                }
+                let tick = at.round().clamp(0.0, (TICKS - 1) as f32) as u8;
+                let band = ((BAND + 0.5 - off).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let halo = ((1.0 - off / HALO).powi(2) * 255.0).round() as u8;
+                pixels.push(RingPixel { upright: y * SIZE + x, panel: x * SIZE + (SIZE - 1 - y), tick, short: band, long: halo, wide: 0 });
+            }
+        }
+        pixels.sort_by_key(|p| p.tick);
+        let mut starts = vec![0; TICKS + 1];
+        for p in &pixels {
+            starts[p.tick as usize + 1] += 1;
+        }
+        for i in 0..TICKS {
+            starts[i + 1] += starts[i];
+        }
+        (pixels, starts)
+    })
+}
+
+/// A point on Fledge's arc at tick `at` (fractional), `radius` out.
+fn on_arc(at: f32, radius: f32) -> (f32, f32) {
+    let angle = (-SPAN / 2.0 + SPAN * at / (TICKS - 1) as f32).to_radians();
+    (CENTRE + radius * angle.sin(), CENTRE - radius * angle.cos())
+}
+
+/// Whether a tick's colour is the ring's unlit one: the Nest's dim ticks,
+/// or nothing.
+fn unlit(c: Color) -> bool {
+    let u = c.to_color_u8();
+    u.alpha() < 8 || [u.red(), u.green(), u.blue()] == DIM
+}
+
+/// Fledge's ring: one arc on a faint track, each tick's slice in its
+/// colour (lit slices glowing), rounded at its ends and where it's lit; a
+/// long tick (the set value) a white knob, a wide one (the temperature now)
+/// a dot. On a Live screen only the slices that changed, and what was
+/// drawn over them, are drawn again.
+fn arc(canvas: &mut Canvas, mut live: Option<&mut Live>, of: impl Fn(usize) -> (Color, Shape)) {
+    let ticks: Vec<(Color, Shape)> = (0..TICKS).map(&of).collect();
+    // Each slice's colour: a mark takes its neighbour's, so the arc runs on
+    // under its knob or dot.
+    let band = |i: usize| -> (Color, bool) {
+        let pick = |j: usize| ticks.get(j).filter(|(_, shape)| *shape == Shape::Short).map(|(c, _)| *c);
+        let c = match ticks[i] {
+            (c, Shape::Short) => c,
+            _ => pick(i.wrapping_sub(1)).or_else(|| pick(i + 1)).unwrap_or(colour(TRACK)),
+        };
+        if unlit(c) { (colour(TRACK), false) } else { (c, true) }
+    };
+    let slices: Vec<(Color, bool)> = (0..TICKS).map(band).collect();
+    // What goes over the arc: its rounded ends, where it's lit, the knob and dot.
+    let mut extras: Vec<(f32, f32, f32, Color)> = Vec::new();
+    let ends = [(0usize, -0.5f32), (TICKS - 1, TICKS as f32 - 0.5)];
+    for (tick, at) in ends {
+        let (x, y) = on_arc(at, ARC);
+        extras.push((x, y, BAND, slices[tick].0));
+    }
+    for i in 0..TICKS - 1 {
+        if slices[i].1 != slices[i + 1].1 {
+            let (lit, at) = if slices[i].1 { (i, i as f32 + 0.5) } else { (i + 1, i as f32 + 0.5) };
+            let (x, y) = on_arc(at, ARC);
+            extras.push((x, y, BAND, slices[lit].0));
+        }
+    }
+    for (i, (c, shape)) in ticks.iter().enumerate() {
+        let (x, y) = on_arc(i as f32, ARC);
+        match shape {
+            Shape::Long => {
+                extras.push((x, y, KNOB, colour(WHITE)));
+                if slices[i].1 {
+                    extras.push((x, y, 4.5, slices[i].0));
+                }
+            }
+            Shape::Wide => extras.push((x, y, DOT, *c)),
+            Shape::Short => {}
+        }
+    }
+    let boxed = |&(x, y, r, _): &(f32, f32, f32, Color)| {
+        let pad = r + 2.0;
+        let rect = ((x - pad).floor() as i32, (y - pad).floor() as i32, (2.0 * pad).ceil() as usize + 1, (2.0 * pad).ceil() as usize + 1);
+        let angle = (x - CENTRE).atan2(CENTRE - y).to_degrees();
+        let at = (angle + SPAN / 2.0) / (SPAN / (TICKS - 1) as f32);
+        let reach = (pad / ARC).to_degrees() / (SPAN / (TICKS - 1) as f32) + 1.0;
+        let (low, high) = ((at - reach).floor().max(0.0) as usize, ((at + reach).ceil().max(0.0) as usize).min(TICKS - 1));
+        (rect, low..=high)
+    };
+    if let Some(live) = live.as_deref_mut() {
+        // Last frame's knob, dot and ends, put back: their slices draw again.
+        for (rect, under) in std::mem::take(&mut live.extras) {
+            live.clear(canvas, rect, under);
+        }
+    }
+    let panel = canvas.panel;
+    let (pixels, starts) = arc_geometry();
+    for (tick, &(tint, lit)) in slices.iter().enumerate() {
+        let u = canvas.colour(tint).to_color_u8();
+        let colour = [u.red() as u16, u.green() as u16, u.blue() as u16, u.alpha() as u16];
+        let shape = if lit { Shape::Wide } else { Shape::Short };
+        if let Some(live) = live.as_deref_mut() {
+            if !live.fresh && live.drawn[tick] == colour && live.shapes[tick] == shape {
+                continue;
+            }
+            (live.drawn[tick], live.shapes[tick]) = (colour, shape);
+        }
+        let [r, g, b, a] = colour;
+        let (mut low, mut high) = (u32::MAX, 0);
+        for p in &pixels[starts[tick]..starts[tick + 1]] {
+            let at = 4 * if panel { p.panel } else { p.upright } as usize;
+            let band = p.short as u32 * a as u32 / 255;
+            let halo = if lit { p.long as u32 * a as u32 * 56 / (255 * 255) } else { 0 };
+            // The band over its glow, both of one colour.
+            let cover = (255 - (255 - band) * (255 - halo) / 255) as u16;
+            let from = match live.as_deref() {
+                Some(live) => [live.still.pixmap.data()[at], live.still.pixmap.data()[at + 1], live.still.pixmap.data()[at + 2]],
+                None => {
+                    let data = canvas.pixmap.data();
+                    [data[at], data[at + 1], data[at + 2]]
+                }
+            };
+            let data = canvas.pixmap.data_mut();
+            let blend = |d: u8, s: u16| ((s * cover + d as u16 * (255 - cover)) / 255) as u8;
+            data[at] = blend(from[0], r);
+            data[at + 1] = blend(from[1], g);
+            data[at + 2] = blend(from[2], b);
+            let column = p.upright % SIZE;
+            (low, high) = (low.min(column), high.max(column));
+        }
+        if let (Some(live), true) = (live.as_deref_mut(), low <= high) {
+            live.changed(low, high);
+        }
+    }
+    for extra in &extras {
+        let (x, y, r, c) = *extra;
+        circle(canvas, x, y, r, c);
+        if let Some(live) = live.as_deref_mut() {
+            let (rect, under) = boxed(extra);
+            live.changed(rect.0.max(0) as u32, (rect.0 + rect.2 as i32).clamp(0, SIZE as i32) as u32);
+            live.extras.push((rect, under));
+        }
+    }
 }
 
 fn ring_geometry() -> &'static (Vec<RingPixel>, Vec<usize>) {
@@ -436,6 +712,33 @@ pub fn picture(canvas: &mut Canvas, rgb: &[u8], size: u32, cx: f32, cy: f32, rad
             }
         }
     }
+}
+
+/// A square RGB picture `size` wide drawn `side` wide (smaller), each pixel
+/// the average of those it covers, centred on (cx, cy), corners rounded.
+pub fn picture_scaled(canvas: &mut Canvas, rgb: &[u8], size: u32, side: u32, cx: f32, cy: f32, radius: f32) {
+    if side >= size {
+        return picture(canvas, rgb, size, cx, cy, radius);
+    }
+    let mut small = Vec::with_capacity((side * side * 3) as usize);
+    for y in 0..side {
+        let (y0, y1) = (y * size / side, ((y + 1) * size / side).max(y * size / side + 1));
+        for x in 0..side {
+            let (x0, x1) = (x * size / side, ((x + 1) * size / side).max(x * size / side + 1));
+            let mut sum = [0u32; 3];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let at = 3 * (sy * size + sx) as usize;
+                    for k in 0..3 {
+                        sum[k] += rgb[at + k] as u32;
+                    }
+                }
+            }
+            let n = (y1 - y0) * (x1 - x0);
+            small.extend(sum.map(|v| (v / n) as u8));
+        }
+    }
+    picture(canvas, &small, side, cx, cy, radius);
 }
 
 pub fn circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, c: Color) {
@@ -700,9 +1003,9 @@ pub fn hint(frame: &mut Vec<u8>, fonts: &Fonts, text: &str) {
         return;
     };
     let mut canvas = Canvas { pixmap, panel: true };
-    let width = measure(&fonts.medium, 15.0, text, 0.2) + 28.0;
+    let width = measure(fonts.medium(), 15.0, text, 0.2) + 28.0;
     pill(&mut canvas, CENTRE - width / 2.0, 424.0, width, 30.0, Color::from_rgba8(36, 38, 42, 255));
-    self::text(&mut canvas, &fonts.medium, 15.0, CENTRE, 444.0, text, 0.2, [230, 233, 238]);
+    self::text(&mut canvas, fonts.medium(), 15.0, CENTRE, 444.0, text, 0.2, [230, 233, 238]);
     *frame = canvas.pixmap.take();
 }
 
@@ -734,7 +1037,7 @@ fn chord(y: f32) -> f32 {
 fn title_size(fonts: &Fonts, name: &str) -> (f32, f32) {
     let room = |size: f32| chord(TITLE_BASELINE - size * 0.72);
     for size in [28.0, 25.0, 22.0, 19.0] {
-        if measure(&fonts.medium, size, name, 0.0) <= room(size) {
+        if measure(fonts.medium(), size, name, 0.0) <= room(size) {
             return (size, room(size));
         }
     }
@@ -752,9 +1055,9 @@ pub fn around_cards(frame: &mut Vec<u8>, fonts: &Fonts, name: &str, title: f32, 
     let mut canvas = Canvas { pixmap, panel: true };
     if title > 0.01 {
         let (size, room) = title_size(fonts, name);
-        let name = fit(&fonts.medium, size, name, 0.0, room);
-        let width = measure(&fonts.medium, size, &name, 0.0);
-        text_at(&mut canvas, &fonts.medium, size, CENTRE - width / 2.0, TITLE_BASELINE, &name, 0.0, WHITE, title.min(1.0));
+        let name = fit(fonts.medium(), size, name, 0.0, room);
+        let width = measure(fonts.medium(), size, &name, 0.0);
+        text_at(&mut canvas, fonts.medium(), size, CENTRE - width / 2.0, TITLE_BASELINE, &name, 0.0, WHITE, title.min(1.0));
     }
     dots(&mut canvas, count, active, 455.0, fade);
     *frame = canvas.pixmap.take();

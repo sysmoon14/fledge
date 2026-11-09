@@ -83,6 +83,8 @@ pub enum Setting {
     EarlyOn,
     Sunblock,
     HotWaterSchedule,
+    /// How the screens look: the Nest's own, or Fledge's.
+    Theme,
     /// °C or °F.
     Scale,
     /// Nest's own dial in place of the thermostat card.
@@ -247,6 +249,8 @@ pub enum Effect {
     /// Nest's own dial for the thermostat (true), or the thermostat card:
     /// kept for the next start.
     NestDial(bool),
+    /// The Fledge theme (true), or the Nest's: kept for the next start.
+    Theme(bool),
     Send(Command),
 }
 
@@ -298,6 +302,8 @@ pub struct Machine {
     /// When a media player's ring last turned: its volume shows large for
     /// VOLUME_SHOWN after, its track the rest of the time.
     pub volume_at: Option<Instant>,
+    /// The Fledge theme rather than the Nest's.
+    pub fledge: bool,
 }
 
 impl Machine {
@@ -306,7 +312,7 @@ impl Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
-            nest: None, nest_dial: false, set_at: None, dial_offset: 0.0, volume_at: None,
+            nest: None, nest_dial: false, set_at: None, dial_offset: 0.0, volume_at: None, fledge: false,
         }
     }
 
@@ -342,7 +348,7 @@ impl Machine {
         if nest.is_some_and(|n| n.hot_water) {
             rows.push(Setting::HotWaterSchedule);
         }
-        rows.extend([Setting::Scale, Setting::NestDial, Setting::Software, Setting::More, Setting::Done]);
+        rows.extend([Setting::Theme, Setting::Scale, Setting::NestDial, Setting::Software, Setting::More, Setting::Done]);
         rows
     }
 
@@ -957,6 +963,11 @@ impl Machine {
             match setting {
                 Setting::Done => self.go(Mode::Chooser(self.deck().len() - 1), out),
                 Setting::More => self.open_nest_settings(out),
+                Setting::Theme => {
+                    self.fledge = !self.fledge;
+                    out.push(Effect::Theme(self.fledge));
+                    self.dirty = true;
+                }
                 _ => {}
             }
             return;
@@ -996,6 +1007,11 @@ impl Machine {
             Setting::NestDial => {
                 self.nest_dial = !self.nest_dial;
                 out.push(Effect::NestDial(self.nest_dial));
+                self.dirty = true;
+            }
+            Setting::Theme => {
+                self.fledge = !self.fledge;
+                out.push(Effect::Theme(self.fledge));
                 self.dirty = true;
             }
             Setting::Software => match nest.update {
@@ -1979,7 +1995,7 @@ mod tests {
         rig.press();
         let rows = rig.machine.settings();
         assert_eq!(rows, vec![Setting::EcoLow, Setting::HomeAway, Setting::Learning, Setting::EarlyOn, Setting::Sunblock,
-                              Setting::HotWaterSchedule, Setting::Scale, Setting::NestDial, Setting::Software,
+                              Setting::HotWaterSchedule, Setting::Theme, Setting::Scale, Setting::NestDial, Setting::Software,
                               Setting::More, Setting::Done], "heating only, with hot water");
         assert!(rig.press().is_empty() && rig.machine.mode == Mode::SettingSet { setting: Setting::EcoLow, value: 12.0 });
         rig.turn(CLIMATE_STEP * 3);
@@ -1989,7 +2005,10 @@ mod tests {
         rig.turn(ROW_STEP * 2);
         assert_eq!(sent(&rig.press()), vec![("learning_mode".into(), "OFF".into())], "Auto-Schedule off");
         assert!(!rig.machine.nest.as_ref().unwrap().learning);
-        rig.turn(ROW_STEP * 5);
+        rig.turn(ROW_STEP * 4);
+        assert_eq!(rig.press(), vec![Effect::Theme(true)], "the Fledge theme");
+        assert!(rig.machine.fledge);
+        rig.turn(ROW_STEP * 2);
         assert_eq!(rig.press(), vec![Effect::NestDial(true)]);
         assert!(rig.machine.nest_dial);
         rig.turn(ROW_STEP);

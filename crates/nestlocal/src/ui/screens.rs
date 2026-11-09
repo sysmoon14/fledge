@@ -65,8 +65,27 @@ const UNDER_BASELINE: f32 = 343.0;
 
 /// Words above or under a dial's number, in the Nest's capitals.
 fn dial_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
-    let text = paint::fit(&fonts.medium, 25.0, &text.to_uppercase(), 1.5, 300.0);
-    paint::text(pixmap, &fonts.medium, 25.0, HALF, y, &text, 1.5, c);
+    if paint::fledge() {
+        // Fledge's: what it's doing in a pill above the number, plain words
+        // under it.
+        if y < NUMBER_BASELINE {
+            pill_words(pixmap, fonts, y - 9.0, text, c);
+        } else {
+            paint::text(pixmap, fonts.regular(), 21.0, HALF, y, text, 0.0, [163, 173, 184]);
+        }
+        return;
+    }
+    let text = paint::fit(fonts.medium(), 25.0, &text.to_uppercase(), 1.5, 300.0);
+    paint::text(pixmap, fonts.medium(), 25.0, HALF, y, &text, 1.5, c);
+}
+
+/// Words in a soft pill centred on `y`, tinted by `c`.
+fn pill_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
+    let size = 18.0;
+    let text = paint::fit(fonts.medium(), size, text, 0.0, 280.0);
+    let width = paint::measure(fonts.medium(), size, &text, 0.0) + 32.0;
+    paint::pill(pixmap, HALF - width / 2.0, y - 19.0, width, 38.0, alpha(c, 0.16));
+    paint::text(pixmap, fonts.medium(), size, HALF, y + 6.5, &text, 0.0, c);
 }
 
 /// Draws `screen`; `sweep`, where it has a value on its ring, is how far the
@@ -167,13 +186,19 @@ pub fn still_key(screen: &Screen) -> Option<String> {
 }
 
 fn label(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
-    let text = paint::fit(&fonts.medium, 22.0, &text.to_uppercase(), 1.5, 300.0);
-    paint::text(pixmap, &fonts.medium, 22.0, HALF, y, &text, 1.5, c);
+    if paint::fledge() {
+        // Fledge names things as they're written.
+        let text = paint::fit(fonts.medium(), 22.0, text, 0.0, 300.0);
+        paint::text(pixmap, fonts.medium(), 22.0, HALF, y, &text, 0.0, c);
+        return;
+    }
+    let text = paint::fit(fonts.medium(), 22.0, &text.to_uppercase(), 1.5, 300.0);
+    paint::text(pixmap, fonts.medium(), 22.0, HALF, y, &text, 1.5, c);
 }
 
 fn line(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
-    let text = paint::fit(&fonts.regular, 20.0, text, 0.0, 320.0);
-    paint::text(pixmap, &fonts.regular, 20.0, HALF, y, &text, 0.0, c);
+    let text = paint::fit(fonts.regular(), 20.0, text, 0.0, 320.0);
+    paint::text(pixmap, fonts.regular(), 20.0, HALF, y, &text, 0.0, c);
 }
 
 /// A large number as the Nest's dial shows a temperature: 21, or 21 with a
@@ -186,15 +211,18 @@ fn big_number_on(pixmap: &mut Canvas, live: Option<&mut paint::Live>, fonts: &Fo
     let size = 170.0;
     let whole = if half { value.floor() as i64 } else { value.round() as i64 };
     let digits = whole.to_string();
-    let small = if half && value.fract() >= 0.25 { "5" } else { unit };
-    let width = paint::measure(&fonts.regular, size, &digits, -4.0);
-    let small_width = if small.is_empty() { 0.0 } else { paint::measure(&fonts.regular, 52.0, small, 0.0) + 6.0 };
+    // The half: a raised 5 on the Nest's dial, a smaller .5 on Fledge's.
+    let half_mark = if paint::fledge() { ".5" } else { "5" };
+    let small = if half && value.fract() >= 0.25 { half_mark } else { unit };
+    let digits_font = fonts.digits();
+    let width = paint::measure(digits_font, size, &digits, -4.0);
+    let small_width = if small.is_empty() { 0.0 } else { paint::measure(digits_font, 52.0, small, 0.0) + 6.0 };
     let x = HALF - (width + small_width) / 2.0;
     // Top-aligned with the digits, as the Nest's dial sets its half degree.
     let small_x = x + width + 4.0;
-    let mut parts = vec![(&fonts.regular, size, x, NUMBER_BASELINE, digits.as_str(), -4.0)];
+    let mut parts = vec![(digits_font, size, x, NUMBER_BASELINE, digits.as_str(), -4.0)];
     if !small.is_empty() {
-        parts.push((&fonts.regular, 52.0, small_x, NUMBER_BASELINE - 82.0, small, 0.0));
+        parts.push((digits_font, 52.0, small_x, NUMBER_BASELINE - 82.0, small, 0.0));
     }
     match live {
         Some(live) => paint::number_live(pixmap, live, &parts, c),
@@ -239,7 +267,7 @@ fn lights_card(fonts: &Fonts, card: &LightsCard) -> Canvas {
     if let [light] = &card.lights[..] {
         return light_card(fonts, card, light);
     }
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let lights = &card.lights;
     let room = room(lights);
     // One sweep, as a dimmer's: how bright the room is, in its lights' colour.
@@ -253,12 +281,12 @@ fn lights_card(fonts: &Fonts, card: &LightsCard) -> Canvas {
     label(&mut p, fonts, 214.0, &card.name, accent);
     match room {
         None => {
-            paint::text(&mut p, &fonts.regular, 96.0, HALF, 320.0, "Off", 0.0, WHITE);
+            paint::text(&mut p, fonts.regular(), 96.0, HALF, 320.0, "Off", 0.0, WHITE);
             line(&mut p, fonts, 366.0, &format!("{} lights", lights.len()), GREY);
         }
         Some((level, _)) => {
             let on = lights.iter().filter(|l| l.on).count();
-            paint::text(&mut p, &fonts.regular, 112.0, HALF, 322.0, &on.to_string(), 0.0, WHITE);
+            paint::text(&mut p, fonts.regular(), 112.0, HALF, 322.0, &on.to_string(), 0.0, WHITE);
             line(&mut p, fonts, 366.0, &format!("of {} on · {level}%", lights.len()), GREY);
         }
     }
@@ -301,7 +329,9 @@ fn now_place(card: &ClimateCard, target: Option<f64>) -> Option<((f32, f32), std
     let angle = (paint::tick_angle(tick, paint::TICKS) + away * 9.0).to_radians();
     let centre = tick as f32 + away * 4.5;
     let (low, high) = ((centre - 5.0).max(0.0).round() as usize, (centre + 5.0).round().min((paint::TICKS - 1) as f32) as usize);
-    Some(((HALF + 212.0 * angle.sin(), HALF - 212.0 * angle.cos()), low..=high))
+    // In the Nest's ticks; just inside Fledge's arc.
+    let radius = if paint::fledge() { 178.0 } else { 212.0 };
+    Some(((HALF + radius * angle.sin(), HALF - radius * angle.cos()), low..=high))
 }
 
 /// Whether a dial shows the temperature now by its tick: only while the
@@ -321,24 +351,24 @@ fn now_label(p: &mut Canvas, fonts: &Fonts, card: &ClimateCard, target: Option<f
     let half = card.step < 1.0 && (now.fract() - 0.5).abs() < 0.25;
     let whole = if half { now.floor() } else { now.round() } as i64;
     let digits = whole.to_string();
-    let width = paint::measure(&fonts.medium, 28.0, &digits, 0.0);
-    let small = if half { paint::measure(&fonts.medium, 16.0, "5", 0.0) + 2.0 } else { 0.0 };
+    let width = paint::measure(fonts.medium(), 28.0, &digits, 0.0);
+    let small = if half { paint::measure(fonts.medium(), 16.0, "5", 0.0) + 2.0 } else { 0.0 };
     let left = x - (width + small) / 2.0;
     // White over the ticks, to read on the black dial as on the orange.
     let tint = WHITE;
-    paint::text_at(p, &fonts.medium, 28.0, left, y + 10.0, &digits, 0.0, tint, shown);
+    paint::text_at(p, fonts.medium(), 28.0, left, y + 10.0, &digits, 0.0, tint, shown);
     if half {
-        paint::text_at(p, &fonts.medium, 16.0, left + width + 2.0, y - 2.0, "5", 0.0, tint, shown);
+        paint::text_at(p, fonts.medium(), 16.0, left + width + 2.0, y - 2.0, "5", 0.0, tint, shown);
     }
 }
 
 fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, setting: bool) -> Canvas {
     let (background, active) = climate_colours(card);
-    let mut p = paint::canvas(background);
+    let mut p = paint::face(background);
     let text_colour = if active { WHITE } else { GREY };
     label(&mut p, fonts, 150.0, &card.name, text_colour);
     if target.is_none() || card.mode == "off" {
-        paint::text(&mut p, &fonts.regular, 96.0, HALF, 300.0, "OFF", 0.0, WHITE);
+        paint::text(&mut p, fonts.digits(), 96.0, HALF, 300.0, "OFF", 0.0, WHITE);
     }
     let bottom = if setting {
         if card.presets.is_empty() { "Press when done".to_owned() } else { "Press for presets".to_owned() }
@@ -361,6 +391,9 @@ const AMBER: [u8; 3] = [246, 136, 0];
 /// A climate dial's plain ticks: amber on heating orange, light blue on
 /// cooling blue, dim on black.
 fn tick_base(card: &ClimateCard) -> [u8; 3] {
+    if paint::fledge() {
+        return DIM; // Fledge's track
+    }
     match climate_colours(card) {
         (_, false) => DIM,
         _ if card.action == "cooling" => [96, 160, 240],
@@ -424,7 +457,20 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
                 Some((low, high, from)) if (low..=high).contains(&i) => {
                     let along = (i as f32 - from as f32).abs() / (high - low) as f32;
                     let lit = pulse.map_or(0.0, |phase| pulse_light(phase, along));
-                    (alpha(WHITE, 0.62 + 0.38 * lit), paint::Shape::Short)
+                    if paint::fledge() {
+                        // Fledge's arc glows from the temperature now to the
+                        // target, amber (blue cooling), the pulse brightening it.
+                        let (from, to) = if card.action == "cooling" {
+                            ([60, 140, 240], [150, 205, 255])
+                        } else {
+                            ([255, 106, 43], [255, 179, 92])
+                        };
+                        let t = 0.35 * (1.0 - along) + 0.65 * lit;
+                        let mix = |k: usize| (from[k] as f32 + (to[k] as f32 - from[k] as f32) * t) as u8;
+                        (colour([mix(0), mix(1), mix(2)]), paint::Shape::Short)
+                    } else {
+                        (alpha(WHITE, 0.62 + 0.38 * lit), paint::Shape::Short)
+                    }
                 }
                 _ => (base, paint::Shape::Short),
             }
@@ -446,7 +492,7 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
 pub const PROGRESS_WIDTH: f32 = 180.0;
 
 fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, progress: Option<f32>) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let playing = card.state == "playing";
     let lit = volume.map(|v| paint::tick_at(v as f32 / 100.0));
     paint::ring(&mut p, |i| match lit {
@@ -457,6 +503,12 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, progress: Opt
     let accent = if playing { MEDIA } else { GREY };
     // With album art, the art in place of the name and icon.
     let top = match &card.art {
+        Some(art) if paint::fledge() => {
+            // Fledge's: smaller, rounder, inside the arc.
+            let side = (art.size as f32).min(176.0);
+            paint::picture_scaled(&mut p, &art.rgb, art.size, side as u32, HALF, 186.0, 24.0);
+            186.0 + side / 2.0
+        }
         Some(art) => {
             paint::picture(&mut p, &art.rgb, art.size, HALF, 194.0, 14.0);
             194.0 + art.size as f32 / 2.0
@@ -468,8 +520,8 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, progress: Opt
         }
     };
     let title = if card.title.is_empty() { capitalise(&card.state) } else { card.title.clone() };
-    let title = paint::fit(&fonts.medium, 28.0, &title, 0.0, 300.0);
-    paint::text(&mut p, &fonts.medium, 28.0, HALF, top + 42.0, &title, 0.0, WHITE);
+    let title = paint::fit(fonts.medium(), 28.0, &title, 0.0, 300.0);
+    paint::text(&mut p, fonts.medium(), 28.0, HALF, top + 42.0, &title, 0.0, WHITE);
     // How far through the track, under its title.
     let mut below = top + 76.0;
     if let Some(done) = progress {
@@ -489,14 +541,14 @@ const ACTION: [u8; 3] = [255, 196, 87];
 
 /// No ring: there's nothing to turn. Done, its icon and words turn gold.
 fn action_card(fonts: &Fonts, card: &ActionCard, done: bool) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     // Its own icon if the thermostat has it, else a play button.
     let found = icons::lookup(&card.icon, &card.id).or_else(|| icons::lookup("mdi:play-circle-outline", ""));
     if let Some(found) = found {
         paint::icon(&mut p, found, HALF, 178.0, 104.0, colour(if done { ACTION } else { WHITE }));
     }
-    let name = paint::fit(&fonts.regular, 40.0, &card.name, 0.0, 330.0);
-    paint::text(&mut p, &fonts.regular, 40.0, HALF, 288.0, &name, 0.0, WHITE);
+    let name = paint::fit(fonts.regular(), 40.0, &card.name, 0.0, 330.0);
+    paint::text(&mut p, fonts.regular(), 40.0, HALF, 288.0, &name, 0.0, WHITE);
     line(&mut p, fonts, 330.0, if done { "Done" } else { "Press to run" }, if done { ACTION } else { GREY });
     p
 }
@@ -504,7 +556,7 @@ fn action_card(fonts: &Fonts, card: &ActionCard, done: bool) -> Canvas {
 /// A camera's latest still, the whole display; before the first, its icon
 /// and name.
 fn camera_card(fonts: &Fonts, card: &CameraCard) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     match &card.art {
         // Its name shows above the cards: the picture alone.
         Some(art) => paint::picture(&mut p, &art.rgb, art.size, HALF, HALF, 0.0),
@@ -512,8 +564,8 @@ fn camera_card(fonts: &Fonts, card: &CameraCard) -> Canvas {
             paint::ring(&mut p, |_| colour(DIM), &[]);
             let icon_name = if card.icon.is_empty() { "mdi:cctv" } else { &card.icon };
             icon(&mut p, icon_name, &card.id, HALF, 178.0, 96.0, WHITE);
-            let name = paint::fit(&fonts.regular, 36.0, &card.name, 0.0, 330.0);
-            paint::text(&mut p, &fonts.regular, 36.0, HALF, 286.0, &name, 0.0, WHITE);
+            let name = paint::fit(fonts.regular(), 36.0, &card.name, 0.0, 330.0);
+            paint::text(&mut p, fonts.regular(), 36.0, HALF, 286.0, &name, 0.0, WHITE);
             line(&mut p, fonts, 328.0, "Press for a picture", GREY);
         }
     }
@@ -525,10 +577,10 @@ fn camera_card(fonts: &Fonts, card: &CameraCard) -> Canvas {
 fn camera_view(fonts: &Fonts, card: &CameraCard) -> Canvas {
     let mut p = camera_card(fonts, card);
     if card.art.is_some() {
-        let name = paint::fit(&fonts.medium, 24.0, &card.name, 0.0, 280.0);
-        let width = paint::measure(&fonts.medium, 24.0, &name, 0.0) + 36.0;
+        let name = paint::fit(fonts.medium(), 24.0, &card.name, 0.0, 280.0);
+        let width = paint::measure(fonts.medium(), 24.0, &name, 0.0) + 36.0;
         paint::pill(&mut p, HALF - width / 2.0, 386.0, width, 40.0, alpha(BLACK, 0.6));
-        paint::text(&mut p, &fonts.medium, 24.0, HALF, 414.0, &name, 0.0, WHITE);
+        paint::text(&mut p, fonts.medium(), 24.0, HALF, 414.0, &name, 0.0, WHITE);
     }
     p
 }
@@ -562,20 +614,20 @@ fn wrap(font: &ab_glyph::FontArc, size: f32, text: &str, width: f32, lines: usiz
 /// over it; else its icon, title and message on black. Press to answer it,
 /// hold to put it away.
 fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let hint = "Press · hold to dismiss";
     match &alert.art {
         Some(art) => {
             paint::picture(&mut p, &art.rgb, art.size, HALF, HALF, 0.0);
             // The title over the picture, on a band, in up to two lines.
             let title = if alert.title.is_empty() { &alert.message } else { &alert.title };
-            let lines = wrap(&fonts.medium, 26.0, title, 300.0, 2);
-            let width = lines.iter().map(|l| paint::measure(&fonts.medium, 26.0, l, 0.0)).fold(0.0, f32::max) + 44.0;
+            let lines = wrap(fonts.medium(), 26.0, title, 300.0, 2);
+            let width = lines.iter().map(|l| paint::measure(fonts.medium(), 26.0, l, 0.0)).fold(0.0, f32::max) + 44.0;
             let height = 18.0 + 32.0 * lines.len() as f32;
             let top = 412.0 - height;
             paint::pill(&mut p, HALF - width / 2.0, top, width, height, alpha(BLACK, 0.65));
             for (i, text) in lines.iter().enumerate() {
-                paint::text(&mut p, &fonts.medium, 26.0, HALF, top + 34.0 + 32.0 * i as f32, text, 0.0, WHITE);
+                paint::text(&mut p, fonts.medium(), 26.0, HALF, top + 34.0 + 32.0 * i as f32, text, 0.0, WHITE);
             }
         }
         None => {
@@ -583,12 +635,12 @@ fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
             icon(&mut p, icon_name, "alert", HALF, 132.0, 80.0, ACTION);
             let mut y = 222.0;
             if !alert.title.is_empty() {
-                let title = paint::fit(&fonts.medium, 34.0, &alert.title, 0.0, 340.0);
-                paint::text(&mut p, &fonts.medium, 34.0, HALF, y, &title, 0.0, WHITE);
+                let title = paint::fit(fonts.medium(), 34.0, &alert.title, 0.0, 340.0);
+                paint::text(&mut p, fonts.medium(), 34.0, HALF, y, &title, 0.0, WHITE);
                 y += 44.0;
             }
-            for text in wrap(&fonts.regular, 24.0, &alert.message, 330.0, 3) {
-                paint::text(&mut p, &fonts.regular, 24.0, HALF, y, &text, 0.0, [220, 223, 228]);
+            for text in wrap(fonts.regular(), 24.0, &alert.message, 330.0, 3) {
+                paint::text(&mut p, fonts.regular(), 24.0, HALF, y, &text, 0.0, [220, 223, 228]);
                 y += 32.0;
             }
             line(&mut p, fonts, 372.0, hint, GREY);
@@ -599,12 +651,15 @@ fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
 
 /// No ring: there's nothing to turn.
 fn settings_card(fonts: &Fonts) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     icon(&mut p, "mdi:cog", "settings", HALF, 168.0, 96.0, WHITE);
-    paint::text(&mut p, &fonts.regular, 40.0, HALF, 278.0, "Settings", 0.0, WHITE);
+    paint::text(&mut p, fonts.regular(), 40.0, HALF, 278.0, "Settings", 0.0, WHITE);
     line(&mut p, fonts, 316.0, "Eco · Home/Away · Fledge", GREY);
     p
 }
+
+/// Fledge's chosen menu button.
+const MENU_ON: [u8; 3] = [138, 190, 255];
 
 /// Eco's leaf green, as the Nest shows it.
 const ECO: [u8; 3] = [76, 175, 80];
@@ -660,11 +715,11 @@ pub fn predicted(nest: &Nest, target: f64) -> Nest {
 fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, now: f64) -> Canvas {
     let card = &nest.card;
     let (background, active) = climate_colours(card);
-    let mut p = paint::canvas(background);
+    let mut p = paint::face(background);
     let soft = if active { [255, 225, 205] } else { GREY };
     let off = card.mode == "off";
     if off {
-        paint::text(&mut p, &fonts.regular, 96.0, HALF, NUMBER_BASELINE - 18.0, "OFF", 0.0, WHITE);
+        paint::text(&mut p, fonts.digits(), 96.0, HALF, NUMBER_BASELINE - 18.0, "OFF", 0.0, WHITE);
         return p;
     }
     let _ = target;
@@ -678,7 +733,13 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
             _ => Some(if card.mode == "cool" { "Cool set to" } else { "Heat set to" }.to_owned()),
         };
         if let Some(above) = above {
-            dial_words(&mut p, fonts, ABOVE_BASELINE, &above, if active { WHITE } else { GREY });
+            let tint = match (active, paint::fledge()) {
+                (true, true) if card.action == "cooling" => [170, 205, 255],
+                (true, true) => [255, 201, 166],
+                (true, false) => WHITE,
+                (false, _) => GREY,
+            };
+            dial_words(&mut p, fonts, ABOVE_BASELINE, &above, tint);
         }
         if let Some(until) = &nest.next_change {
             dial_words(&mut p, fonts, UNDER_BASELINE, &format!("Until {until}"), soft);
@@ -705,7 +766,7 @@ fn nest_card(fonts: &Fonts, nest: &Nest, now: f64) -> Canvas {
             (colour(tick_base(card)), paint::Shape::Short)
         });
         now_label(&mut p, fonts, card, target, if now_differs(card, target) { 1.0 } else { 0.0 });
-        paint::text(&mut p, &fonts.regular, 120.0, HALF, NUMBER_BASELINE - 8.0, "ECO", 0.0, WHITE);
+        paint::text(&mut p, fonts.digits(), 120.0, HALF, NUMBER_BASELINE - 8.0, if paint::fledge() { "Eco" } else { "ECO" }, 0.0, WHITE);
         return p;
     }
     climate_moving(&mut p, None, fonts, card, target, None, None, None);
@@ -735,6 +796,7 @@ fn setting_row(setting: Setting, nest: Option<&Nest>, nest_dial: bool) -> (&'sta
         Setting::Scale => ("mdi:temperature-celsius", "Units",
                            nest.map(|n| if n.fahrenheit { "°F" } else { "°C" }.to_owned()).unwrap_or_default()),
         Setting::NestDial => ("mdi:thermometer", "Nest's own dial", switch(nest_dial)),
+        Setting::Theme => ("mdi:palette", "Theme", if paint::fledge() { "Fledge" } else { "Nest" }.to_owned()),
         Setting::Software => ("mdi:update", "Fledge", match nest {
             Some(Nest { update: Some(tag), .. }) => format!("Install {tag}"),
             // v0.4.9, not a development build's v0.4.9-1-g42707b2-dirty.
@@ -749,7 +811,7 @@ fn setting_row(setting: Setting, nest: Option<&Nest>, nest_dial: bool) -> (&'sta
 /// Settings, listed as a device's lights are, with what each is set to.
 fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial: bool, selected: usize,
                  layer: Layer) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let first = first_row(selected, rows.len());
     list_backdrop(&mut p, layer, selected.checked_sub(first));
     label(&mut p, fonts, 100.0, "Settings", GREY);
@@ -761,17 +823,17 @@ fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial
         let update = rows[row] == Setting::Software && nest.is_some_and(|n| n.update.is_some());
         let value_tint = if chosen { WHITE } else if update || value == "On" { ON } else { GREY };
         icon(&mut p, icon_name, "setting", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
-        let value_width = paint::measure(&fonts.regular, 20.0, &value, 0.0);
-        let name = paint::fit(&fonts.regular, 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
-        paint::text_at(&mut p, &fonts.regular, 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
-        paint::text_at(&mut p, &fonts.regular, 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
+        let value_width = paint::measure(fonts.regular(), 20.0, &value, 0.0);
+        let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
+        paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
+        paint::text_at(&mut p, fonts.regular(), 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
     }
     p
 }
 
 /// A setting's temperature dial, without its ring and number.
 fn setting_still(fonts: &Fonts, setting: Setting) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     icon(&mut p, "mdi:leaf", "eco", HALF, 98.0, 40.0, ECO);
     let (_, name, _) = setting_row(setting, None, false);
     label(&mut p, fonts, 150.0, name, ECO);
@@ -825,9 +887,9 @@ fn first_row(selected: usize, rows: usize) -> usize {
 fn list_backdrop(p: &mut Canvas, layer: Layer, slot: Option<usize>) {
     let (x, w, h) = PILL;
     match (layer, slot) {
-        (Layer::Whole, Some(slot)) => paint::pill(p, x, LIST_TOP + slot as f32 * ROW_PITCH, w, h, colour(SELECT)),
+        (Layer::Whole, Some(slot)) => paint::pill(p, x, LIST_TOP + slot as f32 * ROW_PITCH, w, h, colour(paint::select())),
         // All the highlight's blue: only its pill is cut from it.
-        (Layer::Chosen, _) => *p = paint::canvas(SELECT),
+        (Layer::Chosen, _) => *p = paint::canvas(paint::select()),
         _ => {}
     }
 }
@@ -873,7 +935,7 @@ fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Canvas {
 
 /// Lights listed under `name`, each with its state, then Back.
 fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, layer: Layer) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let rows = lights.len() + 1;
     let first = first_row(selected, rows);
     list_backdrop(&mut p, layer, selected.checked_sub(first));
@@ -898,10 +960,10 @@ fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, l
         };
         let (tint, value_tint, text_tint) = if chosen { (WHITE, WHITE, WHITE) } else { (tint, value_tint, WHITE) };
         icon(&mut p, icon_name, entity, x + 34.0, y + h / 2.0, 28.0, tint);
-        let value_width = paint::measure(&fonts.regular, 20.0, &value, 0.0);
-        let name = paint::fit(&fonts.regular, 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
-        paint::text_at(&mut p, &fonts.regular, 24.0, x + 62.0, y + 36.0, &name, 0.0, text_tint, 1.0);
-        paint::text_at(&mut p, &fonts.regular, 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
+        let value_width = paint::measure(fonts.regular(), 20.0, &value, 0.0);
+        let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
+        paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, text_tint, 1.0);
+        paint::text_at(&mut p, fonts.regular(), 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
     }
     p
 }
@@ -910,13 +972,13 @@ fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, l
 /// and name, Off, and what holding (a press, for one that only switches)
 /// does.
 fn light_dim_still(fonts: &Fonts, light: &Light, on: bool) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let accent = if on { light.colour() } else { GREY };
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, accent);
     label(&mut p, fonts, 150.0, &light.name, accent);
     if !on || !light.dimmable {
         let words = if on { "On" } else { "Off" };
-        paint::text(&mut p, &fonts.regular, 96.0, HALF, NUMBER_BASELINE - 8.0, words, 0.0, WHITE);
+        paint::text(&mut p, fonts.regular(), 96.0, HALF, NUMBER_BASELINE - 8.0, words, 0.0, WHITE);
     }
     let hint = match (light.dimmable, on) {
         (true, true) => "Hold to turn off",
@@ -943,7 +1005,7 @@ fn light_dim_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &
 /// A light's warmth or colour dial without its ring and value: its name and
 /// what the dial sets.
 fn light_dial_still(fonts: &Fonts, light: &Light, what: &str) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, GREY);
     label(&mut p, fonts, 150.0, &light.name, GREY);
     line(&mut p, fonts, 366.0, &format!("{what} · press when done"), GREY);
@@ -1006,13 +1068,14 @@ fn hue_moving(p: &mut Canvas, live: Option<&mut paint::Live>, _fonts: &Fonts, va
 #[allow(clippy::too_many_arguments)]
 fn big_text_on(pixmap: &mut Canvas, live: Option<&mut paint::Live>, fonts: &Fonts, digits: &str, unit: &str, size: f32,
                c: [u8; 3]) {
-    let width = paint::measure(&fonts.regular, size, digits, -3.0);
+    let font = fonts.digits();
+    let width = paint::measure(font, size, digits, -3.0);
     let small = size * 0.31;
-    let small_width = if unit.is_empty() { 0.0 } else { paint::measure(&fonts.regular, small, unit, 0.0) + 6.0 };
+    let small_width = if unit.is_empty() { 0.0 } else { paint::measure(font, small, unit, 0.0) + 6.0 };
     let x = HALF - (width + small_width) / 2.0;
-    let mut parts = vec![(&fonts.regular, size, x, 300.0, digits, -3.0)];
+    let mut parts = vec![(font, size, x, 300.0, digits, -3.0)];
     if !unit.is_empty() {
-        parts.push((&fonts.regular, small, x + width + 4.0, 300.0 - size * 0.7 + small, unit, 0.0));
+        parts.push((font, small, x + width + 4.0, 300.0 - size * 0.7 + small, unit, 0.0));
     }
     match live {
         Some(live) => paint::number_live(pixmap, live, &parts, c),
@@ -1025,7 +1088,7 @@ fn big_text_on(pixmap: &mut Canvas, live: Option<&mut paint::Live>, fonts: &Font
 }
 
 fn volume_still(fonts: &Fonts, card: &MediaCard) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     label(&mut p, fonts, 150.0, &card.name, MEDIA);
     let action = if card.state == "playing" { "Volume · hold to pause" } else { "Volume · hold to play" };
     line(&mut p, fonts, 366.0, action, GREY);
@@ -1043,37 +1106,47 @@ fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fon
 /// chosen one blue and named under the device's name.
 pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], selected: usize) {
     paint::dim(p, 0.06);
+    let fledge = paint::fledge();
     for (i, (name, _)) in items.iter().enumerate() {
         let angle = (-135.0 + 55.0 * i as f32).to_radians();
-        let (x, y) = (HALF + 178.0 * angle.sin(), HALF - 178.0 * angle.cos());
         let chosen = i == selected;
+        if fledge {
+            // Fledge's: round buttons on an arc, the chosen one filled.
+            let (x, y) = (HALF + 166.0 * angle.sin(), HALF - 166.0 * angle.cos());
+            let r = if chosen { 41.0 } else { 34.0 };
+            paint::circle(p, x, y, r, if chosen { colour(MENU_ON) } else { alpha(WHITE, 0.09) });
+            icon(p, name, "back", x, y, if chosen { 36.0 } else { 30.0 }, if chosen { [8, 24, 48] } else { [195, 204, 213] });
+            continue;
+        }
+        let (x, y) = (HALF + 178.0 * angle.sin(), HALF - 178.0 * angle.cos());
         let colour = if chosen { [26, 115, 232] } else { [138, 143, 152] };
         icon(p, name, "back", x, y, if chosen { 52.0 } else { 44.0 }, colour);
     }
-    let title = paint::fit(&fonts.regular, 30.0, title, 0.0, 300.0);
-    paint::text(p, &fonts.regular, 30.0, HALF, 232.0, &title, 0.0, WHITE);
+    let title = paint::fit(fonts.regular(), 30.0, title, 0.0, 300.0);
+    paint::text(p, fonts.regular(), 30.0, HALF, 232.0, &title, 0.0, WHITE);
     if let Some((_, label)) = items.get(selected) {
-        paint::text(p, &fonts.medium, 19.0, HALF, 270.0, label, 0.2, [74, 144, 226]);
+        let tint = if fledge { MENU_ON } else { [74, 144, 226] };
+        paint::text(p, fonts.medium(), 19.0, HALF, 270.0, label, 0.2, tint);
     }
 }
 
 /// The glance: the time large, the date, the weather and what's on.
 fn glance_screen(fonts: &Fonts, glance: &Glance, cards: &[Card], now: i64) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let local = now + glance.offset;
     let (minutes, days) = (local.rem_euclid(86_400) / 60, local.div_euclid(86_400));
     let time = format!("{:02}:{:02}", minutes / 60, minutes % 60);
-    paint::text(&mut p, &fonts.regular, 120.0, HALF, 232.0, &time, -2.0, WHITE);
+    paint::text(&mut p, fonts.digits(), 120.0, HALF, 232.0, &time, -2.0, WHITE);
     line(&mut p, fonts, 276.0, &date(days), GREY);
     if let Some(weather) = &glance.weather {
         let temperature = weather.temperature.map(|t| format!("{t:.0}{}", if weather.unit.contains('F') { "°F" } else { "°" }));
         let text = [temperature.unwrap_or_default(), condition_name(&weather.condition)]
             .into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
         let name = format!("mdi:{}", weather_icon(&weather.condition));
-        let width = paint::measure(&fonts.regular, 26.0, &text, 0.0);
+        let width = paint::measure(fonts.regular(), 26.0, &text, 0.0);
         let left = HALF - (width + 44.0) / 2.0;
         icon(&mut p, &name, "weather", left + 16.0, 323.0, 34.0, WHITE);
-        paint::text_at(&mut p, &fonts.regular, 26.0, left + 44.0, 332.0, &text, 0.0, WHITE, 1.0);
+        paint::text_at(&mut p, fonts.regular(), 26.0, left + 44.0, 332.0, &text, 0.0, WHITE, 1.0);
     }
     line(&mut p, fonts, 380.0, &whats_on(cards), ACTION);
     p
@@ -1164,21 +1237,21 @@ pub fn preset_icon(preset: &str) -> &'static str {
 const COVER: [u8; 3] = [120, 170, 255];
 
 fn options_card(fonts: &Fonts, card: &OptionsCard) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let found = icons::lookup(&card.icon, &card.id).or_else(|| icons::lookup("mdi:format-list-bulleted", ""));
     if let Some(found) = found {
         paint::icon(&mut p, found, HALF, 150.0, 84.0, colour(WHITE));
     }
     label(&mut p, fonts, 232.0, &card.name, GREY);
-    let current = paint::fit(&fonts.regular, 40.0, card.current.as_deref().unwrap_or("—"), 0.0, 330.0);
-    paint::text(&mut p, &fonts.regular, 40.0, HALF, 292.0, &current, 0.0, WHITE);
+    let current = paint::fit(fonts.regular(), 40.0, card.current.as_deref().unwrap_or("—"), 0.0, 330.0);
+    paint::text(&mut p, fonts.regular(), 40.0, HALF, 292.0, &current, 0.0, WHITE);
     line(&mut p, fonts, 334.0, "Press to choose", GREY);
     p
 }
 
 /// A select's options, the current one marked, then Back.
 fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let rows = card.options.len() + 1;
     let first = first_row(selected, rows);
     list_backdrop(&mut p, layer, selected.checked_sub(first));
@@ -1195,11 +1268,11 @@ fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer)
             icon(&mut p, "mdi:arrow-left", "back", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
         }
         let value = if now { "Now" } else { "" };
-        let value_width = paint::measure(&fonts.regular, 20.0, value, 0.0);
-        let name = paint::fit(&fonts.regular, 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
-        paint::text_at(&mut p, &fonts.regular, 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
+        let value_width = paint::measure(fonts.regular(), 20.0, value, 0.0);
+        let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
+        paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
         if now {
-            paint::text_at(&mut p, &fonts.regular, 20.0, x + w - 22.0 - value_width, y + 35.0, value, 0.0,
+            paint::text_at(&mut p, fonts.regular(), 20.0, x + w - 22.0 - value_width, y + 35.0, value, 0.0,
                            if chosen { WHITE } else { ACTION }, 1.0);
         }
     }
@@ -1217,7 +1290,7 @@ fn cover_card(fonts: &Fonts, card: &CoverCard) -> Canvas {
 }
 
 fn cover_still(fonts: &Fonts, card: &CoverCard) -> Canvas {
-    let mut p = paint::canvas(BLACK);
+    let mut p = paint::face(BLACK);
     let open = card.state == "open" || card.state == "opening";
     let name = if open { "mdi:window-shutter-open" } else { "mdi:window-shutter" };
     let found = icons::lookup(&card.icon, &card.id).or_else(|| icons::lookup(name, ""));
@@ -1231,7 +1304,7 @@ fn cover_still(fonts: &Fonts, card: &CoverCard) -> Canvas {
             "closing" => "Closing".to_owned(),
             state => capitalise(state),
         };
-        paint::text(&mut p, &fonts.regular, 80.0, HALF, NUMBER_BASELINE - 12.0, &words, 0.0, WHITE);
+        paint::text(&mut p, fonts.regular(), 80.0, HALF, NUMBER_BASELINE - 12.0, &words, 0.0, WHITE);
     }
     line(&mut p, fonts, 366.0, if card.positionable { "How open · press for more" } else { "Press to open or close" }, GREY);
     p

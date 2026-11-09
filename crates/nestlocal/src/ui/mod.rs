@@ -157,6 +157,8 @@ pub trait Sender: Send + Sync + 'static {
 
 /// Kept while the thermostat shows Nest's own dial rather than its card.
 const NEST_DIAL: &str = "/media/data/fledge-nest-dial";
+/// Kept while the screens wear the Fledge theme.
+const THEME: &str = "/media/data/fledge-theme";
 
 /// Starts the UI on a gen 3 unit: it waits for cards from Home Assistant.
 pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
@@ -334,6 +336,8 @@ impl Runtime {
         logf!("ui: ready for home screen cards");
         hold_state(false);
         self.machine.nest_dial = std::path::Path::new(NEST_DIAL).exists();
+        self.machine.fledge = std::path::Path::new(THEME).exists();
+        paint::set_theme(if self.machine.fledge { paint::Theme::Fledge } else { paint::Theme::Nest });
         loop {
             // A frame each 8 ms while anything moves; otherwise input or time.
             // Quick while anything moves; a slower beat when there's nothing
@@ -1052,6 +1056,24 @@ impl Runtime {
                     }
                 }
             }
+            Effect::Theme(fledge) => {
+                let kept = if fledge { std::fs::write(THEME, b"fledge") } else { std::fs::remove_file(THEME) };
+                if let Err(e) = kept.or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
+                    logf!("ui: {THEME}: {e}");
+                }
+                paint::set_theme(if fledge { paint::Theme::Fledge } else { paint::Theme::Nest });
+                logf!("ui: the {} theme", if fledge { "Fledge" } else { "Nest" });
+                // Everything drawn so far is in the other theme.
+                self.cards.clear();
+                self.shrunk.clear();
+                self.stills.clear();
+                self.live = None;
+                self.glide = None;
+                if self.machine.own_thermostat() && self.home.is_some() {
+                    self.draw_home();
+                }
+                self.force_draw = true;
+            }
             Effect::OpenNestSettings => {
                 // Its menu, then on to Settings: each step only once the
                 // display shows the one before, so a turn only ever moves
@@ -1679,6 +1701,9 @@ mod shots {
             panic!("set UNFR0ZEN_UI_FONTS and UNFR0ZEN_UI_SHOTS");
         };
         let fonts = paint::Fonts::load(&fonts).unwrap();
+        if std::env::var("UNFR0ZEN_UI_THEME").is_ok_and(|t| t == "fledge") {
+            paint::set_theme(paint::Theme::Fledge);
+        }
         let cards = Cards::parse(br#"{"cards":[
             {"kind":"lights","name":"Bedroom","icon":"mdi:lightbulb-group","lights":[
                 {"id":"light.reading_lamp","name":"Reading Lamp","icon":"m3s:table-lamp","on":true,"dimmable":true,"brightness":60,"rgb":[255,169,87]},
