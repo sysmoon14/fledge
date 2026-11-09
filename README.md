@@ -17,13 +17,13 @@
 </p>
 
 <p align="center">
-  <img src="assets/screens/cards.png" width="100%" alt="Five of the thermostat's screens: the device chooser on a reading lamp's card, the lamp's warmth dial, another heating zone that is heating, a speaker's album art and progress, and the lamp's colour dial.">
+  <img src="assets/screens/fledge.png" width="100%" alt="Five screens in Fledge's look: the thermostat heating with 22 minutes to go, a lamp at 60%, a speaker's album art, the glance with the time and weather, and the thermostat's Settings.">
 </p>
 
 <p align="center">
-  <img src="assets/screens/fledge.png" width="100%" alt="Five screens in Fledge's own look: the thermostat heating with 22 minutes to go, a lamp at 60%, a speaker's album art, the glance with the time and weather, and the thermostat's Settings.">
+  <img src="assets/screens/cards.png" width="100%" alt="Five screens in the Nest's own look: the device chooser on a reading lamp's card, the lamp's warmth dial, another heating zone that is heating, a speaker's album art and progress, and the lamp's colour dial.">
   <br>
-  <sub>Two looks, chosen on the thermostat: the Nest's own (top) and Fledge's (bottom).</sub>
+  <sub>Fledge's look (top) is the default. The Nest's own look (bottom) is one setting away: Settings → Theme on the thermostat.</sub>
 </p>
 
 The Nest's ring is the best physical control in the house. Fledge keeps it, and
@@ -41,8 +41,8 @@ then hands it the rest of your home:
   (Eco temperature, Home/Away Assist, Auto-Schedule, Early-On, Sunblock,
   units, Fledge updates), in the same style. Nest's own menus are a press
   away for the rest, and Nest's own dial is a setting.
-- **It feels native.** Drawn at 60 frames a second in the Nest's own style
-  and fonts; long press to switch a light or pause the music.
+- **It feels native.** Drawn at 60 frames a second, in Fledge's own look or
+  the Nest's (Settings → Theme); long press to switch a light or pause the music.
 - **Updates from Home Assistant.** The thermostat's software updates from
   an ordinary Home Assistant update entity, signed, with automatic rollback.
 
@@ -158,7 +158,10 @@ network doesn't need internet access.
    patch**, the default); take it on the first run.
 4. **In Home Assistant:** the thermostat appears through MQTT. Add the
    [Fledge integration](https://github.com/sysmoon14/fledge-homeassistant) to put
-   your devices on its screen.
+   your devices on its screen: download it, restart Home Assistant, then add it.
+
+   [![Open the Fledge repository in Home Assistant's Marketplace (HACS)](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=sysmoon14&repository=fledge-homeassistant&category=integration)
+   [![Add the Fledge integration to Home Assistant](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=fledge)
 
 <p align="center">
   <img src="assets/screens/app.png" width="720" alt="The Fledge app's Set up page: Connect your thermostat, with the three steps and a 3rd generation thermostat found over USB.">

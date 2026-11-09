@@ -14,7 +14,7 @@
 //! nestlocal holds the ring and button (grabbed) while the thermostat's own
 //! screen shows, so a turn moves to the cards rather than the temperature.
 //! On a card it owns the display (device.rs), which nlclient keeps awake.
-//! Left alone, the cards go back to the thermostat. With no cards from Home
+//! Left alone, the screen times out where it is; the next wake starts again. With no cards from Home
 //! Assistant, or no nlclient (Doom), it leaves everything alone.
 
 mod device;
@@ -54,8 +54,10 @@ use crate::logf;
 ///   5  the thermostat anywhere among the cards (thermostat)
 ///   6  what someone across the room and someone close bring (presence:
 ///      far glance, wake or dark; near wake, glance or none), and how long
-///      the cards stay untouched (card_idle)
-pub const PROTOCOL: u32 = 6;
+///      the screen stays untouched (card_idle)
+///   7  the thermostat's own name (thermostat_name); the screen stays on
+///      whatever was opened until it times out
+pub const PROTOCOL: u32 = 7;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -187,8 +189,14 @@ pub trait Sender: Send + Sync + 'static {
 
 /// Kept while the thermostat shows Nest's own dial rather than its card.
 const NEST_DIAL: &str = "/media/data/fledge-nest-dial";
-/// Kept while the screens wear the Fledge theme.
+/// The theme the screens wear: "nest" for the Nest's own look; Fledge's
+/// otherwise (the default), or if it isn't there.
 const THEME: &str = "/media/data/fledge-theme";
+
+/// Whether the screens wear Fledge's theme, as `kept` (THEME's contents) says.
+fn fledge_theme(kept: Option<&str>) -> bool {
+    kept.is_none_or(|kept| kept.trim() != "nest")
+}
 
 /// Starts the UI on a gen 3 unit: it waits for cards from Home Assistant.
 pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
@@ -471,7 +479,7 @@ impl Runtime {
         hold_state(false);
         device::rest(false);
         self.machine.nest_dial = std::path::Path::new(NEST_DIAL).exists();
-        self.machine.fledge = std::path::Path::new(THEME).exists();
+        self.machine.fledge = fledge_theme(std::fs::read_to_string(THEME).ok().as_deref());
         paint::set_theme(if self.machine.fledge { paint::Theme::Fledge } else { paint::Theme::Nest });
         loop {
             // A frame each 8 ms while anything moves (the cards as fast as the
@@ -1340,8 +1348,7 @@ impl Runtime {
                 }
             }
             Effect::Theme(fledge) => {
-                let kept = if fledge { std::fs::write(THEME, b"fledge") } else { std::fs::remove_file(THEME) };
-                if let Err(e) = kept.or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
+                if let Err(e) = std::fs::write(THEME, if fledge { "fledge" } else { "nest" }) {
                     logf!("ui: {THEME}: {e}");
                 }
                 paint::set_theme(if fledge { paint::Theme::Fledge } else { paint::Theme::Nest });
@@ -1397,7 +1404,10 @@ impl Runtime {
     /// drawn again when that changed.
     fn refresh_nest(&mut self) {
         let Some(state) = self.sender.nest() else { return };
-        let nest = Nest::from_state(&state);
+        let mut nest = Nest::from_state(&state);
+        if let Some(name) = self.machine.cards.thermostat_name() {
+            nest.card.name = name.to_owned();
+        }
         if self.machine.nest.as_ref() == Some(&nest) {
             return;
         }
@@ -2056,15 +2066,20 @@ mod shots {
     }
 
     #[test]
+    fn fledge_s_theme_unless_the_nest_s_was_chosen() {
+        assert!(fledge_theme(None), "nothing kept: Fledge's, the default");
+        assert!(fledge_theme(Some("fledge")) && fledge_theme(Some("")), "as before: kept while Fledge's");
+        assert!(!fledge_theme(Some("nest\n")));
+    }
+
+    #[test]
     #[ignore]
     fn ui_shots() {
         let (Ok(fonts), Ok(out)) = (std::env::var("UNFR0ZEN_UI_FONTS"), std::env::var("UNFR0ZEN_UI_SHOTS")) else {
             panic!("set UNFR0ZEN_UI_FONTS and UNFR0ZEN_UI_SHOTS");
         };
         let fonts = paint::Fonts::load(&fonts).unwrap();
-        if std::env::var("UNFR0ZEN_UI_THEME").is_ok_and(|t| t == "fledge") {
-            paint::set_theme(paint::Theme::Fledge);
-        }
+        paint::set_theme(if std::env::var("UNFR0ZEN_UI_THEME").is_ok_and(|t| t == "nest") { paint::Theme::Nest } else { paint::Theme::Fledge });
         let cards = Cards::parse(br#"{"cards":[
             {"kind":"lights","name":"Bedroom","icon":"mdi:lightbulb-group","lights":[
                 {"id":"light.reading_lamp","name":"Reading Lamp","icon":"m3s:table-lamp","on":true,"dimmable":true,"brightness":60,"rgb":[255,169,87]},

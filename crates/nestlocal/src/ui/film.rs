@@ -306,7 +306,7 @@ fn ui_film() {
         film.hold(18);
     }
 
-    for theme in [paint::Theme::Nest, paint::Theme::Fledge] {
+    for theme in [paint::Theme::Fledge, paint::Theme::Nest] {
         paint::set_theme(theme);
         let fledge = theme == paint::Theme::Fledge;
         let lamp_cards = parse(60, 21.5, 35, "Slow Tide");
@@ -325,7 +325,7 @@ fn ui_film() {
             (Screen::NestSet { nest: &thermostat, target, pulse: None, setting: true, shown: None },
              ((value as f64 - card.min) / (card.max - card.min)) as f32)
         };
-        if !fledge {
+        if fledge {
             film.caption("Across the room: the time, the weather, what's on");
             glanced(&mut film, &fonts, 300, false);
             film.caption("Walk up: your devices, around the thermostat");
@@ -361,13 +361,13 @@ fn ui_film() {
             let heating = deck(&fonts, 85, 23.0, 52, 22.5);
             open(&mut film, &fonts, &louder, &heating, 0, &[(20.0, 0), (22.5, 80)], &set);
             film.hold(20);
-            film.caption("Two looks: the Nest's own, or Fledge's");
+            film.caption("Fledge's look, or the Nest's own");
             film.turn(&fonts, &heating, 0, 6, 8);
             film.hold(16);
             film.zoom(&fonts, &heating, 6, zoom::zoomed(), 1.0);
-            film.fade(&device::frame(screens::draw(&fonts, &Screen::ThemePick { fledge: false }, None)));
+            film.fade(&device::frame(screens::draw(&fonts, &Screen::ThemePick { fledge: true }, None)));
             film.hold(40);
-            film.show(&device::frame(screens::draw(&fonts, &Screen::ThemePick { fledge: true }, None)));
+            film.show(&device::frame(screens::draw(&fonts, &Screen::ThemePick { fledge: false }, None)));
             film.hold(40);
         } else {
             let heating = deck(&fonts, 85, 23.0, 52, 22.5);
@@ -395,10 +395,12 @@ fn ui_film() {
             };
             let settled = deck(&fonts, 40, 23.0, 52, 21.5);
             open(&mut film, &fonts, &softer, &settled, 0, &[(22.5, 0), (19.5, 70), (21.5, 55)], &set);
-            film.caption("Fledge: Home Assistant on your Nest's own screen");
-            glanced(&mut film, &fonts, 210, true);
         }
     }
+    // It ends as it began, in Fledge's look.
+    paint::set_theme(paint::Theme::Fledge);
+    film.caption("Fledge: Home Assistant on your Nest's own screen");
+    glanced(&mut film, &fonts, 210, true);
     let captions: String = film.captions.iter().map(|(frame, text)| format!("{frame}\t{text}\n")).collect();
     std::fs::write(format!("{}/captions.txt", film.dir), captions).unwrap();
     println!("{} frames, {:.1} s", film.frames, film.frames as f32 * FRAME);
