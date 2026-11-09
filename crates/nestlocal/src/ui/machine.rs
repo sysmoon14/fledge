@@ -20,6 +20,14 @@ pub const ROW_STEP: i32 = 250;
 /// A percent of brightness or volume; a thermostat's step (half a degree).
 pub const VALUE_STEP: i32 = 30;
 pub const CLIMATE_STEP: i32 = 90;
+/// The thermostat's ring clicks this often: twice a step, its target
+/// following the hand between, as the Nest's ring does.
+pub const CLIMATE_CLICK: i32 = CLIMATE_STEP / 2;
+
+/// `t` to the nearest `step` (a thermostat's half degree).
+pub fn on_step(t: f64, step: f64) -> f64 {
+    (t / step).round() * step
+}
 /// A pause this long ends a movement (for the log); this long, its counts
 /// towards the next step.
 const GESTURE: Duration = Duration::from_millis(400);
@@ -56,6 +64,8 @@ pub const LIGHTING: Duration = Duration::from_millis(1500);
 /// The thermostat's target goes to nlclient once the ring has rested this
 /// long, not at every step: each change is a bucket write it acts on.
 pub const SETTLE: Duration = Duration::from_millis(700);
+/// How long a media player's volume shows large after the ring turns.
+pub const VOLUME_SHOWN: Duration = Duration::from_millis(1500);
 /// How long the thermostat's dial says "Heat set to" after the ring turns.
 pub const SET_SHOWN: Duration = Duration::from_secs(3);
 /// The minutes a hot water boost runs from the thermostat's menu.
@@ -282,6 +292,12 @@ pub struct Machine {
     /// When the thermostat's ring last turned: its dial says what it's set
     /// to for SET_SHOWN after.
     pub set_at: Option<Instant>,
+    /// How far the thermostat's ring has gone towards its next step (-1..1),
+    /// its mark following.
+    pub dial_offset: f64,
+    /// When a media player's ring last turned: its volume shows large for
+    /// VOLUME_SHOWN after, its track the rest of the time.
+    pub volume_at: Option<Instant>,
 }
 
 impl Machine {
@@ -290,7 +306,7 @@ impl Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
-            nest: None, nest_dial: false, set_at: None,
+            nest: None, nest_dial: false, set_at: None, dial_offset: 0.0, volume_at: None,
         }
     }
 
@@ -326,7 +342,8 @@ impl Machine {
     }
 
     /// The thermostat opened: its own dial, or Nest's.
-    fn thermostat(&self) -> Mode {
+    fn thermostat(&mut self) -> Mode {
+        self.dial_offset = 0.0;
         match &self.nest {
             Some(nest) if !self.nest_dial => {
                 let card = &nest.card;
@@ -543,8 +560,15 @@ impl Machine {
                     }
                 }
                 self.movement += value;
-                if matches!(self.mode, Mode::Thermostat { .. }) {
+                if matches!(self.mode, Mode::Volume { .. }) {
+                    self.volume_at = Some(now);
+                }
+                if let Mode::Thermostat { target } = self.mode {
                     self.set_at = Some(now);
+                    self.turn_thermostat(target, out);
+                    self.dirty = true;
+                    self.sync(out);
+                    return;
                 }
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
@@ -726,23 +750,7 @@ impl Machine {
                 let selected = (selected as i32 + steps).clamp(0, actions.len() as i32 - 1) as usize;
                 self.mode = Mode::Menu { view, actions, selected };
             }
-            Mode::Thermostat { target } => {
-                if self.nest.as_ref().is_some_and(|n| n.eco) {
-                    // As on the Nest: setting a temperature leaves Eco.
-                    self.nest_command("preset", "none", out);
-                    if let Some(nest) = &mut self.nest {
-                        nest.eco = false;
-                        nest.card.preset = None;
-                    }
-                }
-                if let Some(nest) = &self.nest {
-                    let card = &nest.card;
-                    let target = (target + steps as f64 * card.step).clamp(card.min, card.max);
-                    let celsius = nest.celsius(target);
-                    self.pending = Some(Command::Nest("target".into(), celsius.to_string()));
-                    self.mode = Mode::Thermostat { target };
-                }
-            }
+            Mode::Thermostat { .. } => {}
             Mode::Settings { selected } => {
                 let rows = self.settings().len() as i32;
                 self.mode = Mode::Settings { selected: (selected as i32 + steps).clamp(0, rows - 1) as usize };
@@ -1001,11 +1009,58 @@ impl Machine {
         out.push(Effect::OpenNestSettings);
     }
 
+    /// The thermostat's ring turned (self.turn, counts since the last
+    /// click): it clicks twice a step, its mark following the hand between
+    /// (dial_offset, in steps); its target moves a whole step once the hand
+    /// has gone one, as the Nest's does.
+    fn turn_thermostat(&mut self, target: f64, out: &mut Vec<Effect>) {
+        let Some(nest) = &self.nest else { return };
+        let card = &nest.card;
+        let clicks = self.turn / CLIMATE_CLICK;
+        if clicks == 0 {
+            return;
+        }
+        self.turn %= CLIMATE_CLICK;
+        let mut offset = self.dial_offset + clicks as f64 * CLIMATE_CLICK as f64 / CLIMATE_STEP as f64;
+        let mut next = target;
+        while offset >= 1.0 - 1e-9 {
+            next += card.step;
+            offset -= 1.0;
+        }
+        while offset <= -1.0 + 1e-9 {
+            next -= card.step;
+            offset += 1.0;
+        }
+        if next >= card.max || next <= card.min {
+            (next, offset) = (next.clamp(card.min, card.max), 0.0);
+        }
+        if next == target && offset == self.dial_offset {
+            return;
+        }
+        out.push(Effect::Click);
+        self.dial_offset = offset;
+        self.mode = Mode::Thermostat { target: next };
+        if next == target {
+            return;
+        }
+        if nest.eco {
+            // As on the Nest: setting a temperature leaves Eco.
+            self.nest_command("preset", "none", out);
+            if let Some(nest) = &mut self.nest {
+                nest.eco = false;
+                nest.card.preset = None;
+            }
+        }
+        if let Some(nest) = &self.nest {
+            self.pending = Some(Command::Nest("target".into(), nest.celsius(next).to_string()));
+        }
+    }
+
     /// The thermostat's target just sent: its card shows it at once.
     fn sent_target(&mut self, command: &Command) {
         if let (Command::Nest(name, _), Mode::Thermostat { target }, Some(nest)) = (command, &self.mode, &mut self.nest) {
             if name == "target" {
-                nest.card.target = Some(*target);
+                nest.card.target = Some(on_step(*target, nest.card.step));
             }
         }
     }
@@ -1288,6 +1343,12 @@ impl Machine {
                 }
                 self.pictured = Some(now);
             }
+        }
+        // At rest, the thermostat's mark settles back on its target.
+        if matches!(self.mode, Mode::Thermostat { .. }) && idle >= SETTLE && self.dial_offset != 0.0 {
+            self.dial_offset = 0.0;
+            self.turn = 0;
+            self.dirty = true;
         }
         // The thermostat's target once the ring rests; Home Assistant's
         // devices as it turns.
@@ -1859,6 +1920,21 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Thermostat { target: 9.0 }, "no lower than the Nest goes");
         assert_eq!(sent(&rig.long()), vec![("target".into(), "9".into())], "going back sends it");
         assert_eq!(rig.machine.mode, Mode::Chooser(0));
+    }
+
+    #[test]
+    fn the_thermostat_s_ring_clicks_between_its_steps_and_its_mark_follows_the_hand() {
+        let mut rig = nest_rig();
+        rig.press();
+        let effects = rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
+        assert_eq!(effects, vec![Effect::Click], "a click, nothing sent");
+        assert_eq!((&rig.machine.mode, rig.machine.dial_offset), (&Mode::Thermostat { target: 20.0 }, 0.5),
+                   "still 20, the mark half way to the next step");
+        assert!(sent(&rig.wait(SETTLE * 2)).is_empty(), "nothing sent");
+        assert_eq!(rig.machine.dial_offset, 0.0, "at rest, the mark back on its target");
+        rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
+        rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
+        assert_eq!(sent(&rig.wait(SETTLE * 2)), vec![("target".into(), "20.5".into())], "a whole step: sent");
     }
 
     #[test]

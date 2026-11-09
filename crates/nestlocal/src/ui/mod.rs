@@ -255,9 +255,17 @@ struct Runtime {
     force_draw: bool,
     /// Whether the thermostat's dial says what it's set to (machine.set_at).
     set_words: bool,
+    /// Whether a media player's page shows its volume large (the ring just
+    /// turned), and when its track's progress was last drawn.
+    volume_view: bool,
+    progress_drawn: Instant,
+    /// The next frame fades in (the media page's track back).
+    fade_next: bool,
     /// How far the dial's temperature now has faded in, and where it's going
     /// (1 while the target is another, else 0).
     now_shown: (f32, f32),
+    /// Which side of its tick it shows (1 clockwise, -1 anticlockwise).
+    now_side: f64,
     /// nlclient's dial as it last showed lit, and when: the thermostat's
     /// card when the display wakes, its own page dark until nlclient draws.
     dial: Option<device::Frame>,
@@ -309,7 +317,7 @@ impl Runtime {
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
-            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, set_words: false, now_shown: (0.0, 0.0),
+            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false, now_shown: (0.0, 0.0), now_side: 1.0,
             dial: None, last_dial: now - Duration::from_secs(60),
         }
     }
@@ -463,6 +471,19 @@ impl Runtime {
             if std::mem::replace(&mut self.set_words, set_words) != set_words {
                 self.force_draw = true;
             }
+            if let Mode::Volume { .. } = self.machine.mode {
+                // The track back once the ring rests, faded; its progress
+                // bar drawn on as it plays.
+                let volume = self.machine.volume_at.is_some_and(|at| now.duration_since(at) < machine::VOLUME_SHOWN);
+                if std::mem::replace(&mut self.volume_view, volume) && !volume {
+                    self.force_draw = true;
+                    self.fade_next = true;
+                }
+                if !volume && now.duration_since(self.progress_drawn) >= Duration::from_secs(1) {
+                    self.progress_drawn = now;
+                    self.force_draw = true;
+                }
+            }
             self.transition = transition(&before, &self.machine.mode, turned && lit);
             if std::mem::take(&mut self.machine.woke) {
                 // Woken: the thermostat as it lit, zooming out to the cards.
@@ -563,23 +584,31 @@ impl Runtime {
             || (self.now_shown.0 - self.now_shown.1).abs() > 0.01
     }
 
-    /// The dial's temperature now fades out as the target comes to it, and
-    /// back in as it leaves, over about a quarter of a second.
+    /// The dial's temperature now fades out where it is as the target comes
+    /// to it, and back in as it leaves: on the side away from the target,
+    /// moving sides only once it has gone.
     fn fade_now_label(&mut self, before: &Mode) {
-        let want = match (&self.machine.mode, &self.machine.nest) {
+        let (visible, side) = match (&self.machine.mode, &self.machine.nest) {
             (Mode::Thermostat { target }, Some(nest)) => {
                 let card = &nest.card;
-                card.current.is_some_and(|c| (c - target).abs() >= card.step / 2.0) as u8 as f32
+                let target = (target / card.step).round() * card.step;
+                let Some(now) = card.current else { return };
+                ((now - target).abs() >= card.step / 2.0, if target < now { 1.0 } else { -1.0 })
             }
             _ => return,
         };
         if !matches!(before, Mode::Thermostat { .. }) {
-            self.now_shown = (want, want);
+            let shown = visible as u8 as f32;
+            (self.now_shown, self.now_side) = ((shown, shown), side);
             return;
         }
         let (shown, _) = self.now_shown;
-        let mut next = shown + (want - shown).signum() * 0.07;
-        if (next - want).abs() < 0.07 {
+        if shown <= 0.0 {
+            self.now_side = side;
+        }
+        let want = if visible && side == self.now_side { 1.0 } else { 0.0 };
+        let mut next = shown + (want - shown).signum() * 0.12;
+        if (next - want).abs() < 0.12 {
             next = want;
         }
         if next != shown {
@@ -876,8 +905,10 @@ impl Runtime {
             Mode::LightHue { value, .. } => Some(*value as f32 / 360.0),
             Mode::CoverSet { value, .. } => Some(*value as f32 / 100.0),
             Mode::Thermostat { target } => {
+                // The mark follows the hand between steps.
                 let card = &self.machine.nest.as_ref()?.card;
-                Some(((target - card.min) / (card.max - card.min).max(0.5)) as f32)
+                let at = target + self.machine.dial_offset * card.step;
+                Some(((at - card.min) / (card.max - card.min).max(0.5)) as f32)
             }
             Mode::SettingSet { setting, value } => {
                 let (low, high, _) = setting.range(self.machine.nest.as_ref()?.fahrenheit)?;
@@ -1122,8 +1153,13 @@ impl Runtime {
                 Card::Climate(card) => Screen::ClimateSet { card, target: *target },
                 _ => return None,
             },
+            // Its track at rest, as its card shows it (the volume on the
+            // ring); the volume large only while the ring turns.
             Mode::Volume { slot, value } => match card(*slot)? {
-                Card::Media(card) => Screen::Volume { card, value: *value },
+                Card::Media(card) if machine.volume_at.is_some_and(|at| at.elapsed() < machine::VOLUME_SHOWN) => {
+                    Screen::Volume { card, value: *value }
+                }
+                Card::Media(card) => Screen::MediaCard { card, volume: Some(*value), progress: card.progress(unix_now()) },
                 _ => return None,
             },
             Mode::Camera { slot } => match card(*slot)? {
@@ -1134,7 +1170,8 @@ impl Runtime {
             Mode::Glance => Screen::Glance { glance: machine.cards.glance.as_ref()?, cards: &machine.cards.cards,
                                              now: unix_now() as i64 },
             Mode::Thermostat { target } => Screen::NestSet {
-                nest: machine.nest.as_ref()?, target: *target, pulse: None,
+                nest: machine.nest.as_ref()?, pulse: None,
+                target: machine::on_step(*target, machine.nest.as_ref()?.card.step),
                 setting: machine.set_at.is_some_and(|at| at.elapsed() < machine::SET_SHOWN), shown: None,
             },
             Mode::Settings { selected } => Screen::Settings { rows: machine.settings(), nest: machine.nest.as_ref(),
@@ -1209,10 +1246,11 @@ impl Runtime {
         let Some(mut screen) = Self::screen(&self.machine, &mode) else { return };
         if let Screen::NestSet { pulse, shown, .. } = &mut screen {
             *pulse = self.pulse.map(|at| at.elapsed().as_secs_f32() / PULSE.as_secs_f32());
-            *shown = Some(self.now_shown.0);
+            let now = self.machine.nest.as_ref().and_then(|n| n.card.current).unwrap_or_default();
+            *shown = Some((self.now_shown.0, now - self.now_side));
         }
         let sweep = self.sweep.as_ref().map(|(_, shown)| *shown);
-        let fade = self.transition == Transition::Fade;
+        let fade = self.transition == Transition::Fade || std::mem::take(&mut self.fade_next);
         self.transition = Transition::Cut;
         if let Some((selected, first)) = screens::list_place(&screen) {
             let frame = Self::draw_list(&mut self.glide, &self.fonts, &screen, selected - first, fade);
@@ -1693,7 +1731,7 @@ mod shots {
         save(&screens::draw(&fonts, &Screen::NestCard { nest: &level, now }, None), &format!("{out}/n5-at-target.png"));
         let warm = state(serde_json::json!({"action": "idle", "target": 21.0, "current_temperature": 22.5, "next_change": "22:30"}));
         save(&screens::draw(&fonts, &Screen::NestCard { nest: &warm, now }, None), &format!("{out}/n6-above-target.png"));
-        save(&screens::draw(&fonts, &Screen::NestSet { nest: &warm, target: 22.5, pulse: None, setting: true, shown: Some(0.5) }, None),
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: &warm, target: 22.5, pulse: None, setting: true, shown: Some((0.5, 22.0)) }, None),
              &format!("{out}/n7-fading.png"));
         let mut zoomed = vec![0u8; (paint::SIZE * paint::SIZE * 4) as usize];
         let frames: Vec<device::Frame> = [Screen::NestCard { nest: &cold, now }, Screen::SettingsCard,

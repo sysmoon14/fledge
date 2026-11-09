@@ -46,7 +46,9 @@ pub enum Screen<'a> {
     /// `setting`: the ring just turned, so it says what it's set to.
     /// `shown`: how far the temperature now's number has faded in (0..1),
     /// as the target leaves it or comes to it; None, as it stands.
-    NestSet { nest: &'a Nest, target: f64, pulse: Option<f32>, setting: bool, shown: Option<f32> },
+    /// With it, a target on the side it shows (it stays where it was as it
+    /// fades, rather than jumping across as the target passes).
+    NestSet { nest: &'a Nest, target: f64, pulse: Option<f32>, setting: bool, shown: Option<(f32, f64)> },
     /// Its Settings, `selected` highlighted; `nest_dial`, Nest's own dial
     /// in place of its card.
     Settings { rows: Vec<Setting>, nest: Option<&'a Nest>, nest_dial: bool, selected: usize },
@@ -383,10 +385,13 @@ fn pulse_light(phase: f32, along: f32) -> f32 {
 /// target.
 #[allow(clippy::too_many_arguments)]
 fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, card: &ClimateCard,
-                  target: Option<f64>, sweep: Option<f32>, pulse: Option<f32>, shown: Option<f32>) {
+                  target: Option<f64>, sweep: Option<f32>, pulse: Option<f32>, shown: Option<(f32, f64)>) {
     // The temperature now's number goes over the ticks: first, put back
     // what was under it, so its ticks are drawn again.
-    let shown = shown.unwrap_or(if now_differs(card, target) { 1.0 } else { 0.0 });
+    let (shown, place) = match shown {
+        Some((shown, place)) => (shown, Some(place)),
+        None => (if now_differs(card, target) { 1.0 } else { 0.0 }, target),
+    };
     if let Some(live) = live.as_deref_mut() {
         if let Some(now) = card.current {
             for side in [now - 1.0, now + 1.0] {
@@ -426,7 +431,7 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
         None => paint::ring_shaped(p, of),
     }
     if card.mode != "off" {
-        now_label(p, fonts, card, target, shown);
+        now_label(p, fonts, card, place, shown);
     }
     if let Some(t) = target.filter(|_| card.mode != "off") {
         big_number_on(p, live, fonts, t, card.step < 1.0, "", WHITE);
