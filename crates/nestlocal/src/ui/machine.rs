@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::model::{Alert, Card, Cards, Command, Wake};
+use super::model::{Alert, Card, Cards, Command, Nest, Wake};
 use crate::logf;
 
 /// Ring counts per step, by what a step moves: a card, a list row, a value.
@@ -53,6 +53,50 @@ pub const KEEP: Duration = Duration::from_secs(4);
 pub const SEND_EVERY: Duration = Duration::from_millis(300);
 /// How long a woken display has to light before dark means it went out.
 pub const LIGHTING: Duration = Duration::from_millis(1500);
+/// The thermostat's target goes to nlclient once the ring has rested this
+/// long, not at every step: each change is a bucket write it acts on.
+pub const SETTLE: Duration = Duration::from_millis(700);
+/// The minutes a hot water boost runs from the thermostat's menu.
+pub const BOOST_MINUTES: u32 = 60;
+
+/// A row of the thermostat's own Settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Setting {
+    /// Eco's lowest temperature, and highest (with cooling).
+    EcoLow,
+    EcoHigh,
+    HomeAway,
+    /// Auto-Schedule: the thermostat learns a schedule.
+    Learning,
+    EarlyOn,
+    Sunblock,
+    HotWaterSchedule,
+    /// °C or °F.
+    Scale,
+    /// Nest's own dial in place of the thermostat card.
+    NestDial,
+    /// Fledge's version; pressed, it looks for an update, or installs one.
+    Software,
+    /// nlclient's own Settings, for the rest (Wi-Fi, equipment, reset).
+    More,
+    Done,
+}
+
+impl Setting {
+    /// The ones set on their own dial (temperatures), with their range.
+    pub fn range(self, fahrenheit: bool) -> Option<(f64, f64, f64)> {
+        let c = |low: f64, high: f64| if fahrenheit {
+            ((low * 1.8 + 32.0).round(), (high * 1.8 + 32.0).round(), 1.0)
+        } else {
+            (low, high, 0.5)
+        };
+        match self {
+            Setting::EcoLow => Some(c(crate::commands::ECO_LOW.0, crate::commands::ECO_LOW.1)),
+            Setting::EcoHigh => Some(c(crate::commands::ECO_HIGH.0, crate::commands::ECO_HIGH.1)),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Slot {
@@ -84,6 +128,12 @@ pub enum Action {
     /// A cover opened or closed whole.
     Open,
     Close,
+    /// The thermostat: Eco on or off, heating on or off, a hot water boost
+    /// on or off, and Nest's own dial (its schedule, its menus).
+    Eco(bool),
+    Power(bool),
+    Boost(bool),
+    NestDial,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -116,6 +166,11 @@ pub enum Mode {
     /// The time, the weather and what's on, as someone comes near; a touch
     /// shows what waking does.
     Glance,
+    /// This thermostat, the ring setting its target (as it shows it).
+    Thermostat { target: f64 },
+    /// Its Settings, `selected` highlighted, and one set on its own dial.
+    Settings { selected: usize },
+    SettingSet { setting: Setting, value: f64 },
     /// A notification over `back`, which shows again once it goes.
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -139,6 +194,7 @@ impl Mode {
             | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
             | Mode::CoverSet { slot, .. } => Some(slot + 1),
+            Mode::Thermostat { .. } => Some(0),
             Mode::Menu { view, .. } => view.card_index(),
             _ => None,
         }
@@ -176,6 +232,9 @@ pub enum Effect {
     OpenNestSettings,
     /// A notification's chime.
     Chime,
+    /// Nest's own dial for the thermostat (true), or the thermostat card:
+    /// kept for the next start.
+    NestDial(bool),
     Send(Command),
 }
 
@@ -214,6 +273,10 @@ pub struct Machine {
     /// Whether the display was lit at the last tick: lighting by itself
     /// (someone coming near) wakes to the cards as a turn would.
     was_lit: Option<bool>,
+    /// This thermostat's own state, once nestlocal has it, and whether its
+    /// card gives way to Nest's own dial (the thermostat as it was).
+    pub nest: Option<Nest>,
+    pub nest_dial: bool,
 }
 
 impl Machine {
@@ -222,7 +285,60 @@ impl Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
+            nest: None, nest_dial: false,
         }
+    }
+
+    /// Whether the thermostat is our own card, rather than Nest's dial.
+    pub fn own_thermostat(&self) -> bool {
+        !self.nest_dial && self.nest.is_some()
+    }
+
+    /// The thermostat's state, as nestlocal has it now.
+    pub fn set_nest(&mut self, nest: Nest) {
+        if self.nest.as_ref() != Some(&nest) {
+            self.nest = Some(nest);
+            self.dirty = true;
+        }
+    }
+
+    /// The rows of Settings, for what this thermostat has.
+    pub fn settings(&self) -> Vec<Setting> {
+        let mut rows = vec![Setting::EcoLow];
+        let nest = self.nest.as_ref();
+        if nest.is_some_and(|n| n.can_cool) {
+            rows.push(Setting::EcoHigh);
+        }
+        rows.extend([Setting::HomeAway, Setting::Learning, Setting::EarlyOn]);
+        if nest.is_none_or(|n| n.can_heat) {
+            rows.push(Setting::Sunblock);
+        }
+        if nest.is_some_and(|n| n.hot_water) {
+            rows.push(Setting::HotWaterSchedule);
+        }
+        rows.extend([Setting::Scale, Setting::NestDial, Setting::Software, Setting::More, Setting::Done]);
+        rows
+    }
+
+    /// The thermostat opened: its own dial, or Nest's.
+    fn thermostat(&self) -> Mode {
+        match &self.nest {
+            Some(nest) if !self.nest_dial => {
+                let card = &nest.card;
+                Mode::Thermostat { target: card.target.unwrap_or((card.min + card.max) / 2.0) }
+            }
+            _ => Mode::Native,
+        }
+    }
+
+    /// Settings, on `setting`'s row.
+    fn settings_at(&self, setting: Setting) -> Mode {
+        Mode::Settings { selected: self.settings().iter().position(|s| *s == setting).unwrap_or(0) }
+    }
+
+    /// Sends one of the thermostat's own commands.
+    fn nest_command(&mut self, name: &str, arg: impl Into<String>, out: &mut Vec<Effect>) {
+        out.push(Effect::Send(Command::Nest(name.into(), arg.into())));
     }
 
     /// The cards in turning order: the thermostat, Home Assistant's, settings.
@@ -307,6 +423,7 @@ impl Machine {
     /// Moves to `mode`.
     fn go(&mut self, mode: Mode, out: &mut Vec<Effect>) {
         if let Some(command) = self.pending.take() {
+            self.sent_target(&command);
             out.push(Effect::Send(command));
         }
         if !matches!(mode, Mode::Home | Mode::Chooser(_)) {
@@ -364,7 +481,8 @@ impl Machine {
             // or a long press, brings the cards back.
             (Mode::Native, Input::LongPress) => {
                 out.push(Effect::Click);
-                self.go(Mode::Chooser(0), out);
+                let back = if std::mem::take(&mut self.settings_open) { self.settings_at(Setting::More) } else { Mode::Chooser(0) };
+                self.go(back, out);
                 return;
             }
             (Mode::Native, Input::NativeBack) => {
@@ -373,8 +491,8 @@ impl Machine {
             }
             (Mode::Native, Input::SettingsDone) => {
                 self.settings_open = false;
-                let last = self.deck().len() - 1;
-                self.go(Mode::Chooser(last), out);
+                let back = self.settings_at(Setting::More);
+                self.go(back, out);
                 return;
             }
             (_, Input::SettingsDone) => return,
@@ -422,8 +540,9 @@ impl Machine {
                 self.movement += value;
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
-                    Mode::LightList { .. } | Mode::Menu { .. } | Mode::OptionList { .. } | Mode::Members { .. } => ROW_STEP,
-                    Mode::ClimateSet { .. } => CLIMATE_STEP,
+                    Mode::LightList { .. } | Mode::Menu { .. } | Mode::OptionList { .. } | Mode::Members { .. }
+                    | Mode::Settings { .. } => ROW_STEP,
+                    Mode::ClimateSet { .. } | Mode::Thermostat { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
                 let steps = self.turn / step;
@@ -461,7 +580,10 @@ impl Machine {
                 self.hint = true;
                 self.go(Mode::Chooser(0), out);
             }
-            Wake::Thermostat => self.go(Mode::Native, out),
+            Wake::Thermostat => {
+                let mode = self.thermostat();
+                self.go(mode, out);
+            }
             // A scene or a camera isn't opened: that would run it.
             Wake::Card(slot) if matches!(self.card(slot), Some(Card::Action(_) | Card::Camera(_))) => {
                 self.go(Mode::Chooser(slot + 1), out);
@@ -596,6 +718,33 @@ impl Machine {
                 let selected = (selected as i32 + steps).clamp(0, actions.len() as i32 - 1) as usize;
                 self.mode = Mode::Menu { view, actions, selected };
             }
+            Mode::Thermostat { target } => {
+                if self.nest.as_ref().is_some_and(|n| n.eco) {
+                    // As on the Nest: setting a temperature leaves Eco.
+                    self.nest_command("preset", "none", out);
+                    if let Some(nest) = &mut self.nest {
+                        nest.eco = false;
+                        nest.card.preset = None;
+                    }
+                }
+                if let Some(nest) = &self.nest {
+                    let card = &nest.card;
+                    let target = (target + steps as f64 * card.step).clamp(card.min, card.max);
+                    let celsius = nest.celsius(target);
+                    self.pending = Some(Command::Nest("target".into(), celsius.to_string()));
+                    self.mode = Mode::Thermostat { target };
+                }
+            }
+            Mode::Settings { selected } => {
+                let rows = self.settings().len() as i32;
+                self.mode = Mode::Settings { selected: (selected as i32 + steps).clamp(0, rows - 1) as usize };
+            }
+            Mode::SettingSet { setting, value } => {
+                let fahrenheit = self.nest.as_ref().is_some_and(|n| n.fahrenheit);
+                if let Some((low, high, step)) = setting.range(fahrenheit) {
+                    self.mode = Mode::SettingSet { setting, value: (value + steps as f64 * step).clamp(low, high) };
+                }
+            }
             Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance => {}
         }
         self.dirty = true;
@@ -605,13 +754,11 @@ impl Machine {
     /// the ring, Nest settings opens nlclient's menu, a device its controls.
     fn open(&mut self, index: usize, out: &mut Vec<Effect>) {
         match self.deck().get(index) {
-            Some(Slot::Thermostat) => self.go(Mode::Native, out),
-            Some(Slot::Settings) => {
-                self.go(Mode::Native, out);
-                // nlclient is on its home dial: straight to its Settings.
-                self.settings_open = true;
-                out.push(Effect::OpenNestSettings);
+            Some(Slot::Thermostat) => {
+                let mode = self.thermostat();
+                self.go(mode, out);
             }
+            Some(Slot::Settings) => self.go(Mode::Settings { selected: 0 }, out),
             Some(&Slot::Card(slot)) => {
                 let mode = match self.card(slot) {
                     // One light: its dimmer, or switched where it is.
@@ -660,14 +807,13 @@ impl Machine {
     }
 
     fn press(&mut self, out: &mut Vec<Effect>) {
-        let deck = self.deck();
-        // Nest settings passes the press on to nlclient, which clicks itself.
-        if !matches!(self.mode, Mode::Chooser(index) if deck.get(index) == Some(&Slot::Settings)) {
-            out.push(Effect::Click);
-        }
+        out.push(Effect::Click);
         match self.mode.clone() {
             // Lit by something else, the thermostat showing: open it.
-            Mode::Home => self.go(Mode::Native, out),
+            Mode::Home => {
+                let mode = self.thermostat();
+                self.go(mode, out);
+            }
             Mode::Chooser(index) => self.open(index, out),
             Mode::LightList { slot, selected } => {
                 let Some(Card::Lights(card)) = self.card(slot) else { return };
@@ -742,9 +888,118 @@ impl Machine {
                 self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Open, Action::Close], selected: 0 };
             }
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
+            view @ Mode::Thermostat { .. } => {
+                // Its target goes now; then what else it does.
+                if let Some(command) = self.pending.take() {
+                    self.sent_target(&command);
+                    out.push(Effect::Send(command));
+                }
+                let Some(nest) = &self.nest else { return };
+                let on = nest.card.mode != "off";
+                let mut actions = vec![Action::Back];
+                if on {
+                    actions.push(Action::Eco(!nest.eco));
+                }
+                actions.push(Action::Power(!on));
+                if nest.hot_water {
+                    actions.push(Action::Boost(nest.hot_water_boost.is_none()));
+                }
+                actions.push(Action::NestDial);
+                self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
+            }
+            Mode::Settings { selected } => {
+                let Some(&setting) = self.settings().get(selected) else { return };
+                self.choose_setting(setting, out);
+            }
+            Mode::SettingSet { setting, value } => {
+                if let Some(nest) = &mut self.nest {
+                    let celsius = nest.celsius(value);
+                    let name = if setting == Setting::EcoHigh { "away_temperature_high" } else { "away_temperature_low" };
+                    match setting {
+                        Setting::EcoHigh => nest.eco_high = Some(value),
+                        _ => nest.eco_low = Some(value),
+                    }
+                    self.nest_command(name, celsius.to_string(), out);
+                }
+                self.mode = self.settings_at(setting);
+            }
             Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Glance => {}
         }
         self.dirty = true;
+    }
+
+    /// A row of Settings pressed: a switch switched, a temperature's dial
+    /// opened, the rest done.
+    fn choose_setting(&mut self, setting: Setting, out: &mut Vec<Effect>) {
+        let Some(nest) = self.nest.clone() else {
+            // Not heard from nlclient yet: only its own Settings, and Done.
+            match setting {
+                Setting::Done => self.go(Mode::Chooser(self.deck().len() - 1), out),
+                Setting::More => self.open_nest_settings(out),
+                _ => {}
+            }
+            return;
+        };
+        let switch = |on: bool| if on { "OFF" } else { "ON" };
+        match setting {
+            Setting::EcoLow | Setting::EcoHigh => {
+                let fahrenheit = nest.fahrenheit;
+                let (low, high, _) = setting.range(fahrenheit).expect("a temperature");
+                let now = if setting == Setting::EcoLow { nest.eco_low } else { nest.eco_high };
+                let value = now.unwrap_or(if setting == Setting::EcoLow { low } else { high }).clamp(low, high);
+                self.mode = Mode::SettingSet { setting, value };
+            }
+            Setting::HomeAway => {
+                self.nest_command("auto_away_enable", switch(nest.home_away), out);
+                if let Some(n) = &mut self.nest { n.home_away = !nest.home_away; }
+            }
+            Setting::Learning => {
+                self.nest_command("learning_mode", switch(nest.learning), out);
+                if let Some(n) = &mut self.nest { n.learning = !nest.learning; }
+            }
+            Setting::EarlyOn => {
+                self.nest_command("preconditioning_enabled", switch(nest.early_on), out);
+                if let Some(n) = &mut self.nest { n.early_on = !nest.early_on; }
+            }
+            Setting::Sunblock => {
+                self.nest_command("sunlight_correction_enabled", switch(nest.sunblock), out);
+                if let Some(n) = &mut self.nest { n.sunblock = !nest.sunblock; }
+            }
+            Setting::HotWaterSchedule => {
+                self.nest_command("hot_water_schedule", switch(nest.hot_water_schedule), out);
+                if let Some(n) = &mut self.nest { n.hot_water_schedule = !nest.hot_water_schedule; }
+            }
+            Setting::Scale => {
+                self.nest_command("temperature_scale", if nest.fahrenheit { "C" } else { "F" }, out);
+            }
+            Setting::NestDial => {
+                self.nest_dial = !self.nest_dial;
+                out.push(Effect::NestDial(self.nest_dial));
+                self.dirty = true;
+            }
+            Setting::Software => match nest.update {
+                Some(_) => self.nest_command("update", "install", out),
+                None => self.nest_command("check_update", "", out),
+            },
+            Setting::More => self.open_nest_settings(out),
+            Setting::Done => self.go(Mode::Chooser(self.deck().len() - 1), out),
+        }
+    }
+
+    /// nlclient's own Settings, from its menu on its home dial.
+    fn open_nest_settings(&mut self, out: &mut Vec<Effect>) {
+        self.go(Mode::Native, out);
+        self.settings_open = true;
+        out.push(Effect::OpenNestSettings);
+    }
+
+    /// The thermostat's target just sent: its card shows it at once.
+    fn sent_target(&mut self, command: &Command) {
+        if let (Command::Nest(name, _), Mode::Thermostat { target }, Some(nest)) = (command, &self.mode, &mut self.nest) {
+            if name == "target" {
+                nest.card.target = Some(*target);
+            }
+        }
     }
 
     /// Does what a ring of actions' chosen item says.
@@ -793,6 +1048,35 @@ impl Machine {
                 self.go(Mode::Chooser(slot + 1), out);
             }
             (Action::Members, Mode::LightDim { slot, .. }) => self.mode = Mode::Members { slot, selected: 0 },
+            (Action::Eco(on), Mode::Thermostat { .. }) => {
+                self.nest_command("preset", if on { "eco" } else { "none" }, out);
+                if let Some(nest) = &mut self.nest {
+                    nest.eco = on;
+                    nest.card.preset = on.then(|| "eco".to_owned());
+                }
+                self.go(Mode::Chooser(0), out);
+            }
+            (Action::Power(on), view @ Mode::Thermostat { .. }) => {
+                if let Some(nest) = &mut self.nest {
+                    let mode = if on { nest.on_mode() } else { "off" };
+                    nest.card.mode = mode.to_owned();
+                    self.nest_command("mode", mode, out);
+                }
+                if on {
+                    self.mode = view;
+                } else {
+                    self.go(Mode::Chooser(0), out);
+                }
+            }
+            (Action::Boost(on), view @ Mode::Thermostat { .. }) => {
+                let minutes = if on { BOOST_MINUTES.to_string() } else { "OFF".to_owned() };
+                self.nest_command("hot_water_boost", minutes, out);
+                if let Some(nest) = &mut self.nest {
+                    nest.hot_water_boost = on.then_some(BOOST_MINUTES);
+                }
+                self.mode = view;
+            }
+            (Action::NestDial, _) => self.go(Mode::Native, out),
             (Action::Open | Action::Close, view @ Mode::CoverSet { slot, .. }) => {
                 if let Some(Card::Cover(card)) = self.cards.cards.get_mut(slot) {
                     let (id, open) = (card.id.clone(), action == Action::Open);
@@ -872,6 +1156,8 @@ impl Machine {
                 return;
             }
             Mode::Chooser(_) => Mode::Home,
+            Mode::Settings { .. } => Mode::Chooser(self.deck().len() - 1),
+            Mode::SettingSet { setting, .. } => self.settings_at(setting),
             mode => match mode.card_index() {
                 Some(index) => Mode::Chooser(index),
                 None => return,
@@ -977,6 +1263,9 @@ impl Machine {
             Mode::Members { slot, .. } if idle >= LIST_IDLE => Some(self.dimmer(slot, 0)),
             Mode::CoverSet { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(slot + 1)),
             Mode::Menu { view, .. } if idle >= CONTROL_IDLE => Some(*view),
+            Mode::Thermostat { .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(0)),
+            Mode::Settings { .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.deck().len() - 1)),
+            Mode::SettingSet { setting, .. } if idle >= CONTROL_IDLE => Some(self.settings_at(setting)),
             _ => None,
         };
         if let Some(mode) = back {
@@ -992,9 +1281,14 @@ impl Machine {
                 self.pictured = Some(now);
             }
         }
-        if self.pending.is_some() && now.duration_since(self.last_sent) >= SEND_EVERY {
+        // The thermostat's target once the ring rests; Home Assistant's
+        // devices as it turns.
+        let settling = matches!(self.mode, Mode::Thermostat { .. }) && idle < SETTLE;
+        if self.pending.is_some() && now.duration_since(self.last_sent) >= SEND_EVERY && !settling {
             self.last_sent = now;
-            out.push(Effect::Send(self.pending.take().unwrap()));
+            let command = self.pending.take().unwrap();
+            self.sent_target(&command);
+            out.push(Effect::Send(command));
         }
     }
 }
@@ -1492,14 +1786,146 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::LightList { slot: 0, selected: 0 });
         let mut rig = Rig::woken();
         rig.turn(CARD_STEP * 4);
+        assert!(rig.press().is_empty(), "Settings: our own, the display kept");
+        assert_eq!(rig.machine.mode, Mode::Settings { selected: 0 });
+    }
+
+    #[test]
+    fn more_nest_settings_opens_nlclient_s_and_comes_back_to_ours() {
+        let mut rig = Rig::woken();
+        rig.turn(CARD_STEP * 4);
+        rig.press();
+        let more = rig.machine.settings().iter().position(|s| *s == Setting::More).unwrap();
+        rig.turn(ROW_STEP * more as i32);
         assert_eq!(rig.press(), vec![Effect::Own(false), Effect::Hold(false), Effect::OpenNestSettings],
-                   "Nest settings: nlclient's menu");
-        assert!(rig.machine.settings_open, "straight to nlclient's Settings");
+                   "nlclient's menu, on to its Settings");
+        assert!(rig.machine.settings_open);
         rig.wait(NATIVE_IDLE * 3);
-        assert_eq!(rig.machine.mode, Mode::Native, "staying while in Settings, though nlclient's dial shows");
+        assert_eq!(rig.machine.mode, Mode::Native, "staying while in its Settings, though its dial shows");
         rig.input(Input::SettingsDone);
-        assert_eq!(rig.machine.mode, Mode::Chooser(4), "Done: the cards, on Nest settings");
+        assert_eq!(rig.machine.mode, Mode::Settings { selected: more }, "left: ours again, on More");
         assert!(!rig.machine.settings_open);
+        rig.press();
+        rig.long();
+        assert_eq!(rig.machine.mode, Mode::Settings { selected: more }, "a long press there: ours too");
+        rig.long();
+        assert_eq!(rig.machine.mode, Mode::Chooser(4), "and back out to the cards");
+    }
+
+    fn nest(extra: serde_json::Value) -> Nest {
+        let mut state = serde_json::json!({
+            "mode": "heat", "action": "idle", "target": 20.0, "current_temperature": 19.5, "preset": "none",
+            "temperature_scale": "C", "can_heat": true, "can_cool": false, "has_hot_water_control": true,
+            "hot_water_boost": "off", "away_temperature_low": 12.0, "learning_mode": true, "version": "v0.4.9",
+            "update": null});
+        for (k, v) in extra.as_object().unwrap() {
+            state[k] = v.clone();
+        }
+        Nest::from_state(state.as_object().unwrap())
+    }
+
+    fn nest_rig() -> Rig {
+        let mut rig = Rig::woken();
+        rig.machine.set_nest(nest(serde_json::json!({})));
+        rig
+    }
+
+    fn sent(effects: &[Effect]) -> Vec<(String, String)> {
+        effects.iter().filter_map(|e| match e {
+            Effect::Send(Command::Nest(name, arg)) => Some((name.clone(), arg.clone())),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn the_thermostat_card_sets_its_target_once_the_ring_rests() {
+        let mut rig = nest_rig();
+        assert!(rig.press().is_empty(), "our own dial: the display and ring kept");
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 });
+        rig.turn(CLIMATE_STEP * 3);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 21.5 });
+        assert!(sent(&rig.wait(SETTLE / 2)).is_empty(), "not while it turns");
+        assert_eq!(sent(&rig.wait(SETTLE)), vec![("target".into(), "21.5".into())]);
+        assert_eq!(rig.machine.nest.as_ref().unwrap().card.target, Some(21.5), "its card shows it at once");
+        rig.turn(-CLIMATE_STEP * 40);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 9.0 }, "no lower than the Nest goes");
+        assert_eq!(sent(&rig.long()), vec![("target".into(), "9".into())], "going back sends it");
+        assert_eq!(rig.machine.mode, Mode::Chooser(0));
+    }
+
+    #[test]
+    fn turning_in_eco_leaves_it_and_its_menu_switches_it() {
+        let mut rig = nest_rig();
+        rig.machine.set_nest(nest(serde_json::json!({"preset": "eco"})));
+        rig.press();
+        assert_eq!(sent(&rig.turn(CLIMATE_STEP)), vec![("preset".into(), "none".into())]);
+        assert!(!rig.machine.nest.as_ref().unwrap().eco);
+        let effects = rig.press();
+        assert_eq!(sent(&effects), vec![("target".into(), "20.5".into())], "the press sends the target first");
+        let Mode::Menu { actions, .. } = &rig.machine.mode else { panic!("{:?}", rig.machine.mode) };
+        assert_eq!(actions, &vec![Action::Back, Action::Eco(true), Action::Power(false), Action::Boost(true), Action::NestDial]);
+        rig.turn(ROW_STEP);
+        assert_eq!(sent(&rig.press()), vec![("preset".into(), "eco".into())]);
+        assert_eq!(rig.machine.mode, Mode::Chooser(0), "Eco: back to the cards");
+        rig.press();
+        rig.press();
+        rig.turn(ROW_STEP * 3);
+        assert_eq!(sent(&rig.press()), vec![("hot_water_boost".into(), "60".into())]);
+        assert_eq!(rig.machine.nest.as_ref().unwrap().hot_water_boost, Some(60));
+        rig.press();
+        rig.turn(ROW_STEP * 4);
+        assert_eq!(rig.press(), vec![Effect::Own(false), Effect::Hold(false)], "Nest's own dial");
+        assert_eq!(rig.machine.mode, Mode::Native);
+    }
+
+    #[test]
+    fn nest_s_own_dial_stands_in_for_the_card_when_chosen_or_unknown() {
+        let mut rig = Rig::woken();
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Native, "no state from nlclient yet: its dial");
+        let mut rig = nest_rig();
+        rig.machine.nest_dial = true;
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Native, "chosen in Settings");
+    }
+
+    #[test]
+    fn settings_switch_and_set_and_say_so() {
+        let mut rig = nest_rig();
+        rig.turn(CARD_STEP * 4);
+        rig.press();
+        let rows = rig.machine.settings();
+        assert_eq!(rows, vec![Setting::EcoLow, Setting::HomeAway, Setting::Learning, Setting::EarlyOn, Setting::Sunblock,
+                              Setting::HotWaterSchedule, Setting::Scale, Setting::NestDial, Setting::Software,
+                              Setting::More, Setting::Done], "heating only, with hot water");
+        assert!(rig.press().is_empty() && rig.machine.mode == Mode::SettingSet { setting: Setting::EcoLow, value: 12.0 });
+        rig.turn(CLIMATE_STEP * 3);
+        assert_eq!(sent(&rig.press()), vec![("away_temperature_low".into(), "13.5".into())]);
+        assert_eq!(rig.machine.mode, Mode::Settings { selected: 0 });
+        assert_eq!(rig.machine.nest.as_ref().unwrap().eco_low, Some(13.5));
+        rig.turn(ROW_STEP * 2);
+        assert_eq!(sent(&rig.press()), vec![("learning_mode".into(), "OFF".into())], "Auto-Schedule off");
+        assert!(!rig.machine.nest.as_ref().unwrap().learning);
+        rig.turn(ROW_STEP * 5);
+        assert_eq!(rig.press(), vec![Effect::NestDial(true)]);
+        assert!(rig.machine.nest_dial);
+        rig.turn(ROW_STEP);
+        assert_eq!(sent(&rig.press()), vec![("check_update".into(), String::new())], "no update: look for one");
+        rig.machine.set_nest(nest(serde_json::json!({"update": "v0.5.0"})));
+        assert_eq!(sent(&rig.press()), vec![("update".into(), "install".into())], "one found: install it");
+        rig.turn(ROW_STEP * 9);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(4), "Done: the cards, on Settings");
+    }
+
+    #[test]
+    fn a_fahrenheit_thermostat_turns_by_degrees_and_sends_celsius() {
+        let mut rig = nest_rig();
+        rig.machine.set_nest(nest(serde_json::json!({"temperature_scale": "F", "target": 68.0})));
+        rig.press();
+        rig.turn(CLIMATE_STEP * 2);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 70.0 });
+        assert_eq!(sent(&rig.long()), vec![("target".into(), "21".into())]);
     }
 
     #[test]
@@ -1677,7 +2103,7 @@ mod tests {
         assert_eq!(clicks(rig.input_with_clicks(Input::Press)), 1);
         let mut rig = Rig::woken();
         rig.turn(CARD_STEP * 4);
-        assert_eq!(clicks(rig.input_with_clicks(Input::Press)), 0, "nlclient clicks for Nest settings");
+        assert_eq!(clicks(rig.input_with_clicks(Input::Press)), 1, "Settings are ours");
         let mut rig = Rig::new();
         rig.lit = false;
         assert_eq!(clicks(rig.input_with_clicks(Input::Turn(CARD_STEP))), 0, "waking is silent, as nlclient's");

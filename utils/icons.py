@@ -33,7 +33,10 @@ night moon movie sleep party weather sun star
 NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause", "palette", "white-balance-sunny",
          "skip-next", "skip-previous", "leaf", "airplane", "home-export-outline", "arrow-up-bold",
          "arrow-down-bold", "format-list-bulleted", "lightbulb-group-outline", "window-shutter",
-         "window-shutter-open", "blinds", "blinds-open", "water-boiler", "fire", "snowflake"}
+         "window-shutter-open", "blinds", "blinds-open", "water-boiler", "fire", "snowflake",
+         # The thermostat's own Settings.
+         "home-account", "calendar-clock", "clock-fast", "temperature-celsius", "update", "chevron-right",
+         "check", "dots-horizontal", "information-outline"}
 
 # Home Assistant's Material Symbols sets, by its prefixes.
 SETS = {"outlined": "m3o", "rounded": "m3r", "sharp": "m3s"}

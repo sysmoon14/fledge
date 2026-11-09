@@ -246,6 +246,94 @@ pub struct ClimateCard {
     pub preset: Option<String>,
 }
 
+/// This thermostat, from its own buckets (bridge::state, with its equipment
+/// and software): its card, as a climate card is drawn, and its settings.
+/// Temperatures are as it shows them (°C, or °F with `fahrenheit`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Nest {
+    pub card: ClimateCard,
+    pub eco: bool,
+    /// When it expects to reach its target (Unix seconds).
+    pub time_to_target: Option<f64>,
+    pub humidity: Option<f64>,
+    pub can_heat: bool,
+    pub can_cool: bool,
+    pub fahrenheit: bool,
+    pub hot_water: bool,
+    /// Minutes of hot water boost asked for, while one runs.
+    pub hot_water_boost: Option<u32>,
+    pub hot_water_schedule: bool,
+    pub eco_low: Option<f64>,
+    pub eco_high: Option<f64>,
+    pub learning: bool,
+    pub home_away: bool,
+    pub early_on: bool,
+    pub sunblock: bool,
+    /// This build of nestlocal, and a newer release to install, if any.
+    pub version: String,
+    pub update: Option<String>,
+}
+
+impl Nest {
+    /// From the state Home Assistant's entities read (bridge::state), plus
+    /// can_heat, can_cool, has_hot_water_control, version and update.
+    pub fn from_state(s: &serde_json::Map<String, Value>) -> Nest {
+        let number = |k: &str| s.get(k).and_then(Value::as_f64);
+        let on = |k: &str| s.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let text = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+        let fahrenheit = text("temperature_scale") == "F";
+        let (min, max, step) = if fahrenheit { (48.0, 90.0, 1.0) } else { (9.0, 32.0, 0.5) };
+        let eco = text("preset") == "eco";
+        let card = ClimateCard {
+            id: "nest".into(),
+            name: "Thermostat".into(),
+            icon: String::new(),
+            mode: text("mode"),
+            action: text("action"),
+            target: number("target"),
+            current: number("current_temperature"),
+            min, max, step,
+            presets: Vec::new(),
+            preset: eco.then(|| "eco".to_owned()),
+        };
+        let boost = s.get("hot_water_boost").and_then(|v| match v {
+            Value::String(m) => m.parse().ok(),
+            Value::Number(m) => m.as_u64().map(|m| m as u32),
+            _ => None,
+        });
+        let time_to_target = s.get("time_to_target").and_then(Value::as_str)
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).map(|t| t.timestamp() as f64);
+        Nest {
+            card, eco, time_to_target,
+            humidity: number("current_humidity"),
+            can_heat: on("can_heat"),
+            can_cool: on("can_cool"),
+            fahrenheit,
+            hot_water: on("has_hot_water_control"),
+            hot_water_boost: boost,
+            hot_water_schedule: on("hot_water_schedule"),
+            eco_low: number("away_temperature_low"),
+            eco_high: number("away_temperature_high"),
+            learning: on("learning_mode"),
+            home_away: on("auto_away_enable"),
+            early_on: on("preconditioning_enabled"),
+            sunblock: on("sunlight_correction_enabled"),
+            version: text("version"),
+            update: s.get("update").and_then(Value::as_str).map(str::to_owned),
+        }
+    }
+
+    /// A temperature as shown, in °C for its commands.
+    pub fn celsius(&self, shown: f64) -> f64 {
+        if self.fahrenheit { ((shown - 32.0) / 1.8 * 2.0).round() / 2.0 } else { shown }
+    }
+
+    /// Its heating mode's name for the mode command: heat, else cool.
+    pub fn on_mode(&self) -> &'static str {
+        if self.can_heat || !self.can_cool { "heat" } else { "cool" }
+    }
+}
+
 fn min_temp() -> f64 { 7.0 }
 fn max_temp() -> f64 { 30.0 }
 fn temp_step() -> f64 { 0.5 }
@@ -440,11 +528,15 @@ pub enum Command {
     Position(String, u8),
     Open(String),
     Close(String),
+    /// One of this thermostat's own commands (<base>/set/<name>), done here
+    /// rather than sent to Home Assistant: its target, Eco, its settings.
+    Nest(String, String),
 }
 
 impl Command {
     pub fn payload(&self) -> Value {
         match self {
+            Command::Nest(name, arg) => json!({"id": "nest", "action": name, "value": arg}),
             Command::On(id) => json!({"id": id, "action": "on"}),
             Command::Off(id) => json!({"id": id, "action": "off"}),
             Command::Brightness(id, b) => json!({"id": id, "action": "brightness", "value": b}),

@@ -3,7 +3,9 @@
 
 
 use super::icons;
-use super::model::{ActionCard, Alert, CameraCard, Card, ClimateCard, CoverCard, Glance, Light, LightsCard, MediaCard, OptionsCard};
+use super::machine::Setting;
+use super::model::{ActionCard, Alert, CameraCard, Card, ClimateCard, CoverCard, Glance, Light, LightsCard, MediaCard, Nest,
+                   OptionsCard};
 use super::paint::{self, *};
 
 pub enum Screen<'a> {
@@ -37,6 +39,15 @@ pub enum Screen<'a> {
     LightHue { light: &'a Light, value: u16 },
     ClimateSet { card: &'a ClimateCard, target: f64 },
     Volume { card: &'a MediaCard, value: u8 },
+    /// This thermostat: its card (`now`, Unix seconds, for its time to
+    /// temperature), and its dial setting `target`.
+    NestCard { nest: &'a Nest, now: f64 },
+    NestSet { nest: &'a Nest, target: f64 },
+    /// Its Settings, `selected` highlighted; `nest_dial`, Nest's own dial
+    /// in place of its card.
+    Settings { rows: Vec<Setting>, nest: Option<&'a Nest>, nest_dial: bool, selected: usize },
+    /// A setting's temperature, on its own dial.
+    SettingSet { setting: Setting, nest: &'a Nest, value: f64 },
 }
 
 const HALF: f32 = 240.0;
@@ -64,6 +75,8 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::CoverCard { card } => cover_card(fonts, card),
         Screen::Glance { glance, cards, now } => glance_screen(fonts, glance, cards, *now),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
+        Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
+        Screen::Settings { rows, nest, nest_dial, selected } => settings_list(fonts, rows, *nest, *nest_dial, *selected),
         _ => {
             let mut p = still(fonts, screen);
             moving(&mut p, fonts, screen, sweep, None);
@@ -83,6 +96,8 @@ pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
         Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), true),
         Screen::Volume { card, .. } => volume_still(fonts, card),
         Screen::CoverSet { card, .. } => cover_still(fonts, card),
+        Screen::NestSet { nest, .. } => nest_still(fonts, nest, true, 0.0),
+        Screen::SettingSet { setting, .. } => setting_still(fonts, *setting),
         _ => draw(fonts, screen, None),
     }
 }
@@ -97,6 +112,8 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
         Screen::ClimateSet { card, target } => climate_moving(p, live.as_deref_mut(), fonts, card, Some(*target), sweep),
         Screen::Volume { value, .. } => volume_moving(p, live.as_deref_mut(), fonts, *value, sweep),
         Screen::CoverSet { card, value } => cover_moving(p, live.as_deref_mut(), fonts, card, *value, sweep),
+        Screen::NestSet { nest, target } => climate_moving(p, live.as_deref_mut(), fonts, &nest.card, Some(*target), sweep),
+        Screen::SettingSet { setting, nest, value } => setting_moving(p, live.as_deref_mut(), fonts, *setting, nest, *value, sweep),
         _ => {}
     }
     if let Some(live) = live {
@@ -113,6 +130,8 @@ pub fn still_key(screen: &Screen) -> Option<String> {
         Screen::ClimateSet { card, .. } => Some(format!("set {card:?}")),
         Screen::Volume { card, .. } => Some(format!("volume {card:?}")),
         Screen::CoverSet { card, .. } => Some(format!("cover {card:?}")),
+        Screen::NestSet { nest, .. } => Some(format!("nest {:?} {:?} {}", nest.card.action, nest.card.current, nest.eco)),
+        Screen::SettingSet { setting, .. } => Some(format!("setting {setting:?}")),
         _ => None,
     }
 }
@@ -441,9 +460,158 @@ fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
 fn settings_card(fonts: &Fonts) -> Canvas {
     let mut p = paint::canvas(BLACK);
     icon(&mut p, "mdi:cog", "settings", HALF, 168.0, 96.0, WHITE);
-    paint::text(&mut p, &fonts.regular, 40.0, HALF, 278.0, "Nest settings", 0.0, WHITE);
-    line(&mut p, fonts, 316.0, "Schedule · Eco · Energy · System", GREY);
+    paint::text(&mut p, &fonts.regular, 40.0, HALF, 278.0, "Settings", 0.0, WHITE);
+    line(&mut p, fonts, 316.0, "Eco · Home/Away · Fledge", GREY);
     p
+}
+
+/// Eco's leaf green, as the Nest shows it.
+const ECO: [u8; 3] = [76, 175, 80];
+/// A setting that's on, as the Nest's own Settings show it.
+const ON: [u8; 3] = [74, 144, 226];
+
+/// A temperature as the thermostat shows it: 20.5° (or 69°F's 69°).
+fn degrees(t: f64) -> String {
+    if t.fract().abs() < 0.05 { format!("{t:.0}°") } else { format!("{t:.1}°") }
+}
+
+/// What the thermostat is doing, under its number: how warm it is now, and
+/// when it'll reach its target while heating or cooling.
+fn nest_doing(nest: &Nest, now: f64) -> String {
+    let card = &nest.card;
+    let mut parts = Vec::new();
+    if let Some(t) = card.current {
+        parts.push(format!("{} now", degrees(t)));
+    }
+    match (card.action.as_str(), nest.time_to_target) {
+        ("heating" | "cooling", Some(at)) if at > now => {
+            let minutes = ((at - now) / 60.0).ceil().max(1.0) as i64;
+            parts.push(if minutes < 60 { format!("in {minutes} min") } else { format!("in {} h {} min", minutes / 60, minutes % 60) });
+        }
+        _ => {}
+    }
+    parts.join(" · ")
+}
+
+/// The thermostat without its ring and number: heating orange, cooling
+/// blue, else black, as the Nest's own; what it's doing above and below.
+fn nest_still(fonts: &Fonts, nest: &Nest, setting: bool, now: f64) -> Canvas {
+    let card = &nest.card;
+    let (background, active) = climate_colours(card);
+    let mut p = paint::canvas(background);
+    let soft = if active { [255, 225, 205] } else { GREY };
+    let off = card.mode == "off";
+    if nest.eco && !setting && !off {
+        icon(&mut p, "mdi:leaf", "eco", HALF, 150.0, 40.0, if active { WHITE } else { ECO });
+    } else {
+        let above = match card.action.as_str() {
+            _ if off => "",
+            "heating" => "Heating",
+            "cooling" => "Cooling",
+            _ if setting => "Set to",
+            _ => "",
+        };
+        if !above.is_empty() {
+            label(&mut p, fonts, 150.0, above, if active { WHITE } else { GREY });
+        }
+    }
+    if off {
+        paint::text(&mut p, &fonts.regular, 96.0, HALF, 300.0, "OFF", 0.0, WHITE);
+    }
+    let below = if setting { "Press for more".to_owned() } else { nest_doing(nest, now) };
+    line(&mut p, fonts, 366.0, &below, soft);
+    if let Some(minutes) = nest.hot_water_boost {
+        line(&mut p, fonts, 398.0, &format!("Hot water boost · {minutes} min"), soft);
+    }
+    p
+}
+
+/// The thermostat's card: as its dial shows it, or Eco and its leaf.
+fn nest_card(fonts: &Fonts, nest: &Nest, now: f64) -> Canvas {
+    let mut p = nest_still(fonts, nest, false, now);
+    let card = &nest.card;
+    if nest.eco && card.mode != "off" {
+        let (_, active) = climate_colours(card);
+        paint::ring(&mut p, |_| if active { alpha(WHITE, 0.4) } else { colour(DIM) }, &[]);
+        paint::text(&mut p, &fonts.regular, 120.0, HALF, 300.0, "ECO", 0.0, WHITE);
+        return p;
+    }
+    // Off: the ring without a target on it.
+    let target = card.target.filter(|_| card.mode != "off");
+    climate_moving(&mut p, None, fonts, card, target, None);
+    p
+}
+
+/// A row of Settings: its icon, its name, and what it's set to.
+fn setting_row(setting: Setting, nest: Option<&Nest>, nest_dial: bool) -> (&'static str, &'static str, String) {
+    let switch = |on: bool| if on { "On" } else { "Off" }.to_owned();
+    let get = |f: fn(&Nest) -> bool| nest.map(f).map(switch).unwrap_or_default();
+    let temperature = |t: Option<f64>| t.map(degrees).unwrap_or_default();
+    let cooling = nest.is_some_and(|n| n.can_cool);
+    match setting {
+        Setting::EcoLow => ("mdi:leaf", if cooling { "Eco, lowest" } else { "Eco temperature" },
+                            temperature(nest.and_then(|n| n.eco_low))),
+        Setting::EcoHigh => ("mdi:leaf", "Eco, highest", temperature(nest.and_then(|n| n.eco_high))),
+        Setting::HomeAway => ("mdi:home-account", "Home/Away Assist", get(|n| n.home_away)),
+        Setting::Learning => ("mdi:calendar-clock", "Auto-Schedule", get(|n| n.learning)),
+        Setting::EarlyOn => ("mdi:clock-fast", "Early-On", get(|n| n.early_on)),
+        Setting::Sunblock => ("mdi:white-balance-sunny", "Sunblock", get(|n| n.sunblock)),
+        Setting::HotWaterSchedule => ("mdi:water-boiler", "Hot water schedule", get(|n| n.hot_water_schedule)),
+        Setting::Scale => ("mdi:temperature-celsius", "Units",
+                           nest.map(|n| if n.fahrenheit { "°F" } else { "°C" }.to_owned()).unwrap_or_default()),
+        Setting::NestDial => ("mdi:thermometer", "Nest's own dial", switch(nest_dial)),
+        Setting::Software => ("mdi:update", "Fledge", match nest {
+            Some(Nest { update: Some(tag), .. }) => format!("Install {tag}"),
+            // v0.4.9, not a development build's v0.4.9-1-g42707b2-dirty.
+            Some(n) => n.version.split('-').next().unwrap_or_default().to_owned(),
+            None => String::new(),
+        }),
+        Setting::More => ("mdi:dots-horizontal", "More Nest settings", String::new()),
+        Setting::Done => ("mdi:check", "Done", String::new()),
+    }
+}
+
+/// Settings, listed as a device's lights are, with what each is set to.
+fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial: bool, selected: usize) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    label(&mut p, fonts, 100.0, "Settings", GREY);
+    let first = selected.saturating_sub(ROWS - 1).min(rows.len().saturating_sub(ROWS));
+    for (slot, row) in (first..rows.len().min(first + ROWS)).enumerate() {
+        let y = 128.0 + slot as f32 * 62.0;
+        let (x, w, h) = (62.0, 356.0, 54.0);
+        let chosen = row == selected;
+        if chosen {
+            paint::pill(&mut p, x, y, w, h, colour(SELECT));
+        }
+        let (icon_name, name, value) = setting_row(rows[row], nest, nest_dial);
+        let update = rows[row] == Setting::Software && nest.is_some_and(|n| n.update.is_some());
+        let value_tint = if chosen { WHITE } else if update || value == "On" { ON } else { GREY };
+        icon(&mut p, icon_name, "setting", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
+        let value_width = paint::measure(&fonts.regular, 20.0, &value, 0.0);
+        let name = paint::fit(&fonts.regular, 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
+        paint::text_at(&mut p, &fonts.regular, 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
+        paint::text_at(&mut p, &fonts.regular, 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
+    }
+    p
+}
+
+/// A setting's temperature dial, without its ring and number.
+fn setting_still(fonts: &Fonts, setting: Setting) -> Canvas {
+    let mut p = paint::canvas(BLACK);
+    icon(&mut p, "mdi:leaf", "eco", HALF, 98.0, 40.0, ECO);
+    let (_, name, _) = setting_row(setting, None, false);
+    label(&mut p, fonts, 150.0, name, ECO);
+    line(&mut p, fonts, 366.0, "Press when done", GREY);
+    p
+}
+
+#[allow(clippy::too_many_arguments)]
+fn setting_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, setting: Setting, nest: &Nest,
+                  value: f64, sweep: Option<f32>) {
+    let Some((low, high, step)) = setting.range(nest.fahrenheit) else { return };
+    let mark = paint::tick_at(sweep.unwrap_or(((value - low) / (high - low).max(0.5)) as f32));
+    ring_on(p, live.as_deref_mut(), |i| if i == mark { colour(ECO) } else { colour(DIM) }, &[mark]);
+    big_number_on(p, live, fonts, value, step < 1.0, "", WHITE);
 }
 
 const ROWS: usize = 5;

@@ -887,6 +887,24 @@ impl crate::ui::Sender for Bridge {
         let device = self.store.get(&format!("device.{}", self.serial));
         device.and_then(|d| d.value.get("click_sound")?.as_str().map(|s| s != "off")).unwrap_or(true)
     }
+
+    fn nest(&self) -> Option<Fields> {
+        let buckets = self.buckets();
+        let (dev, sh) = (buckets.get("device")?, buckets.get("shared")?);
+        let mut s = state(dev, sh);
+        s.insert("can_heat".into(), truthy(sh.get("can_heat")).into());
+        s.insert("can_cool".into(), truthy(sh.get("can_cool")).into());
+        s.insert("has_hot_water_control".into(), truthy(dev.get("has_hot_water_control")).into());
+        s.insert("version".into(), crate::update::VERSION.into());
+        let newer = self.updates().and_then(|u| u.latest.lock().unwrap().clone())
+            .filter(|r| crate::update::newer(&r.tag, crate::update::VERSION));
+        s.insert("update".into(), newer.map_or(Value::Null, |r| r.tag.into()));
+        Some(s)
+    }
+
+    fn nest_command(&self, name: &str, arg: &str) {
+        self.command(&format!("{}/set/{name}", self.base), arg.as_bytes());
+    }
 }
 
 #[cfg(test)]

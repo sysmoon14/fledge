@@ -1,12 +1,15 @@
 //! The Nest's home screen cards: Home Assistant on the thermostat.
 //!
 //! Waking shows the thermostat among a card for each device the Fledge
-//! integration chose (lights, other thermostats, media players) and Nest
-//! settings, zoomed out: turning browses, pressing opens. The thermostat
-//! itself is nlclient's own screen, untouched: opening it hands the ring to
-//! nlclient, which sets the temperature as it always has, and Nest settings
-//! opens nlclient's menus. nlclient keeps the heating, learning and everything
-//! else throughout.
+//! integration chose (lights, other thermostats, media players) and
+//! Settings, zoomed out: turning browses, pressing opens. The thermostat is
+//! a card of our own, drawn from nestlocal's buckets: its dial sets the
+//! target, its menu Eco, heating on or off and a hot water boost, as Home
+//! Assistant would. Settings are ours too (Eco temperatures, Home/Away
+//! Assist, Auto-Schedule, ...), with More Nest settings for nlclient's own
+//! menus. Nest's own dial stays a choice in Settings, and stands in until
+//! nlclient has reported. nlclient keeps the heating, learning and
+//! everything else throughout.
 //!
 //! nestlocal holds the ring and button (grabbed) while the thermostat's own
 //! screen shows, so a turn moves to the cards rather than the temperature.
@@ -28,7 +31,7 @@ use std::time::{Duration, Instant};
 
 pub use model::Command;
 use machine::{Action, Effect, Input, Machine, Mode, Slot};
-use model::{Alert, Art, Card, Cards};
+use model::{Alert, Art, Card, Cards, Nest};
 use screens::Screen;
 
 use crate::logf;
@@ -142,10 +145,22 @@ pub trait Sender: Send + Sync + 'static {
     fn send(&self, command: &Command);
     /// Whether the Nest clicks as the ring turns (its click sound setting).
     fn clicks(&self) -> bool;
+    /// This thermostat's state, as Home Assistant's entities read it, with
+    /// can_heat, can_cool, has_hot_water_control, version and update (a
+    /// newer release): its own card and Settings. None until it reports.
+    fn nest(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        None
+    }
+    /// One of this thermostat's own commands, as <base>/set/<name> takes it.
+    fn nest_command(&self, _name: &str, _arg: &str) {}
 }
+
+/// Kept while the thermostat shows Nest's own dial rather than its card.
+const NEST_DIAL: &str = "/media/data/fledge-nest-dial";
 
 /// Starts the UI on a gen 3 unit: it waits for cards from Home Assistant.
 pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
+    let handle = tokio::runtime::Handle::try_current().ok();
     let spawned = std::thread::Builder::new().name("ui".into()).spawn(move || {
         let fonts = match paint::Fonts::load(paint::FONT_DIR) {
             Ok(fonts) => fonts,
@@ -158,6 +173,9 @@ pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
         // An owner file from before a restart names a pid that may be reused.
         device::own(false);
         paint::for_panel();
+        // The thermostat's own commands (an update's install) may start work
+        // on nestlocal's runtime.
+        let _runtime = handle.as_ref().map(|h| h.enter());
         Runtime::new(ui, sender, fonts, display, input).run();
     });
     if let Err(e) = spawned {
@@ -219,10 +237,13 @@ struct Runtime {
     /// button went down, and since when the press has waited for its dial.
     back_chosen: bool,
     back_since: Option<Instant>,
-    /// In nlclient's Settings, opened from the cards: since its last press
-    /// there (or since it opened), and when its dial was last looked for.
-    settings: Option<Instant>,
+    /// In nlclient's Settings, opened from ours: the last input there, when
+    /// its dial was last looked for, and how many looks in a row found it.
+    native_input: Instant,
     settings_checked: Instant,
+    settings_seen: u32,
+    /// When the thermostat's own state was last asked for.
+    nest_checked: Instant,
     /// nlclient's dial as it last showed lit, and when: the thermostat's
     /// card when the display wakes, its own page dark until nlclient draws.
     dial: Option<device::Frame>,
@@ -234,6 +255,9 @@ struct Runtime {
 
 /// How long the button is held for a long press.
 const LONG_PRESS: Duration = Duration::from_millis(600);
+/// Looks in a row, 200 ms apart, that find nlclient's home dial after its
+/// Settings: it was left.
+const SETTINGS_LEFT: u32 = 4;
 
 /// How fast what shows catches up with the ring: most of the way in this.
 const FOLLOW: f32 = 0.04;
@@ -252,21 +276,22 @@ impl Runtime {
             alerts: 0, ran: None, glance_minute: 0,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
-            pressed: None, back_chosen: false, back_since: None, settings: None, settings_checked: now, dial: None, last_dial: now - Duration::from_secs(60),
+            pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
+            nest_checked: now - Duration::from_secs(10), dial: None, last_dial: now - Duration::from_secs(60),
         }
     }
 
     fn run(mut self) {
         logf!("ui: ready for home screen cards");
         hold_state(false);
+        self.machine.nest_dial = std::path::Path::new(NEST_DIAL).exists();
         loop {
             // A frame each 8 ms while anything moves; otherwise input or time.
-            let settling = self.settings.is_some_and(|since| since.elapsed() < Duration::from_millis(1500));
             // Quick while anything moves; a slower beat when there's nothing
             // to show (no cards, or asleep on nlclient's dial), to wake the
             // unit less, as input still ends the wait at once.
             let idle = matches!(self.machine.mode, Mode::Idle) || (self.machine.mode == Mode::Home && !device::lit());
-            let wait = if self.animating() || self.pressed.is_some() || self.back_since.is_some() || settling {
+            let wait = if self.animating() || self.pressed.is_some() || self.back_since.is_some() {
                 8
             } else if idle {
                 250
@@ -293,9 +318,17 @@ impl Runtime {
                 }
             }
             self.machine.set_active(self.nlclient, now, &mut effects);
+            if now.duration_since(self.nest_checked) >= Duration::from_secs(1) {
+                self.nest_checked = now;
+                self.refresh_nest();
+            }
             let lit = device::lit();
             let before = self.machine.mode.clone();
             let turned = !events.is_empty();
+            if turned && self.machine.mode == Mode::Native {
+                self.native_input = now;
+                self.settings_seen = 0;
+            }
             for event in events {
                 let input = match (event.kind, event.code, event.value) {
                     // The ADC counts anticlockwise up: clockwise is positive here.
@@ -315,10 +348,6 @@ impl Runtime {
                         Some((_, false, was_lit)) => {
                             if self.machine.mode == Mode::Native && std::mem::take(&mut self.back_chosen) {
                                 self.back_since = Some(now);
-                            } else if self.machine.mode == Mode::Native && self.settings.is_some() {
-                                // A press in nlclient's Settings: if it was its
-                                // Done, the dial shows next.
-                                self.settings = Some(now);
                             }
                             self.machine.input(Input::Press, now, was_lit, &mut effects);
                             continue;
@@ -364,24 +393,20 @@ impl Runtime {
                     self.machine.input(Input::LongPress, now, was_lit, &mut effects);
                 }
             }
-            if let Some(since) = self.settings {
-                // In nlclient's Settings opened from the cards: a press there
-                // followed by its dial was Done, and brings the cards.
-                if self.machine.mode != Mode::Native {
-                    self.settings = None;
-                    self.machine.settings_open = false;
-                } else {
-                    let waited = now.duration_since(since);
-                    if waited > Duration::from_millis(250) && waited < Duration::from_millis(1500)
-                        && now.duration_since(self.settings_checked) >= Duration::from_millis(100) {
-                        self.settings_checked = now;
-                        let page = self.display.save();
-                        // Its dial, not a tile of its Settings (which looks it).
-                        if dial(&page) && !settings_tile(&page) {
-                            self.settings = None;
-                            self.machine.input(Input::SettingsDone, now, lit, &mut effects);
-                        }
-                    }
+            if self.machine.mode == Mode::Native && self.machine.settings_open
+                && now.duration_since(self.native_input) >= Duration::from_millis(600)
+                && now.duration_since(self.settings_checked) >= Duration::from_millis(200) {
+                // In nlclient's Settings opened from ours: left (its Done, or
+                // its Back) once its home dial shows, steady, untouched. A
+                // page on its way somewhere, or a tile that looks like the
+                // dial, doesn't hold for long enough.
+                self.settings_checked = now;
+                let page = self.display.save();
+                self.settings_seen = if dial(&page) && !settings_tile(&page) { self.settings_seen + 1 } else { 0 };
+                if self.settings_seen >= SETTINGS_LEFT {
+                    self.settings_seen = 0;
+                    logf!("ui: nlclient's Settings left");
+                    self.machine.input(Input::SettingsDone, now, lit, &mut effects);
                 }
             }
             if let Some(since) = self.back_since {
@@ -395,6 +420,10 @@ impl Runtime {
             }
             let display = &mut self.display;
             self.machine.tick(now, lit, &mut || home_dial(display), &mut effects);
+            if std::mem::discriminant(&before) != std::mem::discriminant(&self.machine.mode)
+                || matches!(self.machine.mode, Mode::Chooser(_)) && before != self.machine.mode {
+                mode_state(&self.machine.mode);
+            }
             self.transition = transition(&before, &self.machine.mode, turned && lit);
             if std::mem::take(&mut self.machine.woke) {
                 // Woken: the thermostat as it lit, zooming out to the cards.
@@ -738,6 +767,14 @@ impl Runtime {
             },
             Mode::LightHue { value, .. } => Some(*value as f32 / 360.0),
             Mode::CoverSet { value, .. } => Some(*value as f32 / 100.0),
+            Mode::Thermostat { target } => {
+                let card = &self.machine.nest.as_ref()?.card;
+                Some(((target - card.min) / (card.max - card.min).max(0.5)) as f32)
+            }
+            Mode::SettingSet { setting, value } => {
+                let (low, high, _) = setting.range(self.machine.nest.as_ref()?.fahrenheit)?;
+                Some(((value - low) / (high - low).max(0.5)) as f32)
+            }
             _ => None,
         }
     }
@@ -789,8 +826,10 @@ impl Runtime {
                 device::own(true);
                 self.display.begin();
                 // The thermostat as a card, and zoomed out, before the first
-                // frame needs it.
-                if let Some(saved) = &self.saved {
+                // frame needs it: our own, or nlclient's as it showed.
+                if self.machine.own_thermostat() {
+                    self.draw_home();
+                } else if let Some(saved) = &self.saved {
                     let mut home = saved.clone();
                     zoom::round(&mut home);
                     self.shrunk.insert(0, zoom::shrink(&home));
@@ -836,6 +875,26 @@ impl Runtime {
                 }
             }
             Effect::KeepAwake => crate::wake::keep_awake_for(30),
+            Effect::NestDial(on) => {
+                let kept = if on { std::fs::write(NEST_DIAL, b"1") } else { std::fs::remove_file(NEST_DIAL) };
+                if let Err(e) = kept.or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
+                    logf!("ui: {NEST_DIAL}: {e}");
+                }
+                logf!("ui: the thermostat shows {}", if on { "Nest's own dial" } else { "its card" });
+                self.home = None;
+                self.shrunk.remove(&0);
+                if self.machine.owns() {
+                    if on {
+                        if let Some(saved) = &self.saved {
+                            let mut home = saved.clone();
+                            zoom::round(&mut home);
+                            self.home = Some(home);
+                        }
+                    } else {
+                        self.draw_home();
+                    }
+                }
+            }
             Effect::OpenNestSettings => {
                 // Its menu, then on to Settings: each step only once the
                 // display shows the one before, so a turn only ever moves
@@ -857,15 +916,45 @@ impl Runtime {
                 std::thread::sleep(Duration::from_millis(450));
                 if settings_chosen(&self.display.save()) {
                     self.input.press();
-                    // Its opening press is long past by its first look.
-                    self.settings = Some(Instant::now() - Duration::from_secs(10));
+                    self.native_input = Instant::now();
+                    self.settings_seen = 0;
                     logf!("ui: nlclient's Settings");
                 } else {
                     logf!("ui: nlclient's menu didn't show Settings: left at the menu");
                 }
             }
+            Effect::Send(Command::Nest(name, arg)) => {
+                logf!("ui: {name} {arg}");
+                self.sender.nest_command(&name, &arg);
+                self.refresh_nest();
+            }
             Effect::Send(command) => self.sender.send(&command),
         }
+    }
+
+    /// Takes the thermostat's state as nestlocal has it now; its card is
+    /// drawn again when that changed.
+    fn refresh_nest(&mut self) {
+        let Some(state) = self.sender.nest() else { return };
+        let nest = Nest::from_state(&state);
+        if self.machine.nest.as_ref() == Some(&nest) {
+            return;
+        }
+        // While it's being set, the dial's own target stands.
+        self.machine.set_nest(nest);
+        if self.machine.own_thermostat() && self.home.is_some() {
+            self.draw_home();
+        }
+    }
+
+    /// The thermostat's own card, as the first of the cards.
+    fn draw_home(&mut self) {
+        let Some(nest) = &self.machine.nest else { return };
+        let screen = Screen::NestCard { nest, now: unix_now() };
+        let mut frame = device::frame(screens::draw(&self.fonts, &screen, None));
+        zoom::round(&mut frame);
+        self.shrunk.insert(0, zoom::shrink(&frame));
+        self.home = Some(frame);
     }
 
     /// Runs the cards on to the thermostat before handing it back.
@@ -936,6 +1025,11 @@ impl Runtime {
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
             Mode::Glance => Screen::Glance { glance: machine.cards.glance.as_ref()?, cards: &machine.cards.cards,
                                              now: unix_now() as i64 },
+            Mode::Thermostat { target } => Screen::NestSet { nest: machine.nest.as_ref()?, target: *target },
+            Mode::Settings { selected } => Screen::Settings { rows: machine.settings(), nest: machine.nest.as_ref(),
+                                                              nest_dial: machine.nest_dial, selected: *selected },
+            Mode::SettingSet { setting, value } => Screen::SettingSet { setting: *setting, nest: machine.nest.as_ref()?,
+                                                                        value: *value },
             _ => return None,
         })
     }
@@ -948,6 +1042,7 @@ impl Runtime {
             Screen::Volume { card, .. } => card.name.clone(),
             Screen::ClimateSet { card, .. } => card.name.clone(),
             Screen::CoverSet { card, .. } => card.name.clone(),
+            Screen::NestSet { nest, .. } => nest.card.name.clone(),
             _ => String::new(),
         };
         let presets = match &screen {
@@ -969,6 +1064,13 @@ impl Runtime {
                 Action::Members => ("mdi:format-list-bulleted", "Each light"),
                 Action::Open => ("mdi:arrow-up-bold", "Open"),
                 Action::Close => ("mdi:arrow-down-bold", "Close"),
+                Action::Eco(true) => ("mdi:leaf", "Eco"),
+                Action::Eco(false) => ("mdi:leaf", "Leave Eco"),
+                Action::Power(true) => ("mdi:power", "Turn heating on"),
+                Action::Power(false) => ("mdi:power", "Turn off"),
+                Action::Boost(true) => ("mdi:water-boiler", "Boost hot water, 1 hour"),
+                Action::Boost(false) => ("mdi:water-boiler", "Stop the boost"),
+                Action::NestDial => ("mdi:thermometer", "Nest's own dial"),
                 Action::Preset(i) => {
                     let name = presets.get(*i as usize).cloned().unwrap_or_default();
                     return (screens::preset_icon(&name).to_owned(), screens::capitalise(&name.replace('_', " ")));
@@ -1058,6 +1160,8 @@ fn sweep_key(mode: &Mode) -> Option<SweepKey> {
         Mode::CoverSet { slot, .. } => Some((5, slot, 0)),
         Mode::Volume { slot, .. } => Some((1, slot, 0)),
         Mode::ClimateSet { slot, .. } => Some((2, slot, 0)),
+        Mode::Thermostat { .. } => Some((6, 0, 0)),
+        Mode::SettingSet { setting, .. } => Some((7, setting as usize, 0)),
         _ => None,
     }
 }
@@ -1176,6 +1280,17 @@ fn hold_state(hold: bool) {
     let _ = crate::settings_ui::publish("ui.state", if hold { b"holds" } else { b"leaves" });
 }
 
+/// What shows, for tools that drive the unit's screen: they check where
+/// they are before each step, so a press never lands on the wrong card.
+fn mode_state(mode: &Mode) {
+    let name = match mode {
+        Mode::Chooser(index) => format!("Chooser {index}"),
+        Mode::Menu { view, .. } => format!("Menu {}", format!("{view:?}").split([' ', '{', '(']).next().unwrap_or("")),
+        other => format!("{other:?}").split([' ', '{', '(']).next().unwrap_or("").to_owned(),
+    };
+    let _ = crate::settings_ui::publish("ui.mode", name.as_bytes());
+}
+
 /// Whether nlclient shows its home dial: its ring lit around the edge.
 fn home_dial(display: &mut device::Display) -> bool {
     dial(&display.save())
@@ -1271,6 +1386,7 @@ fn dial(page: &[u8]) -> bool {
 #[cfg(test)]
 mod shots {
     use super::*;
+    use machine::Setting;
 
     fn save(canvas: &paint::Canvas, path: &str) {
         let pixmap = &canvas.pixmap;
@@ -1354,5 +1470,41 @@ mod shots {
         let rgb = (0..size * size).flat_map(|i| [(i % size * 255 / size) as u8, (i / size * 255 / size) as u8, 160]);
         with_art.art = Some(Arc::new(Art { size, rgb: rgb.collect() }));
         save(&screens::draw(&fonts, &Screen::MediaCard { card: &with_art, volume: None, progress: Some(0.4) }, None), &format!("{out}/3b-art.png"));
+        let state = |extra: serde_json::Value| {
+            let mut s = serde_json::json!({"mode": "heat", "action": "idle", "target": 20.5, "current_temperature": 19.5,
+                "preset": "none", "temperature_scale": "C", "can_heat": true, "has_hot_water_control": true,
+                "hot_water_boost": "off", "away_temperature_low": 12.0, "learning_mode": true, "auto_away_enable": true,
+                "version": "v0.4.9", "update": null});
+            for (k, v) in extra.as_object().unwrap() {
+                s[k] = v.clone();
+            }
+            Nest::from_state(s.as_object().unwrap())
+        };
+        let now = 1_794_172_380.0;
+        let heating = state(serde_json::json!({"action": "heating", "target": 21.5,
+            "time_to_target": "2026-11-09T08:10:00Z", "hot_water_boost": "60"}));
+        let shots = [
+            ("t1-nest-idle", state(serde_json::json!({}))),
+            ("t2-nest-heating", heating.clone()),
+            ("t3-nest-eco", state(serde_json::json!({"preset": "eco"}))),
+            ("t4-nest-off", state(serde_json::json!({"mode": "off", "action": "off"}))),
+        ];
+        for (name, nest) in &shots {
+            save(&screens::draw(&fonts, &Screen::NestCard { nest, now }, None), &format!("{out}/{name}.png"));
+        }
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 22.0 }, None), &format!("{out}/t5-nest-set.png"));
+        let mut menu = screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 21.5 }, None);
+        screens::menu(&mut menu, &fonts, "Thermostat", &[("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"),
+            ("mdi:power", "Turn off"), ("mdi:water-boiler", "Stop the boost"), ("mdi:thermometer", "Nest's own dial")], 1);
+        save(&menu, &format!("{out}/t6-nest-menu.png"));
+        let idle = state(serde_json::json!({"update": "v0.5.0"}));
+        let mut machine = Machine::new(Instant::now());
+        machine.set_nest(idle.clone());
+        for (name, selected) in [("t7-settings", 0), ("t8-settings-end", 9)] {
+            save(&screens::draw(&fonts, &Screen::Settings { rows: machine.settings(), nest: Some(&idle), nest_dial: false, selected }, None),
+                 &format!("{out}/{name}.png"));
+        }
+        save(&screens::draw(&fonts, &Screen::SettingSet { setting: Setting::EcoLow, nest: &idle, value: 12.0 }, None),
+             &format!("{out}/t9-eco-set.png"));
     }
 }

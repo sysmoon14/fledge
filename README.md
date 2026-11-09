@@ -29,6 +29,11 @@ then hands it the rest of your home:
   show zoomed out around the thermostat: turn to browse, press to open. Dim
   lights, set their warmth and colour, set other heating zones, turn a
   speaker up and see what's playing, all on the ring, with the Nest's own clicks.
+- **🌡️ A thermostat card and Settings of its own.** The thermostat's dial,
+  Eco, heating on or off and a hot water boost, and its everyday Settings
+  (Eco temperature, Home/Away Assist, Auto-Schedule, Early-On, Sunblock,
+  units, Fledge updates), in the same style. Nest's own menus are a press
+  away for the rest, and Nest's own dial is a setting.
 - **⚡ It feels native.** Drawn at 60 frames a second in the Nest's own style
   and fonts; long press to switch a light or pause the music.
 - **🔁 Updates from Home Assistant.** The thermostat's software updates from
@@ -57,8 +62,10 @@ pick your devices, and choose (or automate) what the thermostat wakes to.
 Nest's own app, nlclient, keeps running the thermostat: the heating, the
 schedule, the learning. Fledge adds **nestlocal** beside it, which stands in for
 Google's cloud and speaks MQTT, Matter and Zigbee instead. For the home screen
-cards, nlclient hands its display and ring to nestlocal while a card shows, and
-takes them straight back when you open the thermostat.
+cards, nlclient hands its display and ring to nestlocal while the cards show,
+including the thermostat's own card and Settings; nestlocal sets the
+thermostat through the same settings Home Assistant uses. nlclient's own
+screens come back for Nest's dial and More Nest settings.
 
 ## What you get
 
