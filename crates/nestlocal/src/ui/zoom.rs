@@ -72,7 +72,37 @@ pub fn shrink(frame: &[u8]) -> Frame {
             output[r * SIDE + c] = pixel;
         }
     }
+    outline(&mut out, half);
     out
+}
+
+/// A card's thin edge, zoomed out: a card without a ring of its own
+/// (Settings, a scene) still reads as a card among the others.
+const EDGE: [u8; 3] = [70, 74, 82];
+
+/// Draws the thin edge of a card of radius `radius` around the middle of
+/// `frame`, over what is there, softened over a pixel each side.
+fn outline(frame: &mut [u8], radius: f32) {
+    const WIDTH: f32 = 1.4;
+    let pixels = frame.as_chunks_mut::<4>().0;
+    let (low, high) = ((CENTRE - radius - 2.0).max(0.0) as usize, ((CENTRE + radius + 2.0) as usize).min(SIDE));
+    for r in low..high {
+        let dy = r as f32 + 0.5 - CENTRE;
+        for c in low..high {
+            let dx = c as f32 + 0.5 - CENTRE;
+            let from_edge = ((dx * dx + dy * dy).sqrt() - (radius - WIDTH / 2.0 - 0.5)).abs();
+            let cover = (WIDTH / 2.0 + 0.5 - from_edge).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            let pixel = &mut pixels[r * SIDE + c];
+            // BGRX, as the framebuffer holds it.
+            for (k, value) in [EDGE[2], EDGE[1], EDGE[0]].into_iter().enumerate() {
+                let old = pixel[k] as f32;
+                pixel[k] = (old + (value as f32 - old) * cover).round() as u8;
+            }
+        }
+    }
 }
 
 /// The cards around place `at` in the deck, `card(k)` giving card k (any

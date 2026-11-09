@@ -42,7 +42,8 @@ pub enum Screen<'a> {
     /// This thermostat: its card (`now`, Unix seconds, for its time to
     /// temperature), and its dial setting `target`.
     NestCard { nest: &'a Nest, now: f64 },
-    NestSet { nest: &'a Nest, target: f64 },
+    /// `pulse`: how far a pulse from now to the target has run (0..1).
+    NestSet { nest: &'a Nest, target: f64, pulse: Option<f32> },
     /// Its Settings, `selected` highlighted; `nest_dial`, Nest's own dial
     /// in place of its card.
     Settings { rows: Vec<Setting>, nest: Option<&'a Nest>, nest_dial: bool, selected: usize },
@@ -60,7 +61,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::ClimateCard { card, target } => {
             let target = target.or(card.target);
             let mut p = climate_still(fonts, card, target, false);
-            climate_moving(&mut p, None, fonts, card, target, None);
+            climate_moving(&mut p, None, fonts, card, target, None, None);
             p
         }
         Screen::MediaCard { card, volume, progress } => media_card(fonts, card, volume.or(card.volume), *progress),
@@ -70,13 +71,13 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::CameraView { card } => camera_view(fonts, card),
         Screen::Alert { alert } => alert_screen(fonts, alert),
         Screen::OptionsCard { card } => options_card(fonts, card),
-        Screen::OptionList { card, selected } => option_list(fonts, card, *selected),
-        Screen::Members { card, selected } => lights_listed(fonts, &card.name, &card.members, *selected),
+        Screen::OptionList { card, selected } => option_list(fonts, card, *selected, Layer::Whole),
+        Screen::Members { card, selected } => lights_listed(fonts, &card.name, &card.members, *selected, Layer::Whole),
         Screen::CoverCard { card } => cover_card(fonts, card),
         Screen::Glance { glance, cards, now } => glance_screen(fonts, glance, cards, *now),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
-        Screen::Settings { rows, nest, nest_dial, selected } => settings_list(fonts, rows, *nest, *nest_dial, *selected),
+        Screen::Settings { rows, nest, nest_dial, selected } => settings_list(fonts, rows, *nest, *nest_dial, *selected, Layer::Whole),
         _ => {
             let mut p = still(fonts, screen);
             moving(&mut p, fonts, screen, sweep, None);
@@ -96,7 +97,7 @@ pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
         Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), true),
         Screen::Volume { card, .. } => volume_still(fonts, card),
         Screen::CoverSet { card, .. } => cover_still(fonts, card),
-        Screen::NestSet { nest, .. } => nest_still(fonts, nest, true, 0.0),
+        Screen::NestSet { nest, target, .. } => nest_still(fonts, nest, Some(*target), true, unix_now()),
         Screen::SettingSet { setting, .. } => setting_still(fonts, *setting),
         _ => draw(fonts, screen, None),
     }
@@ -109,10 +110,12 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
         Screen::LightDim { light, on, value } => light_dim_moving(p, live.as_deref_mut(), fonts, light, *on, *value, sweep),
         Screen::LightWarmth { light, value } => warmth_moving(p, live.as_deref_mut(), fonts, light, *value, sweep),
         Screen::LightHue { value, .. } => hue_moving(p, live.as_deref_mut(), fonts, *value, sweep),
-        Screen::ClimateSet { card, target } => climate_moving(p, live.as_deref_mut(), fonts, card, Some(*target), sweep),
+        Screen::ClimateSet { card, target } => climate_moving(p, live.as_deref_mut(), fonts, card, Some(*target), sweep, None),
         Screen::Volume { value, .. } => volume_moving(p, live.as_deref_mut(), fonts, *value, sweep),
         Screen::CoverSet { card, value } => cover_moving(p, live.as_deref_mut(), fonts, card, *value, sweep),
-        Screen::NestSet { nest, target } => climate_moving(p, live.as_deref_mut(), fonts, &nest.card, Some(*target), sweep),
+        Screen::NestSet { nest, target, pulse } => {
+            climate_moving(p, live.as_deref_mut(), fonts, &nest.card, Some(*target), sweep, *pulse)
+        }
         Screen::SettingSet { setting, nest, value } => setting_moving(p, live.as_deref_mut(), fonts, *setting, nest, *value, sweep),
         _ => {}
     }
@@ -127,10 +130,12 @@ pub fn still_key(screen: &Screen) -> Option<String> {
         Screen::LightDim { light, on, .. } => Some(format!("dim {light:?} {on}")),
         Screen::LightWarmth { light, .. } => Some(format!("warmth {}", light.id)),
         Screen::LightHue { light, .. } => Some(format!("hue {}", light.id)),
-        Screen::ClimateSet { card, .. } => Some(format!("set {card:?}")),
+        Screen::ClimateSet { card, target } => Some(format!("set {card:?} {}", card.current.is_some_and(|c| *target < c))),
         Screen::Volume { card, .. } => Some(format!("volume {card:?}")),
         Screen::CoverSet { card, .. } => Some(format!("cover {card:?}")),
-        Screen::NestSet { nest, .. } => Some(format!("nest {:?} {:?} {}", nest.card.action, nest.card.current, nest.eco)),
+        Screen::NestSet { nest, target, .. } => Some(format!("nest {:?} {:?} {} {:?} {} {}", nest.card.action, nest.card.current,
+            nest.eco, nest.hot_water_boost, nest.card.current.is_some_and(|c| *target < c),
+            (nest.time_to_target.unwrap_or(0.0) - unix_now()).max(0.0) as i64 / 60)),
         Screen::SettingSet { setting, .. } => Some(format!("setting {setting:?}")),
         _ => None,
     }
@@ -265,9 +270,33 @@ fn climate_colours(card: &ClimateCard) -> ([u8; 3], bool) {
     }
 }
 
+/// The temperature now, small beside its tick on the ring, on the side
+/// away from the target, as the Nest's dial shows it.
+fn now_label(p: &mut Canvas, fonts: &Fonts, card: &ClimateCard, target: Option<f64>) {
+    let Some(now) = card.current else { return };
+    let (_, active) = climate_colours(card);
+    let fraction = ((now - card.min) / (card.max - card.min).max(0.5)) as f32;
+    let tick = paint::tick_at(fraction);
+    let away = if target.is_some_and(|t| t < now) { 1.0 } else { -1.0 };
+    let angle = (paint::tick_angle(tick, paint::TICKS) + away * 8.0).to_radians();
+    let (x, y) = (HALF + 168.0 * angle.sin(), HALF - 168.0 * angle.cos());
+    let half = card.step < 1.0 && (now.fract() - 0.5).abs() < 0.25;
+    let whole = if half { now.floor() } else { now.round() } as i64;
+    let digits = whole.to_string();
+    let width = paint::measure(&fonts.medium, 26.0, &digits, 0.0);
+    let small = if half { paint::measure(&fonts.medium, 15.0, "5", 0.0) + 2.0 } else { 0.0 };
+    let left = x - (width + small) / 2.0;
+    let tint = if active { WHITE } else { GREY };
+    paint::text_at(p, &fonts.medium, 26.0, left, y + 9.0, &digits, 0.0, tint, 1.0);
+    if half {
+        paint::text_at(p, &fonts.medium, 15.0, left + width + 2.0, y - 2.0, "5", 0.0, tint, 1.0);
+    }
+}
+
 fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, setting: bool) -> Canvas {
     let (background, active) = climate_colours(card);
     let mut p = paint::canvas(background);
+    now_label(&mut p, fonts, card, target);
     let text_colour = if active { WHITE } else { GREY };
     label(&mut p, fonts, 150.0, &card.name, text_colour);
     if target.is_none() || card.mode == "off" {
@@ -287,15 +316,57 @@ fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, setting
     p
 }
 
+/// The temperature now's tick while heating or cooling: a warm cream.
+const NOW: [u8; 3] = [255, 246, 214];
+
+/// How lit a tick `along` (0 at the temperature now, 1 at the target) is
+/// as a pulse `phase` (0..1) runs: filling from now to the target, then
+/// fading back.
+fn pulse_light(phase: f32, along: f32) -> f32 {
+    let filled = phase / 0.6;
+    let front = 1.0 - (1.0 - filled.min(1.0)).powi(3);
+    let fade = ((phase - 0.6) / 0.4).clamp(0.0, 1.0);
+    // The front's edge soft over a few ticks.
+    let reached = ((front - along) / 0.12 + 0.5).clamp(0.0, 1.0);
+    reached * (1.0 - fade)
+}
+
+/// The Nest's dial: its ticks soft, the temperature now a wide cream tick,
+/// the target long and white, and while heating or cooling the ticks
+/// between bright, `pulse` (0..1, as it runs) filling them from now to the
+/// target.
+#[allow(clippy::too_many_arguments)]
 fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, card: &ClimateCard,
-                  target: Option<f64>, sweep: Option<f32>) {
+                  target: Option<f64>, sweep: Option<f32>, pulse: Option<f32>) {
     let (_, active) = climate_colours(card);
     let fraction = |t: f64| ((t - card.min) / (card.max - card.min).max(0.5)) as f32;
-    let marks: Vec<usize> = target.map(|t| vec![paint::tick_at(sweep.unwrap_or(fraction(t)))]).unwrap_or_default();
+    let mark = target.map(|t| paint::tick_at(sweep.unwrap_or(fraction(t))));
     let now = card.current.map(|t| paint::tick_at(fraction(t)));
-    ring_on(p, live.as_deref_mut(), |i| {
-        if Some(i) == now { alpha(WHITE, 0.9) } else if active { alpha(WHITE, 0.4) } else { colour(DIM) }
-    }, &marks);
+    let range = match (now, mark) {
+        (Some(a), Some(b)) if active && a != b => Some((a.min(b), a.max(b), a)),
+        _ => None,
+    };
+    let base = if active { alpha(WHITE, 0.32) } else { colour(DIM) };
+    let of = |i: usize| {
+        if Some(i) == mark {
+            (colour(WHITE), paint::Shape::Long)
+        } else if Some(i) == now {
+            (colour(if active { NOW } else { GREY }), paint::Shape::Wide)
+        } else {
+            match range {
+                Some((low, high, from)) if (low..=high).contains(&i) => {
+                    let along = (i as f32 - from as f32).abs() / (high - low) as f32;
+                    let lit = pulse.map_or(0.0, |phase| pulse_light(phase, along));
+                    (alpha(WHITE, 0.62 + 0.38 * lit), paint::Shape::Short)
+                }
+                _ => (base, paint::Shape::Short),
+            }
+        }
+    };
+    match live.as_deref_mut() {
+        Some(live) => paint::ring_shaped_live(p, live, of),
+        None => paint::ring_shaped(p, of),
+    }
     if let Some(t) = target.filter(|_| card.mode != "off") {
         big_number_on(p, live, fonts, t, card.step < 1.0, "", WHITE);
     }
@@ -475,71 +546,80 @@ fn degrees(t: f64) -> String {
     if t.fract().abs() < 0.05 { format!("{t:.0}°") } else { format!("{t:.1}°") }
 }
 
-/// What the thermostat is doing, under its number: how warm it is now, and
-/// when it'll reach its target while heating or cooling.
-fn nest_doing(nest: &Nest, now: f64) -> String {
-    let card = &nest.card;
-    let mut parts = Vec::new();
-    if let Some(t) = card.current {
-        parts.push(format!("{} now", degrees(t)));
+/// What the thermostat is doing, above its number, as the Nest's dial says
+/// it: when it'll reach its target, else heating or cooling.
+fn nest_doing(nest: &Nest) -> &'static str {
+    match nest.card.action.as_str() {
+        "heating" => "Heating",
+        "cooling" => "Cooling",
+        _ => "",
     }
-    match (card.action.as_str(), nest.time_to_target) {
-        ("heating" | "cooling", Some(at)) if at > now => {
-            let minutes = ((at - now) / 60.0).ceil().max(1.0) as i64;
-            parts.push(if minutes < 60 { format!("in {minutes} min") } else { format!("in {} h {} min", minutes / 60, minutes % 60) });
-        }
-        _ => {}
+}
+
+/// "In 20 min" while it heats or cools towards its target and knows when
+/// it'll get there.
+fn nest_eta(nest: &Nest, now: f64) -> Option<String> {
+    let at = nest.time_to_target.filter(|at| *at > now)?;
+    if !matches!(nest.card.action.as_str(), "heating" | "cooling") {
+        return None;
     }
-    parts.join(" · ")
+    let minutes = ((at - now) / 60.0).ceil().max(1.0) as i64;
+    Some(if minutes < 60 { format!("In {minutes} min") } else { format!("In {} h {} min", minutes / 60, minutes % 60) })
 }
 
 /// The thermostat without its ring and number: heating orange, cooling
-/// blue, else black, as the Nest's own; what it's doing above and below.
-fn nest_still(fonts: &Fonts, nest: &Nest, setting: bool, now: f64) -> Canvas {
+/// blue, else black, as the Nest's own; when it'll get there above, the
+/// temperature now by its tick.
+fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, now: f64) -> Canvas {
     let card = &nest.card;
     let (background, active) = climate_colours(card);
     let mut p = paint::canvas(background);
     let soft = if active { [255, 225, 205] } else { GREY };
     let off = card.mode == "off";
+    if !off {
+        now_label(&mut p, fonts, card, target);
+    }
     if nest.eco && !setting && !off {
         icon(&mut p, "mdi:leaf", "eco", HALF, 150.0, 40.0, if active { WHITE } else { ECO });
-    } else {
-        let above = match card.action.as_str() {
-            _ if off => "",
-            "heating" => "Heating",
-            "cooling" => "Cooling",
-            _ if setting => "Set to",
-            _ => "",
-        };
+    } else if !off {
+        let above = nest_eta(nest, now).unwrap_or_else(|| nest_doing(nest).to_owned());
         if !above.is_empty() {
-            label(&mut p, fonts, 150.0, above, if active { WHITE } else { GREY });
+            label(&mut p, fonts, 150.0, &above, WHITE);
         }
     }
     if off {
         paint::text(&mut p, &fonts.regular, 96.0, HALF, 300.0, "OFF", 0.0, WHITE);
     }
-    let below = if setting { "Press for more".to_owned() } else { nest_doing(nest, now) };
-    line(&mut p, fonts, 366.0, &below, soft);
     if let Some(minutes) = nest.hot_water_boost {
-        line(&mut p, fonts, 398.0, &format!("Hot water boost · {minutes} min"), soft);
+        line(&mut p, fonts, 372.0, &format!("Hot water boost · {minutes} min"), soft);
     }
     p
 }
 
 /// The thermostat's card: as its dial shows it, or Eco and its leaf.
 fn nest_card(fonts: &Fonts, nest: &Nest, now: f64) -> Canvas {
-    let mut p = nest_still(fonts, nest, false, now);
     let card = &nest.card;
+    // Off: the ring without a target on it.
+    let target = card.target.filter(|_| card.mode != "off");
+    let mut p = nest_still(fonts, nest, target, false, now);
     if nest.eco && card.mode != "off" {
         let (_, active) = climate_colours(card);
-        paint::ring(&mut p, |_| if active { alpha(WHITE, 0.4) } else { colour(DIM) }, &[]);
+        let tick = card.current.map(|t| paint::tick_at(((t - card.min) / (card.max - card.min).max(0.5)) as f32));
+        paint::ring_shaped(&mut p, |i| if Some(i) == tick {
+            (colour(if active { NOW } else { GREY }), paint::Shape::Wide)
+        } else {
+            (if active { alpha(WHITE, 0.32) } else { colour(DIM) }, paint::Shape::Short)
+        });
         paint::text(&mut p, &fonts.regular, 120.0, HALF, 300.0, "ECO", 0.0, WHITE);
         return p;
     }
-    // Off: the ring without a target on it.
-    let target = card.target.filter(|_| card.mode != "off");
-    climate_moving(&mut p, None, fonts, card, target, None);
+    climate_moving(&mut p, None, fonts, card, target, None, None);
     p
+}
+
+/// The wall clock, in Unix seconds.
+fn unix_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
 /// A row of Settings: its icon, its name, and what it's set to.
@@ -572,17 +652,16 @@ fn setting_row(setting: Setting, nest: Option<&Nest>, nest_dial: bool) -> (&'sta
 }
 
 /// Settings, listed as a device's lights are, with what each is set to.
-fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial: bool, selected: usize) -> Canvas {
+fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial: bool, selected: usize,
+                 layer: Layer) -> Canvas {
     let mut p = paint::canvas(BLACK);
+    let first = first_row(selected, rows.len());
+    list_backdrop(&mut p, layer, selected.checked_sub(first));
     label(&mut p, fonts, 100.0, "Settings", GREY);
-    let first = selected.saturating_sub(ROWS - 1).min(rows.len().saturating_sub(ROWS));
     for (slot, row) in (first..rows.len().min(first + ROWS)).enumerate() {
-        let y = 128.0 + slot as f32 * 62.0;
-        let (x, w, h) = (62.0, 356.0, 54.0);
-        let chosen = row == selected;
-        if chosen {
-            paint::pill(&mut p, x, y, w, h, colour(SELECT));
-        }
+        let y = LIST_TOP + slot as f32 * ROW_PITCH;
+        let (x, w, h) = PILL;
+        let chosen = layer.chosen(row == selected);
         let (icon_name, name, value) = setting_row(rows[row], nest, nest_dial);
         let update = rows[row] == Setting::Software && nest.is_some_and(|n| n.update.is_some());
         let value_tint = if chosen { WHITE } else if update || value == "On" { ON } else { GREY };
@@ -615,25 +694,100 @@ fn setting_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
 }
 
 const ROWS: usize = 5;
+/// A list's rows: where the first's top is, how far apart, and the
+/// highlight's place and size on a row.
+pub const LIST_TOP: f32 = 128.0;
+pub const ROW_PITCH: f32 = 62.0;
+pub const PILL: (f32, f32, f32) = (62.0, 356.0, 54.0);
+
+/// How a list is drawn: whole, its highlight on the chosen row; or in two
+/// layers for the highlight to glide between rows (Runtime): every row as
+/// it shows unchosen, and every row as it shows under the highlight, on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Layer {
+    Whole,
+    Plain,
+    Chosen,
+}
+
+impl Layer {
+    fn chosen(self, chosen: bool) -> bool {
+        match self {
+            Layer::Whole => chosen,
+            Layer::Plain => false,
+            Layer::Chosen => true,
+        }
+    }
+}
+
+/// The first row a list of `rows` shows with `selected` chosen.
+fn first_row(selected: usize, rows: usize) -> usize {
+    selected.saturating_sub(ROWS - 1).min(rows.saturating_sub(ROWS))
+}
+
+/// Under a list's rows: the highlight on the chosen one (Whole), or across
+/// them all (Chosen), for its pill to be cut from as it glides.
+fn list_backdrop(p: &mut Canvas, layer: Layer, slot: Option<usize>) {
+    let (x, w, h) = PILL;
+    match (layer, slot) {
+        (Layer::Whole, Some(slot)) => paint::pill(p, x, LIST_TOP + slot as f32 * ROW_PITCH, w, h, colour(SELECT)),
+        // All the highlight's blue: only its pill is cut from it.
+        (Layer::Chosen, _) => *p = paint::canvas(SELECT),
+        _ => {}
+    }
+}
+
+/// A list screen's chosen row and the first it shows, for its highlight.
+pub fn list_place(screen: &Screen) -> Option<(usize, usize)> {
+    let (selected, rows) = match screen {
+        Screen::LightList { card, selected } => (*selected, card.lights.len() + 1),
+        Screen::Members { card, selected } => (*selected, card.members.len() + 1),
+        Screen::OptionList { card, selected } => (*selected, card.options.len() + 1),
+        Screen::Settings { rows, selected, .. } => (*selected, rows.len()),
+        _ => return None,
+    };
+    Some((selected, first_row(selected, rows)))
+}
+
+/// A list screen drawn as `layer`, and what it shows apart from its
+/// highlight (to know when its layers can be kept).
+pub fn list_layer(fonts: &Fonts, screen: &Screen, layer: Layer) -> Option<Canvas> {
+    Some(match screen {
+        Screen::LightList { card, selected } => lights_listed(fonts, &card.name, &card.lights, *selected, layer),
+        Screen::Members { card, selected } => lights_listed(fonts, &card.name, &card.members, *selected, layer),
+        Screen::OptionList { card, selected } => option_list(fonts, card, *selected, layer),
+        Screen::Settings { rows, nest, nest_dial, selected } => settings_list(fonts, rows, *nest, *nest_dial, *selected, layer),
+        _ => return None,
+    })
+}
+
+pub fn list_key(screen: &Screen) -> Option<String> {
+    let (_, first) = list_place(screen)?;
+    Some(match screen {
+        Screen::LightList { card, .. } => format!("lights {first} {card:?}"),
+        Screen::Members { card, .. } => format!("members {first} {card:?}"),
+        Screen::OptionList { card, .. } => format!("options {first} {card:?}"),
+        Screen::Settings { rows, nest, nest_dial, .. } => format!("settings {first} {rows:?} {nest:?} {nest_dial}"),
+        _ => return None,
+    })
+}
 
 fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Canvas {
-    lights_listed(fonts, &card.name, &card.lights, selected)
+    lights_listed(fonts, &card.name, &card.lights, selected, Layer::Whole)
 }
 
 /// Lights listed under `name`, each with its state, then Back.
-fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize) -> Canvas {
+fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, layer: Layer) -> Canvas {
     let mut p = paint::canvas(BLACK);
+    let rows = lights.len() + 1;
+    let first = first_row(selected, rows);
+    list_backdrop(&mut p, layer, selected.checked_sub(first));
     let accent = lights.iter().find(|l| l.on).map_or(GREY, |l| l.colour());
     label(&mut p, fonts, 100.0, name, accent);
-    let rows = lights.len() + 1;
-    let first = selected.saturating_sub(ROWS - 1).min(rows.saturating_sub(ROWS));
     for (slot, row) in (first..rows.min(first + ROWS)).enumerate() {
-        let y = 128.0 + slot as f32 * 62.0;
-        let (x, w, h) = (62.0, 356.0, 54.0);
-        let chosen = row == selected;
-        if chosen {
-            paint::pill(&mut p, x, y, w, h, colour(SELECT));
-        }
+        let y = LIST_TOP + slot as f32 * ROW_PITCH;
+        let (x, w, h) = PILL;
+        let chosen = layer.chosen(row == selected);
         let (name, value, tint, value_tint, icon_name, entity) = match lights.get(row) {
             Some(light) => {
                 let value = match (light.on, light.brightness) {
@@ -918,30 +1072,30 @@ fn options_card(fonts: &Fonts, card: &OptionsCard) -> Canvas {
 }
 
 /// A select's options, the current one marked, then Back.
-fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize) -> Canvas {
+fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer) -> Canvas {
     let mut p = paint::canvas(BLACK);
-    label(&mut p, fonts, 100.0, &card.name, GREY);
     let rows = card.options.len() + 1;
-    let first = selected.saturating_sub(ROWS - 1).min(rows.saturating_sub(ROWS));
+    let first = first_row(selected, rows);
+    list_backdrop(&mut p, layer, selected.checked_sub(first));
+    label(&mut p, fonts, 100.0, &card.name, GREY);
     for (slot, row) in (first..rows.min(first + ROWS)).enumerate() {
-        let y = 128.0 + slot as f32 * 62.0;
-        let (x, w, h) = (62.0, 356.0, 54.0);
-        if row == selected {
-            paint::pill(&mut p, x, y, w, h, colour(SELECT));
-        }
+        let y = LIST_TOP + slot as f32 * ROW_PITCH;
+        let (x, w, h) = PILL;
+        let chosen = layer.chosen(row == selected);
         let (name, now) = match card.options.get(row) {
             Some(option) => (option.as_str(), card.current.as_deref() == Some(option.as_str())),
             None => ("Back", false),
         };
         if row == card.options.len() {
-            icon(&mut p, "mdi:arrow-left", "back", x + 34.0, y + h / 2.0, 28.0, if row == selected { WHITE } else { GREY });
+            icon(&mut p, "mdi:arrow-left", "back", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
         }
         let value = if now { "Now" } else { "" };
         let value_width = paint::measure(&fonts.regular, 20.0, value, 0.0);
         let name = paint::fit(&fonts.regular, 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
         paint::text_at(&mut p, &fonts.regular, 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
         if now {
-            paint::text_at(&mut p, &fonts.regular, 20.0, x + w - 22.0 - value_width, y + 35.0, value, 0.0, ACTION, 1.0);
+            paint::text_at(&mut p, &fonts.regular, 20.0, x + w - 22.0 - value_width, y + 35.0, value, 0.0,
+                           if chosen { WHITE } else { ACTION }, 1.0);
         }
     }
     p

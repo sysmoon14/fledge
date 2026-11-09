@@ -121,6 +121,14 @@ impl Canvas {
     }
 }
 
+impl Canvas {
+    /// A frame as a canvas in the upright layout (previews and tests).
+    #[cfg(test)]
+    pub fn from_frame(frame: Vec<u8>) -> Canvas {
+        Canvas { pixmap: Pixmap::from_vec(frame, tiny_skia::IntSize::from_wh(SIZE, SIZE).expect("480")).expect("480x480"), panel: false }
+    }
+}
+
 pub fn canvas(background: [u8; 3]) -> Canvas {
     canvas_for(background, PANEL.load(std::sync::atomic::Ordering::Relaxed))
 }
@@ -144,30 +152,51 @@ pub fn tick_angle(i: usize, n: usize) -> f32 {
     -SPAN / 2.0 + SPAN * i as f32 / (n.max(2) - 1) as f32
 }
 
+/// A tick's shape: the ring's own, long (the dial's target, reaching in),
+/// or wide (the temperature now, as the Nest marks it).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shape {
+    Short,
+    Long,
+    Wide,
+}
+
+impl RingPixel {
+    fn cover(&self, shape: Shape) -> u8 {
+        match shape {
+            Shape::Short => self.short,
+            Shape::Long => self.long,
+            Shape::Wide => self.wide,
+        }
+    }
+}
+
 /// The whole ring, each tick coloured by `of(i)`; `mark` ticks drawn long
 /// and white, as the dial's target.
+pub fn ring(canvas: &mut Canvas, of: impl Fn(usize) -> Color, marks: &[usize]) {
+    ring_shaped(canvas, |i| if marks.contains(&i) { (colour(WHITE), Shape::Long) } else { (of(i), Shape::Short) });
+}
+
+/// The whole ring, each tick's colour and shape from `of(i)`.
 ///
 /// Drawn from the ring's coverage, worked out once (ring_pixels): every
-/// pixel near a tick, which tick, and how much of it a tick covers, short
-/// or long. A frame then only blends those, where stroking 150 lines took
-/// most of a frame on the unit.
-pub fn ring(canvas: &mut Canvas, of: impl Fn(usize) -> Color, marks: &[usize]) {
+/// pixel near a tick, which tick, and how much of it each shape covers. A
+/// frame then only blends those, where stroking 150 lines took most of a
+/// frame on the unit.
+pub fn ring_shaped(canvas: &mut Canvas, of: impl Fn(usize) -> (Color, Shape)) {
     let mut colours = [[0u16; 4]; TICKS];
+    let mut shapes = [Shape::Short; TICKS];
     for (i, c) in colours.iter_mut().enumerate() {
-        let u = canvas.colour(if marks.contains(&i) { colour(WHITE) } else { of(i) }).to_color_u8();
+        let (tint, shape) = of(i);
+        let u = canvas.colour(tint).to_color_u8();
         *c = [u.red() as u16, u.green() as u16, u.blue() as u16, u.alpha() as u16];
-    }
-    let mut marked = [false; TICKS];
-    for &m in marks {
-        if m < TICKS {
-            marked[m] = true;
-        }
+        shapes[i] = shape;
     }
     let panel = canvas.panel;
     let data = canvas.pixmap.data_mut();
     for p in ring_pixels() {
         let tick = p.tick as usize;
-        let cover = if marked[tick] { p.long } else { p.short } as u16;
+        let cover = p.cover(shapes[tick]) as u16;
         let [r, g, b, a] = colours[tick];
         let a = cover * a / 255;
         if a == 0 {
@@ -187,7 +216,7 @@ pub fn ring(canvas: &mut Canvas, of: impl Fn(usize) -> Color, marks: &[usize]) {
 pub struct Live {
     still: Canvas,
     drawn: [[u16; 4]; TICKS],
-    marked: [bool; TICKS],
+    shapes: [Shape; TICKS],
     fresh: bool,
     number: String,
     /// The old number's glyphs, (x, y, width, height), upright.
@@ -198,7 +227,7 @@ pub struct Live {
 
 impl Live {
     pub fn new(still: &Canvas) -> Live {
-        Live { still: still.clone(), drawn: [[0; 4]; TICKS], marked: [false; TICKS], fresh: true,
+        Live { still: still.clone(), drawn: [[0; 4]; TICKS], shapes: [Shape::Short; TICKS], fresh: true,
                number: String::new(), glyphs: Vec::new(), columns: None }
     }
 
@@ -210,22 +239,27 @@ impl Live {
 
 /// The ring as ring() draws it, on a Live screen: only ticks that changed.
 pub fn ring_live(canvas: &mut Canvas, live: &mut Live, of: impl Fn(usize) -> Color, marks: &[usize]) {
+    ring_shaped_live(canvas, live, |i| if marks.contains(&i) { (colour(WHITE), Shape::Long) } else { (of(i), Shape::Short) });
+}
+
+/// The ring as ring_shaped() draws it, on a Live screen: only ticks that changed.
+pub fn ring_shaped_live(canvas: &mut Canvas, live: &mut Live, of: impl Fn(usize) -> (Color, Shape)) {
     let panel = canvas.panel;
     for tick in 0..TICKS {
-        let marked = marks.contains(&tick);
-        let u = canvas.colour(if marked { colour(WHITE) } else { of(tick) }).to_color_u8();
+        let (tint, shape) = of(tick);
+        let u = canvas.colour(tint).to_color_u8();
         let colour = [u.red() as u16, u.green() as u16, u.blue() as u16, u.alpha() as u16];
-        if !live.fresh && live.drawn[tick] == colour && live.marked[tick] == marked {
+        if !live.fresh && live.drawn[tick] == colour && live.shapes[tick] == shape {
             continue;
         }
-        (live.drawn[tick], live.marked[tick]) = (colour, marked);
+        (live.drawn[tick], live.shapes[tick]) = (colour, shape);
         let [r, g, b, a] = colour;
         let still = live.still.pixmap.data();
         let data = canvas.pixmap.data_mut();
         let (mut low, mut high) = (u32::MAX, 0);
         for p in tick_pixels(tick) {
             let at = 4 * if panel { p.panel } else { p.upright } as usize;
-            let cover = if marked { p.long } else { p.short } as u16 * a / 255;
+            let cover = p.cover(shape) as u16 * a / 255;
             let blend = |d: u8, s: u16| ((s * cover + d as u16 * (255 - cover)) / 255) as u8;
             data[at] = blend(still[at], r);
             data[at + 1] = blend(still[at + 1], g);
@@ -272,10 +306,11 @@ struct RingPixel {
     upright: u32,
     panel: u32,
     tick: u8,
-    /// How much of it a tick covers, of 255: a short tick, and a long one
-    /// (the target's mark).
+    /// How much of it a tick covers, of 255: a short tick, a long one (the
+    /// target's mark), and a wide one (the temperature now).
     short: u8,
     long: u8,
+    wide: u8,
 }
 
 fn ring_pixels() -> &'static [RingPixel] {
@@ -327,9 +362,10 @@ fn ring_pixels_unsorted() -> Vec<RingPixel> {
                 }
                 let distance = radius * (angle - tick_angle(tick as usize, TICKS)).to_radians().sin().abs();
                 let (short, long) = (cover(distance, radius, 1.5, TICK), cover(distance, radius, 2.5, MARK));
-                if short > 0 || long > 0 {
+                let wide = cover(distance, radius, 3.6, TICK);
+                if short > 0 || long > 0 || wide > 0 {
                     pixels.push(RingPixel { upright: y * SIZE + x, panel: x * SIZE + (SIZE - 1 - y),
-                                            tick: tick as u8, short, long });
+                                            tick: tick as u8, short, long, wide });
                 }
             }
         }
@@ -402,6 +438,35 @@ pub fn pill(canvas: &mut Canvas, x: f32, y: f32, w: f32, h: f32, c: Color) {
     // squarer than arcs; at a list row's size the Nest's look the same.
     if let Some(path) = path.finish() {
         canvas.fill_path(&path, c);
+    }
+}
+
+/// The list's highlight where it glides: within the pill at (x, y, w, h),
+/// `chosen` (the rows as the highlight shows them) over `out` (as they show
+/// without it), the pill's rounded edge softened over a pixel.
+pub fn pill_window(out: &mut Canvas, chosen: &Canvas, x: f32, y: f32, w: f32, h: f32) {
+    let r = h / 2.0;
+    let (y0, y1) = ((y.floor() as i32).max(0), ((y + h).ceil() as i32).min(SIZE as i32));
+    let (x0, x1) = ((x.floor() as i32).max(0), ((x + w).ceil() as i32).min(SIZE as i32));
+    let from = chosen.pixmap.data();
+    for py in y0..y1 {
+        let fy = py as f32 + 0.5;
+        let along_y = (fy - y + 0.5).clamp(0.0, 1.0) * (y + h - fy + 0.5).clamp(0.0, 1.0);
+        for px in x0..x1 {
+            let fx = px as f32 + 0.5;
+            // Distance outside the pill: its ends are half circles.
+            let cx = fx.clamp(x + r, x + w - r);
+            let cover = (r + 0.5 - ((fx - cx).powi(2) + (fy - (y + r)).powi(2)).sqrt()).clamp(0.0, 1.0) * along_y;
+            if cover <= 0.0 {
+                continue;
+            }
+            let at = out.at(px as u32, py as u32);
+            let data = out.pixmap.data_mut();
+            for k in 0..3 {
+                let (old, new) = (data[at + k] as f32, from[at + k] as f32);
+                data[at + k] = (old + (new - old) * cover).round() as u8;
+            }
+        }
     }
 }
 

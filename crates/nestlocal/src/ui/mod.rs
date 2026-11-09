@@ -244,6 +244,15 @@ struct Runtime {
     settings_seen: u32,
     /// When the thermostat's own state was last asked for.
     nest_checked: Instant,
+    /// The thermostat's dial: when its pulse (from now to the target) began,
+    /// and when the next is due.
+    pulse: Option<Instant>,
+    next_pulse: Instant,
+    /// A list's highlight as it glides between rows: the list's layers
+    /// (Layer::Plain, Layer::Chosen), what they show, and where it is.
+    glide: Option<Glide>,
+    /// Something changed that the machine doesn't know of: draw.
+    force_draw: bool,
     /// nlclient's dial as it last showed lit, and when: the thermostat's
     /// card when the display wakes, its own page dark until nlclient draws.
     dial: Option<device::Frame>,
@@ -252,6 +261,24 @@ struct Runtime {
     /// longest.
     frames: (u32, Duration, Duration),
 }
+
+struct Glide {
+    key: String,
+    plain: paint::Canvas,
+    chosen: paint::Canvas,
+    /// The highlight's top, and where it's going.
+    y: f32,
+    target: f32,
+    drawn: Instant,
+}
+
+/// How long the thermostat's pulse runs, and how often.
+const PULSE: Duration = Duration::from_millis(1800);
+const PULSE_EVERY: Duration = Duration::from_secs(30);
+/// How fast a list's highlight glides to its row: most of the way in this.
+const GLIDE: f32 = 0.05;
+/// How long fading from one screen to the next takes.
+const FADE: Duration = Duration::from_millis(280);
 
 /// How long the button is held for a long press.
 const LONG_PRESS: Duration = Duration::from_millis(600);
@@ -277,7 +304,8 @@ impl Runtime {
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
-            nest_checked: now - Duration::from_secs(10), dial: None, last_dial: now - Duration::from_secs(60),
+            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false,
+            dial: None, last_dial: now - Duration::from_secs(60),
         }
     }
 
@@ -424,6 +452,7 @@ impl Runtime {
                 || matches!(self.machine.mode, Mode::Chooser(_)) && before != self.machine.mode {
                 mode_state(&self.machine.mode);
             }
+            self.schedule_pulse(&before, now);
             self.transition = transition(&before, &self.machine.mode, turned && lit);
             if std::mem::take(&mut self.machine.woke) {
                 // Woken: the thermostat as it lit, zooming out to the cards.
@@ -440,7 +469,8 @@ impl Runtime {
             let elapsed = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
             self.last_frame = now;
             let swept = self.sweep(elapsed);
-            let mut dirty = self.machine.take_dirty();
+            let mut dirty = self.machine.take_dirty() | std::mem::take(&mut self.force_draw) || self.pulse.is_some()
+                || self.gliding();
             if self.machine.mode == Mode::Glance && unix_now() as i64 / 60 != self.glance_minute {
                 // The glance's clock, as the minute turns.
                 self.glance_minute = unix_now() as i64 / 60;
@@ -519,7 +549,49 @@ impl Runtime {
             _ => false,
         };
         let zooming = self.view.is_some() && (self.zoom - self.zoom_target()).abs() > 0.002;
-        following || zooming || self.sweeping()
+        following || zooming || self.sweeping() || self.pulse.is_some() || self.gliding()
+    }
+
+    /// Whether a list's highlight is on its way to its row.
+    fn gliding(&self) -> bool {
+        self.glide.as_ref().is_some_and(|g| (g.y - g.target).abs() > 0.3)
+            && screens::list_place(&match Self::screen(&self.machine, &self.machine.mode) {
+                Some(screen) => screen,
+                None => return false,
+            }).is_some()
+    }
+
+    /// The thermostat's dial pulses from the temperature now to its target,
+    /// soon after it opens and then every PULSE_EVERY, while it heats or
+    /// cools towards it.
+    fn schedule_pulse(&mut self, before: &Mode, now: Instant) {
+        let reaching = match (&self.machine.mode, &self.machine.nest) {
+            (Mode::Thermostat { target }, Some(nest)) => {
+                matches!(nest.card.action.as_str(), "heating" | "cooling")
+                    && nest.card.current.is_some_and(|c| (c - target).abs() >= nest.card.step)
+            }
+            _ => false,
+        };
+        if !reaching {
+            self.pulse = None;
+            return;
+        }
+        if !matches!(before, Mode::Thermostat { .. }) {
+            self.next_pulse = now + Duration::from_millis(700);
+        }
+        if self.pulse.is_some_and(|at| now.duration_since(at) >= PULSE) {
+            self.pulse = None;
+            self.machine_dirty();
+        }
+        if self.pulse.is_none() && now >= self.next_pulse {
+            self.pulse = Some(now);
+            self.next_pulse = now + PULSE_EVERY;
+        }
+    }
+
+    /// Draw again: the pulse just ended, its last frame to settle.
+    fn machine_dirty(&mut self) {
+        self.force_draw = true;
     }
 
     /// Zoomed out on the cards, the chooser; full size settling back onto
@@ -1025,7 +1097,7 @@ impl Runtime {
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
             Mode::Glance => Screen::Glance { glance: machine.cards.glance.as_ref()?, cards: &machine.cards.cards,
                                              now: unix_now() as i64 },
-            Mode::Thermostat { target } => Screen::NestSet { nest: machine.nest.as_ref()?, target: *target },
+            Mode::Thermostat { target } => Screen::NestSet { nest: machine.nest.as_ref()?, target: *target, pulse: None },
             Mode::Settings { selected } => Screen::Settings { rows: machine.settings(), nest: machine.nest.as_ref(),
                                                               nest_dial: machine.nest_dial, selected: *selected },
             Mode::SettingSet { setting, value } => Screen::SettingSet { setting: *setting, nest: machine.nest.as_ref()?,
@@ -1095,10 +1167,24 @@ impl Runtime {
             return self.draw_menu(&view, &actions, selected);
         }
         let mode = self.machine.mode.clone();
-        let Some(screen) = Self::screen(&self.machine, &mode) else { return };
+        let Some(mut screen) = Self::screen(&self.machine, &mode) else { return };
+        if let Screen::NestSet { pulse, .. } = &mut screen {
+            *pulse = self.pulse.map(|at| at.elapsed().as_secs_f32() / PULSE.as_secs_f32());
+        }
         let sweep = self.sweep.as_ref().map(|(_, shown)| *shown);
         let fade = self.transition == Transition::Fade;
         self.transition = Transition::Cut;
+        if let Some((selected, first)) = screens::list_place(&screen) {
+            let frame = Self::draw_list(&mut self.glide, &self.fonts, &screen, selected - first, fade);
+            if fade {
+                let from = self.display.save();
+                self.animate(&from, &frame, Transition::Fade);
+            }
+            self.live = None;
+            self.display.show(&frame);
+            return;
+        }
+        self.glide = None;
         // A value screen draws its still part once, then only what changes.
         if let Some(key) = screens::still_key(&screen) {
             let fresh = !matches!(&self.live, Some((kept, ..)) if *kept == key);
@@ -1132,13 +1218,50 @@ impl Runtime {
         self.display.show(&frame);
     }
 
-    /// Fades the display from `from` to `to`, in about a sixth of a second.
+    /// A list, its highlight on its way to row `slot` of those showing:
+    /// gliding there from where it was, or there at once on a new list.
+    fn draw_list(glide: &mut Option<Glide>, fonts: &paint::Fonts, screen: &Screen, slot: usize, fresh: bool) -> device::Frame {
+        let key = screens::list_key(screen).unwrap_or_default();
+        let target = screens::LIST_TOP + slot as f32 * screens::ROW_PITCH;
+        // The same list (its kind and its first row), only what it shows changed: kept where it is.
+        let same = |g: &Glide| g.key.split(' ').take(2).eq(key.split(' ').take(2));
+        match glide {
+            Some(g) if g.key == key => {}
+            Some(g) if same(g) && !fresh => {
+                g.plain = screens::list_layer(fonts, screen, screens::Layer::Plain).expect("a list");
+                g.chosen = screens::list_layer(fonts, screen, screens::Layer::Chosen).expect("a list");
+                g.key = key;
+            }
+            _ => {
+                *glide = Some(Glide {
+                    plain: screens::list_layer(fonts, screen, screens::Layer::Plain).expect("a list"),
+                    chosen: screens::list_layer(fonts, screen, screens::Layer::Chosen).expect("a list"),
+                    key, y: target, target, drawn: Instant::now(),
+                });
+            }
+        }
+        let g = glide.as_mut().expect("just made");
+        let elapsed = g.drawn.elapsed().as_secs_f32().min(0.1);
+        g.drawn = Instant::now();
+        g.target = target;
+        let mut next = g.y + (target - g.y) * (1.0 - (-elapsed / GLIDE).exp());
+        if (next - target).abs() < 0.3 {
+            next = target;
+        }
+        g.y = next;
+        let mut canvas = g.plain.clone();
+        let (x, w, h) = screens::PILL;
+        paint::pill_window(&mut canvas, &g.chosen, x, g.y, w, h);
+        device::frame(canvas)
+    }
+
+    /// Fades the display from `from` to `to`.
     fn animate(&mut self, from: &[u8], to: &[u8], transition: Transition) {
         if transition == Transition::Cut {
             return;
         }
         let started = Instant::now();
-        let length = Duration::from_millis(160);
+        let length = FADE;
         loop {
             let t = started.elapsed().as_secs_f32() / length.as_secs_f32();
             if t >= 1.0 {
@@ -1492,8 +1615,8 @@ mod shots {
         for (name, nest) in &shots {
             save(&screens::draw(&fonts, &Screen::NestCard { nest, now }, None), &format!("{out}/{name}.png"));
         }
-        save(&screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 22.0 }, None), &format!("{out}/t5-nest-set.png"));
-        let mut menu = screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 21.5 }, None);
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 22.0, pulse: None }, None), &format!("{out}/t5-nest-set.png"));
+        let mut menu = screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 21.5, pulse: None }, None);
         screens::menu(&mut menu, &fonts, "Thermostat", &[("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"),
             ("mdi:power", "Turn off"), ("mdi:water-boiler", "Stop the boost"), ("mdi:thermometer", "Nest's own dial")], 1);
         save(&menu, &format!("{out}/t6-nest-menu.png"));
@@ -1506,5 +1629,23 @@ mod shots {
         }
         save(&screens::draw(&fonts, &Screen::SettingSet { setting: Setting::EcoLow, nest: &idle, value: 12.0 }, None),
              &format!("{out}/t9-eco-set.png"));
+        let cold = state(serde_json::json!({"action": "heating", "target": 22.0, "current_temperature": 19.5,
+            "time_to_target": "2026-11-09T08:13:00Z"}));
+        for (name, phase) in [("p1-pulse-start", Some(0.15)), ("p2-pulse-mid", Some(0.4)), ("p3-pulse-fade", Some(0.85)), ("p0-rest", None)] {
+            save(&screens::draw(&fonts, &Screen::NestSet { nest: &cold, target: 22.0, pulse: phase }, None),
+                 &format!("{out}/{name}.png"));
+        }
+        let mut zoomed = vec![0u8; (paint::SIZE * paint::SIZE * 4) as usize];
+        let frames: Vec<device::Frame> = [Screen::NestCard { nest: &cold, now }, Screen::SettingsCard,
+            Screen::ActionCard { card: &scene, done: false }].iter().map(|screen| {
+                let mut f = paint::canvas(paint::BLACK);
+                std::mem::swap(&mut f, &mut screens::draw(&fonts, screen, None));
+                let mut frame = f.pixmap.data().to_vec();
+                zoom::round(&mut frame);
+                zoom::shrink(&frame)
+            }).collect();
+        zoom::compose(&mut zoomed, 1.0, zoom::ZOOMED, zoom::ZOOMED, |k| frames.get(k as usize).map(Vec::as_slice));
+        let canvas = paint::Canvas::from_frame(zoomed);
+        save(&canvas, &format!("{out}/z1-zoomed.png"));
     }
 }
