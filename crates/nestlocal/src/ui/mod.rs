@@ -1638,9 +1638,7 @@ mod shots {
         let mut zoomed = vec![0u8; (paint::SIZE * paint::SIZE * 4) as usize];
         let frames: Vec<device::Frame> = [Screen::NestCard { nest: &cold, now }, Screen::SettingsCard,
             Screen::ActionCard { card: &scene, done: false }].iter().map(|screen| {
-                let mut f = paint::canvas(paint::BLACK);
-                std::mem::swap(&mut f, &mut screens::draw(&fonts, screen, None));
-                let mut frame = f.pixmap.data().to_vec();
+                let mut frame = screens::draw(&fonts, screen, None).pixmap.data().to_vec();
                 zoom::round(&mut frame);
                 zoom::shrink(&frame)
             }).collect();
