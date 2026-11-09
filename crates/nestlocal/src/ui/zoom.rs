@@ -28,20 +28,18 @@ fn backdrop_frame() -> Frame {
     [b, g, r, 0xff].repeat(SIDE * SIDE)
 }
 
-/// How small the cards are while the ring moves between them: Fledge's
-/// smaller, with room round them for the name and dots and more of the
-/// next ones showing.
+/// How small the cards are while the ring moves between them: room round
+/// them for the name and dots, and the next ones showing at the sides.
 pub fn zoomed() -> f32 {
-    if super::paint::fledge() { 0.62 } else { 0.8 }
+    0.62
 }
 
 /// From one card's centre to the next at zoom `z`: side by side at full
 /// size, and a little apart when zoomed out, the next one's edge showing.
 pub fn spacing(z: f32) -> f32 {
-    // Fledge's: about 24 px between the cards, as its mockups space them,
-    // and some 67 px of the next ones showing at the sides.
-    let pull = if super::paint::fledge() { 416.0 } else { 400.0 };
-    SIDE as f32 - (1.0 - z) * pull
+    // About 24 px between the cards zoomed out, and some 67 px of the next
+    // ones showing at the sides.
+    SIDE as f32 - (1.0 - z) * 416.0
 }
 
 /// Black outside the display's circle, the edge softened over a pixel: a
@@ -231,7 +229,7 @@ mod tests {
         assert_eq!(pixel(240), 150, "the card itself in the middle");
         assert_eq!(pixel(470), 200, "the next one's edge after it");
         assert_eq!(pixel(10), 100, "the one before at the start");
-        assert_eq!(pixel(45), 0, "black between them");
+        assert_eq!(pixel(80), 0, "space between them");
         assert_eq!(out[240 * ROW + 20 * 4], 0, "the card smaller than the display");
     }
 

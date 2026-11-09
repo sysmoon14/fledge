@@ -32,6 +32,7 @@ pub struct Fonts {
     fledge_regular: FontArc,
     fledge_medium: FontArc,
     fledge_digits: FontArc,
+    fledge_clock: FontArc,
 }
 
 impl Fonts {
@@ -48,6 +49,7 @@ impl Fonts {
             fledge_regular: built_in(include_bytes!("fonts/DMSans-Regular.ttf"))?,
             fledge_medium: built_in(include_bytes!("fonts/DMSans-Medium.ttf"))?,
             fledge_digits: built_in(include_bytes!("fonts/Outfit-ExtraLight.ttf"))?,
+            fledge_clock: built_in(include_bytes!("fonts/Outfit-Light.ttf"))?,
         })
     }
 
@@ -58,6 +60,12 @@ impl Fonts {
 
     pub fn medium(&self) -> &FontArc {
         if fledge() { &self.fledge_medium } else { &self.nest_medium }
+    }
+
+    /// The glance's clock: read across a room, so Outfit's light (not its
+    /// extra light) on Fledge.
+    pub fn clock(&self) -> &FontArc {
+        if fledge() { &self.fledge_clock } else { &self.nest_regular }
     }
 
     /// A dial's large number: the Nest's regular, or Outfit's extra light.
@@ -1135,8 +1143,9 @@ pub fn hint(frame: &mut Vec<u8>, fonts: &Fonts, text: &str) {
     };
     let mut canvas = Canvas { pixmap, panel: true };
     let width = measure(fonts.medium(), 15.0, text, 0.2) + 28.0;
-    pill(&mut canvas, CENTRE - width / 2.0, 424.0, width, 30.0, Color::from_rgba8(36, 38, 42, 255));
-    self::text(&mut canvas, fonts.medium(), 15.0, CENTRE, 444.0, text, 0.2, [230, 233, 238]);
+    // Between the cards (their bottoms at 389) and the dots.
+    pill(&mut canvas, CENTRE - width / 2.0, 399.0, width, 30.0, Color::from_rgba8(36, 38, 42, 255));
+    self::text(&mut canvas, fonts.medium(), 15.0, CENTRE, 419.0, text, 0.2, [230, 233, 238]);
     *frame = canvas.pixmap.take();
 }
 
@@ -1165,7 +1174,10 @@ pub fn dots(canvas: &mut Canvas, count: usize, active: usize, y: f32, fade: f32)
     }
 }
 
-const TITLE_BASELINE: f32 = 42.0;
+/// The chosen card's name above the zoomed-out cards (their tops at 91),
+/// where the display is wide enough for a long one, and the dots below.
+const TITLE_BASELINE: f32 = 68.0;
+const DOTS_AT: f32 = 446.0;
 
 /// How wide the round display is at height `y`, less a margin.
 fn chord(y: f32) -> f32 {
@@ -1178,7 +1190,7 @@ fn chord(y: f32) -> f32 {
 /// even at the smallest is cut short to that width.
 fn title_size(fonts: &Fonts, name: &str) -> (f32, f32) {
     let room = |size: f32| chord(TITLE_BASELINE - size * 0.72);
-    for size in [28.0, 25.0, 22.0, 19.0] {
+    for size in [32.0, 28.0, 25.0, 22.0, 19.0] {
         if measure(fonts.medium(), size, name, 0.0) <= room(size) {
             return (size, room(size));
         }
@@ -1201,7 +1213,7 @@ pub fn around_cards(frame: &mut Vec<u8>, fonts: &Fonts, name: &str, title: f32, 
         let width = measure(fonts.medium(), size, &name, 0.0);
         text_at(&mut canvas, fonts.medium(), size, CENTRE - width / 2.0, TITLE_BASELINE, &name, 0.0, WHITE, title.min(1.0));
     }
-    dots(&mut canvas, count, active, 455.0, fade);
+    dots(&mut canvas, count, active, DOTS_AT, fade);
     *frame = canvas.pixmap.take();
 }
 

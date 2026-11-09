@@ -84,17 +84,24 @@ fn dial_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]
 
 /// Words in a soft pill centred on `y`, tinted by `c`, an icon before them.
 fn pill_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3], icon_name: Option<&str>) {
-    let size = 18.0;
-    let text = paint::fit(fonts.medium(), size, text, 0.0, 260.0);
+    pill_words_at(pixmap, fonts, y, text, c, icon_name, 18.0, 260.0);
+}
+
+/// pill_words at `size`, its words at most `room` wide.
+#[allow(clippy::too_many_arguments)]
+fn pill_words_at(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3], icon_name: Option<&str>, size: f32,
+                 room: f32) {
+    let text = paint::fit(fonts.medium(), size, text, 0.0, room);
     let words = paint::measure(fonts.medium(), size, &text, 0.0);
-    let room = if icon_name.is_some() { 26.0 } else { 0.0 };
-    let width = words + room + 34.0;
+    let icon_room = if icon_name.is_some() { size * 1.45 } else { 0.0 };
+    let (pad, height) = (size * 0.95, size * 2.1);
+    let width = words + icon_room + 2.0 * pad;
     let left = HALF - width / 2.0;
-    paint::pill(pixmap, left, y - 19.0, width, 38.0, alpha(c, 0.18));
+    paint::pill(pixmap, left, y - height / 2.0, width, height, alpha(c, 0.18));
     if let Some(name) = icon_name {
-        icon(pixmap, name, "state", left + 17.0 + 10.0, y, 20.0, c);
+        icon(pixmap, name, "state", left + pad + size * 0.55, y, size * 1.1, c);
     }
-    paint::text_at(pixmap, fonts.medium(), size, left + 17.0 + room, y + 6.5, &text, 0.0, c, 1.0);
+    paint::text_at(pixmap, fonts.medium(), size, left + pad + icon_room, y + size * 0.36, &text, 0.0, c, 1.0);
 }
 
 /// Draws `screen`; `sweep`, where it has a value on its ring, is how far the
@@ -1196,23 +1203,33 @@ pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], 
 
 /// The glance: the time large, the date, the weather and what's on.
 fn glance_screen(fonts: &Fonts, glance: &Glance, cards: &[Card], now: i64) -> Canvas {
+    // Big enough to read across a room: the time across most of the face,
+    // the rest under it filling the round display's width.
     let mut p = paint::face(BLACK);
     let local = now + glance.offset;
     let (minutes, days) = (local.rem_euclid(86_400) / 60, local.div_euclid(86_400));
     let time = format!("{:02}:{:02}", minutes / 60, minutes % 60);
-    paint::text(&mut p, fonts.digits(), 120.0, HALF, 232.0, &time, -2.0, WHITE);
-    line(&mut p, fonts, 276.0, &date(days), GREY);
+    let size = if paint::fledge() { 196.0 } else { 160.0 };
+    paint::text(&mut p, fonts.clock(), size, HALF, 236.0, &time, -3.0, WHITE);
+    let day = paint::fit(fonts.regular(), 30.0, &date(days), 0.0, 380.0);
+    paint::text(&mut p, fonts.regular(), 30.0, HALF, 290.0, &day, 0.0, [196, 203, 211]);
     if let Some(weather) = &glance.weather {
         let temperature = weather.temperature.map(|t| format!("{t:.0}{}", if weather.unit.contains('F') { "°F" } else { "°" }));
         let text = [temperature.unwrap_or_default(), condition_name(&weather.condition)]
             .into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        let text = paint::fit(fonts.regular(), 34.0, &text, 0.0, 330.0);
         let name = format!("mdi:{}", weather_icon(&weather.condition));
-        let width = paint::measure(fonts.regular(), 26.0, &text, 0.0);
-        let left = HALF - (width + 44.0) / 2.0;
-        icon(&mut p, &name, "weather", left + 16.0, 323.0, 34.0, WHITE);
-        paint::text_at(&mut p, fonts.regular(), 26.0, left + 44.0, 332.0, &text, 0.0, WHITE, 1.0);
+        let width = paint::measure(fonts.regular(), 34.0, &text, 0.0);
+        let left = HALF - (width + 56.0) / 2.0;
+        icon(&mut p, &name, "weather", left + 21.0, 340.0, 44.0, WHITE);
+        paint::text_at(&mut p, fonts.regular(), 34.0, left + 56.0, 352.0, &text, 0.0, WHITE, 1.0);
     }
-    line(&mut p, fonts, 380.0, &whats_on(cards), ACTION);
+    if paint::fledge() {
+        pill_words_at(&mut p, fonts, 404.0, &whats_on(cards), [255, 211, 154], None, 23.0, 290.0);
+    } else {
+        let on = paint::fit(fonts.medium(), 24.0, &whats_on(cards), 0.0, 300.0);
+        paint::text(&mut p, fonts.medium(), 24.0, HALF, 402.0, &on, 0.0, ACTION);
+    }
     p
 }
 
