@@ -750,7 +750,11 @@ fn nest_eta(nest: &Nest, now: f64) -> Option<String> {
         return None;
     }
     let minutes = ((at - now) / 60.0).ceil().max(1.0) as i64;
-    Some(if minutes < 60 { format!("In {minutes} min") } else { format!("In {} h {} min", minutes / 60, minutes % 60) })
+    Some(match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("In {minutes} min"),
+        (hours, 0) => format!("In {hours} h"),
+        (hours, minutes) => format!("In {hours} h {minutes} min"),
+    })
 }
 
 /// The thermostat as its target set to `target` makes it: heating as
@@ -885,7 +889,7 @@ fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial
     let mut p = paint::face(BLACK);
     let first = first_row(selected, rows.len());
     list_backdrop(&mut p, layer, selected.checked_sub(first));
-    label(&mut p, fonts, 100.0, "Settings", GREY);
+    label(&mut p, fonts, LIST_TITLE, "Settings", GREY);
     for (slot, row) in (first..rows.len().min(first + ROWS)).enumerate() {
         let y = LIST_TOP + slot as f32 * ROW_PITCH;
         let (x, w, h) = PILL;
@@ -924,9 +928,15 @@ fn setting_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
 const ROWS: usize = 5;
 /// A list's rows: where the first's top is, how far apart, and the
 /// highlight's place and size on a row.
-pub const LIST_TOP: f32 = 128.0;
-pub const ROW_PITCH: f32 = 62.0;
+///
+/// Five rows of the highlight must all lie on the round display: the last
+/// one's lower corners are the nearest anything on a list comes to its edge
+/// (list_rows_lie_on_the_round_display).
+pub const LIST_TOP: f32 = 122.0;
+pub const ROW_PITCH: f32 = 58.0;
 pub const PILL: (f32, f32, f32) = (62.0, 356.0, 54.0);
+/// A list's title, over its rows.
+const LIST_TITLE: f32 = 96.0;
 
 /// How a list is drawn: whole, its highlight on the chosen row; or in two
 /// layers for the highlight to glide between rows (Runtime): every row as
@@ -1011,7 +1021,7 @@ fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, l
     let first = first_row(selected, rows);
     list_backdrop(&mut p, layer, selected.checked_sub(first));
     let accent = lights.iter().find(|l| l.on).map_or(GREY, |l| l.colour());
-    label(&mut p, fonts, 100.0, name, accent);
+    label(&mut p, fonts, LIST_TITLE, name, accent);
     for (slot, row) in (first..rows.min(first + ROWS)).enumerate() {
         let y = LIST_TOP + slot as f32 * ROW_PITCH;
         let (x, w, h) = PILL;
@@ -1176,7 +1186,9 @@ fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fon
 /// screen dimmed, the actions' icons around the ring from lower left, the
 /// chosen one blue and named under the device's name.
 pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], selected: usize) {
-    paint::dim(p, 0.06);
+    // Dark enough that what's under (a dial's large figures) doesn't show
+    // through the menu's own words.
+    paint::dim(p, 0.03);
     let fledge = paint::fledge();
     for (i, (name, _)) in items.iter().enumerate() {
         let angle = (-135.0 + 55.0 * i as f32).to_radians();
@@ -1203,6 +1215,68 @@ pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], 
 
 /// The glance: the time large, the date, the weather and what's on.
 fn glance_screen(fonts: &Fonts, glance: &Glance, cards: &[Card], now: i64) -> Canvas {
+    let mut p = glance_still(fonts, glance, cards, now);
+    let still = p.clone();
+    glance_words(&mut p, &still, fonts, cards, 0.0);
+    p
+}
+
+/// The colour of Fledge's line of what's on.
+const FLEDGE_ON: [u8; 3] = [255, 211, 154];
+
+/// The glance's line of what's on: how large, how much room it has, and
+/// how wide its words are.
+struct GlanceLine {
+    size: f32,
+    room: f32,
+    words: f32,
+}
+
+impl GlanceLine {
+    fn new(fonts: &Fonts, on: &str) -> GlanceLine {
+        let (size, room) = if paint::fledge() { (23.0, 290.0) } else { (24.0, 300.0) };
+        GlanceLine { size, room, words: paint::measure(fonts.medium(), size, on, 0.0) }
+    }
+
+    /// Too long for its place: it scrolls through it.
+    fn scrolls(&self) -> bool {
+        self.words > self.room
+    }
+}
+
+/// The space between the end of the glance's scrolling line and its start
+/// coming round again.
+const GLANCE_GAP: f32 = 72.0;
+
+/// How far the glance's line of what's on scrolls before it is back where
+/// it started, in pixels; None where it fits and stays put.
+pub fn glance_scroll(fonts: &Fonts, cards: &[Card]) -> Option<f32> {
+    let line = GlanceLine::new(fonts, &whats_on(cards));
+    line.scrolls().then_some(line.words + GLANCE_GAP)
+}
+
+/// Everything the glance shows: another key, another glance to draw.
+pub fn glance_key(glance: &Glance, cards: &[Card], now: i64) -> String {
+    format!("{glance:?} {} {} {}", (now + glance.offset).div_euclid(60), whats_on(cards), paint::fledge())
+}
+
+/// The glance's line of what's on, `offset` pixels along, over glance_still
+/// (`still`), where it scrolls: a title on the speaker, a film, a book, too
+/// long to show whole. Returns the upright columns drawn in, if any were.
+pub fn glance_words(p: &mut Canvas, still: &Canvas, fonts: &Fonts, cards: &[Card], offset: f32) -> Option<(u32, u32)> {
+    let on = whats_on(cards);
+    let line = GlanceLine::new(fonts, &on);
+    if !line.scrolls() {
+        return None;
+    }
+    let (baseline, colour) = if paint::fledge() { (404.0 + line.size * 0.36, FLEDGE_ON) } else { (402.0, ACTION) };
+    let ticker = paint::Ticker { font: fonts.medium(), size: line.size, text: &on, words: line.words,
+        left: HALF - line.room / 2.0, width: line.room, baseline, colour, gap: GLANCE_GAP };
+    Some(paint::ticker(p, still, &ticker, offset))
+}
+
+/// The glance without the words of a line that scrolls (glance_words).
+pub fn glance_still(fonts: &Fonts, glance: &Glance, cards: &[Card], now: i64) -> Canvas {
     // Big enough to read across a room: the time across most of the face,
     // the rest under it filling the round display's width.
     let mut p = paint::face(BLACK);
@@ -1224,11 +1298,19 @@ fn glance_screen(fonts: &Fonts, glance: &Glance, cards: &[Card], now: i64) -> Ca
         icon(&mut p, &name, "weather", left + 21.0, 340.0, 44.0, WHITE);
         paint::text_at(&mut p, fonts.regular(), 34.0, left + 56.0, 352.0, &text, 0.0, WHITE, 1.0);
     }
-    if paint::fledge() {
-        pill_words_at(&mut p, fonts, 404.0, &whats_on(cards), [255, 211, 154], None, 23.0, 290.0);
-    } else {
-        let on = paint::fit(fonts.medium(), 24.0, &whats_on(cards), 0.0, 300.0);
-        paint::text(&mut p, fonts.medium(), 24.0, HALF, 402.0, &on, 0.0, ACTION);
+    // What's on: in one line where it fits, else scrolling through it (the
+    // words drawn by glance_words, over this).
+    let on = whats_on(cards);
+    let line = GlanceLine::new(fonts, &on);
+    match (line.scrolls(), paint::fledge()) {
+        (false, true) => pill_words_at(&mut p, fonts, 404.0, &on, FLEDGE_ON, None, line.size, line.room),
+        (false, false) => paint::text(&mut p, fonts.medium(), line.size, HALF, 402.0, &on, 0.0, ACTION),
+        (true, true) => {
+            let (pad, height) = (line.size * 0.95, line.size * 2.1);
+            paint::pill(&mut p, HALF - line.room / 2.0 - pad, 404.0 - height / 2.0, line.room + 2.0 * pad, height,
+                        alpha(FLEDGE_ON, 0.18));
+        }
+        (true, false) => {}
     }
     p
 }
@@ -1280,7 +1362,7 @@ fn condition_name(condition: &str) -> String {
     }
 }
 
-/// What's on among the cards: lights, music.
+/// What's on among the cards: lights, and what's playing by its title.
 fn whats_on(cards: &[Card]) -> String {
     let lights: usize = cards.iter().map(|c| match c {
         Card::Lights(card) => card.lights.iter().filter(|l| l.on).count(),
@@ -1336,7 +1418,7 @@ fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer)
     let rows = card.options.len() + 1;
     let first = first_row(selected, rows);
     list_backdrop(&mut p, layer, selected.checked_sub(first));
-    label(&mut p, fonts, 100.0, &card.name, GREY);
+    label(&mut p, fonts, LIST_TITLE, &card.name, GREY);
     for (slot, row) in (first..rows.min(first + ROWS)).enumerate() {
         let y = LIST_TOP + slot as f32 * ROW_PITCH;
         let (x, w, h) = PILL;
@@ -1407,6 +1489,21 @@ pub fn capitalise(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_rows_lie_on_the_round_display() {
+        // The highlight's ends are half circles: each row's four are the
+        // furthest it reaches from the display's middle.
+        let (x, w, h) = PILL;
+        let r = h / 2.0;
+        for slot in 0..ROWS {
+            let y = LIST_TOP + slot as f32 * ROW_PITCH;
+            for (cx, cy) in [(x + r, y + r), (x + w - r, y + r)] {
+                let reach = ((cx - HALF).powi(2) + (cy - HALF).powi(2)).sqrt() + r;
+                assert!(reach <= HALF - 4.0, "row {slot} reaches {reach} of {HALF}");
+            }
+        }
+    }
+
     #[test]
     fn the_glance_s_date_is_the_calendar_s() {
         assert_eq!(date(0), "Thursday 1 January");

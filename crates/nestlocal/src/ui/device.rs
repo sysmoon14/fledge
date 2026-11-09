@@ -18,6 +18,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::Duration;
 
+use super::prof;
 
 pub const OWNER: &str = "/var/run/unfr0zen/screen.owner";
 const REST: &str = "/var/run/unfr0zen/screen.rest";
@@ -52,6 +53,19 @@ pub fn own(yes: bool) {
 pub fn beat(beat: u32) {
     if let Err(e) = crate::settings_ui::publish("screen.owner", format!("{} {beat}", std::process::id()).as_bytes()) {
         crate::logf!("ui: {OWNER}: {e}");
+    }
+}
+
+/// Favours the calling thread (the UI's) over the rest of the unit's work
+/// when both want its one core: a frame late shows as a stutter, and what
+/// it holds up meanwhile (MQTT, nlclient's own housekeeping) is in no hurry.
+/// It sleeps between frames and while nothing moves.
+pub fn favour() {
+    // SAFETY: setpriority on the calling thread (0), which Linux takes a
+    // nice value for apart from the process's other threads.
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS as _, 0, -10) } != 0 {
+        crate::logf!("ui: priority: {}", std::io::Error::last_os_error());
     }
 }
 
@@ -267,16 +281,18 @@ impl Display {
         let y = flip.pages[back];
         let start = y * stride;
         let page = &mut self.bytes()[start..];
-        for row in first..=last.min(SIDE - 1) {
-            each(row, &mut page[row * stride..row * stride + ROW]);
-        }
+        prof::time(prof::Part::Copy, || {
+            for row in first..=last.min(SIDE - 1) {
+                each(row, &mut page[row * stride..row * stride + ROW]);
+            }
+        });
         // For tools (utils/nest-screen.py): the frame about to show, whole,
         // where reading the framebuffer could catch the next one being drawn.
         if std::fs::remove_file(CAPTURE_REQUEST).is_ok() {
             let frame: Vec<u8> = (0..SIDE).flat_map(|row| page[row * stride..row * stride + ROW].to_vec()).collect();
             let _ = crate::settings_ui::publish("capture.raw", &frame);
         }
-        if let Err(e) = self.pan_to(y) {
+        if let Err(e) = prof::time(prof::Part::Pan, || self.pan_to(y)) {
             crate::logf!("ui: pan: {e}");
         }
     }
@@ -291,9 +307,11 @@ impl Display {
         let (start, stride) = (self.page(), self.stride);
         let page = &self.bytes()[start..];
         let mut frame = Vec::with_capacity(SIDE * ROW);
-        for y in 0..SIDE {
-            frame.extend_from_slice(&page[y * stride..y * stride + ROW]);
-        }
+        prof::time(prof::Part::Read, || {
+            for y in 0..SIDE {
+                frame.extend_from_slice(&page[y * stride..y * stride + ROW]);
+            }
+        });
         frame
     }
 

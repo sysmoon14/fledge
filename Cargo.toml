@@ -17,6 +17,17 @@ codegen-units = 1
 inherits = "release"
 opt-level = "s"
 
+# What draws the home screen cards on the thermostat, for speed: a card is
+# drawn while the ring waits, on one slow core.
+[profile.thermostat.package.tiny-skia]
+opt-level = 3
+
+[profile.thermostat.package.tiny-skia-path]
+opt-level = 3
+
+[profile.thermostat.package.ab_glyph_rasterizer]
+opt-level = 3
+
 [profile.dev.package.rsa]
 opt-level = 3
 

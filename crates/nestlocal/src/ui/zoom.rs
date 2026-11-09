@@ -42,20 +42,48 @@ pub fn spacing(z: f32) -> f32 {
     SIDE as f32 - (1.0 - z) * 416.0
 }
 
+/// How many cards either side of the one in the middle show at all at zoom
+/// `z`, as a distance in cards: a card further than this from the place the
+/// cards are at is off the display.
+pub fn reach(z: f32) -> f32 {
+    (CENTRE + CENTRE * z) / spacing(z)
+}
+
 /// Black outside the display's circle, the edge softened over a pixel: a
 /// card as the round display shows it, so a coloured one (a thermostat
 /// heating) shows no square corners when zoomed out beside the others.
+///
+/// A row at a time: the pixels well inside the circle are left as they are
+/// and those outside filled, so only the edge's few are worked out one by
+/// one (a card is drawn on the thermostat, where this is most of a frame's
+/// time otherwise).
 pub fn round(frame: &mut [u8]) {
     let back = backdrop();
+    let fill = [back[0], back[1], back[2]];
     let pixels = frame.as_chunks_mut::<4>().0;
+    let outer = CENTRE + 0.5;
     for r in 0..SIDE {
         let dy = r as f32 + 0.5 - CENTRE;
-        for c in 0..SIDE {
-            let dx = c as f32 + 0.5 - CENTRE;
-            let cover = (CENTRE + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
-            if cover < 1.0 {
-                for (channel, b) in pixels[r * SIDE + c][..3].iter_mut().zip(back) {
-                    *channel = (*channel as f32 * cover + b as f32 * (1.0 - cover)) as u8;
+        // Columns this far from the middle or less are wholly inside.
+        let inside = ((outer - 1.0) * (outer - 1.0) - dy * dy).max(0.0).sqrt();
+        let (first, last) = ((CENTRE - inside).ceil() as usize, ((CENTRE + inside).floor() as usize).min(SIDE));
+        let row = &mut pixels[r * SIDE..(r + 1) * SIDE];
+        let (left, rest) = row.split_at_mut(first.min(SIDE));
+        let right = &mut rest[last.saturating_sub(first)..];
+        let right_from = SIDE - right.len();
+        for (edge, from) in [(left, 0), (right, right_from)] {
+            for (i, pixel) in edge.iter_mut().enumerate() {
+                let dx = (from + i) as f32 + 0.5 - CENTRE;
+                let square = dx * dx + dy * dy;
+                if square >= outer * outer {
+                    pixel[..3].copy_from_slice(&fill);
+                    continue;
+                }
+                let cover = (outer - square.sqrt()).clamp(0.0, 1.0);
+                if cover < 1.0 {
+                    for (channel, b) in pixel[..3].iter_mut().zip(back) {
+                        *channel = (*channel as f32 * cover + b as f32 * (1.0 - cover)) as u8;
+                    }
                 }
             }
         }
@@ -109,12 +137,21 @@ fn outline(frame: &mut [u8], radius: f32) {
     const WIDTH: f32 = 1.4;
     let pixels = frame.as_chunks_mut::<4>().0;
     let (low, high) = ((CENTRE - radius - 2.0).max(0.0) as usize, ((CENTRE + radius + 2.0) as usize).min(SIDE));
+    // The edge's middle, and how far either side of it anything is drawn.
+    let (middle, half) = (radius - WIDTH / 2.0 - 0.5, WIDTH / 2.0 + 0.5);
     for r in low..high {
         let dy = r as f32 + 0.5 - CENTRE;
-        for c in low..high {
+        // Only the columns the edge crosses in this row: a band either side.
+        let extent = |from_middle: f32| (from_middle * from_middle - dy * dy).max(0.0).sqrt();
+        let (near, far) = (extent((middle - half).max(0.0)), extent(middle + half));
+        let band = |a: f32, b: f32| ((a.floor() as usize).clamp(low, high), ((b.ceil() as usize) + 1).clamp(low, high));
+        let (left, right) = (band(CENTRE - far - 1.0, CENTRE - near), band(CENTRE + near - 1.0, CENTRE + far));
+        // Near the top and bottom the two bands meet: once over each column.
+        let columns = if left.1 >= right.0 { (left.0..right.1).chain(0..0) } else { (left.0..left.1).chain(right.0..right.1) };
+        for c in columns {
             let dx = c as f32 + 0.5 - CENTRE;
-            let from_edge = ((dx * dx + dy * dy).sqrt() - (radius - WIDTH / 2.0 - 0.5)).abs();
-            let cover = (WIDTH / 2.0 + 0.5 - from_edge).clamp(0.0, 1.0);
+            let from_edge = ((dx * dx + dy * dy).sqrt() - middle).abs();
+            let cover = (half - from_edge).clamp(0.0, 1.0);
             if cover <= 0.0 {
                 continue;
             }
@@ -205,6 +242,67 @@ mod tests {
         assert_eq!(a[5 * ROW + 5 * 4], 0, "a corner black");
         let edge = a[240 * ROW];
         assert!(edge < 200, "the very edge softened: {edge}");
+    }
+
+    /// round and the edge worked out a pixel at a time, every pixel: what
+    /// the row-at-a-time ones must match.
+    fn round_every_pixel(frame: &mut [u8]) {
+        let back = backdrop();
+        let pixels = frame.as_chunks_mut::<4>().0;
+        for r in 0..SIDE {
+            let dy = r as f32 + 0.5 - CENTRE;
+            for c in 0..SIDE {
+                let dx = c as f32 + 0.5 - CENTRE;
+                let cover = (CENTRE + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+                if cover < 1.0 {
+                    for (channel, b) in pixels[r * SIDE + c][..3].iter_mut().zip(back) {
+                        *channel = (*channel as f32 * cover + b as f32 * (1.0 - cover)) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    fn outline_every_pixel(frame: &mut [u8], radius: f32) {
+        const WIDTH: f32 = 1.4;
+        let pixels = frame.as_chunks_mut::<4>().0;
+        for r in 0..SIDE {
+            let dy = r as f32 + 0.5 - CENTRE;
+            for c in 0..SIDE {
+                let dx = c as f32 + 0.5 - CENTRE;
+                let from_edge = ((dx * dx + dy * dy).sqrt() - (radius - WIDTH / 2.0 - 0.5)).abs();
+                let cover = (WIDTH / 2.0 + 0.5 - from_edge).clamp(0.0, 1.0);
+                if cover <= 0.0 {
+                    continue;
+                }
+                let pixel = &mut pixels[r * SIDE + c];
+                for (k, value) in [EDGE[2], EDGE[1], EDGE[0]].into_iter().enumerate() {
+                    let old = pixel[k] as f32;
+                    pixel[k] = (old + (value as f32 - old) * cover).round() as u8;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_at_a_time_rounds_and_edges_as_a_pixel_at_a_time() {
+        let (mut fast, mut slow) = (card(200), card(200));
+        round(&mut fast);
+        round_every_pixel(&mut slow);
+        assert!(fast == slow, "round");
+        for radius in [CENTRE * zoomed(), 40.0, 239.0] {
+            let (mut fast, mut slow) = (card(30), card(30));
+            outline(&mut fast, radius);
+            outline_every_pixel(&mut slow, radius);
+            assert!(fast == slow, "the edge at radius {radius}");
+        }
+    }
+
+    #[test]
+    fn only_the_cards_either_side_show_zoomed_out() {
+        let zoomed_out = reach(zoomed());
+        assert!(zoomed_out > 1.0 && zoomed_out < 2.0, "{zoomed_out}");
+        assert!((reach(1.0) - 1.0).abs() < 0.001, "at full size, only until the next card fills the display");
     }
 
     #[test]

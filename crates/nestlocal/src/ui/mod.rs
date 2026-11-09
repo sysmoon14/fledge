@@ -18,10 +18,13 @@
 //! Assistant, or no nlclient (Doom), it leaves everything alone.
 
 mod device;
+#[cfg(test)]
+mod film;
 mod icons;
 mod machine;
 mod model;
 mod paint;
+mod prof;
 mod screens;
 mod zoom;
 
@@ -201,6 +204,7 @@ pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
         };
         // An owner file from before a restart names a pid that may be reused.
         device::own(false);
+        device::favour();
         paint::for_panel();
         let _ = std::thread::Builder::new().name("ui-warm".into()).spawn(paint::warm);
         // The thermostat's own commands (an update's install) may start work
@@ -235,10 +239,17 @@ struct Runtime {
     /// and zoomed out (zoom::shrink; the thermostat's under 0).
     cards: std::collections::HashMap<usize, device::Frame>,
     shrunk: std::collections::HashMap<usize, device::Frame>,
-    /// Each media card's progress bar as drawn, in pixels, and when they
-    /// were last looked at: a card is drawn again as its bar moves.
-    progress: std::collections::HashMap<usize, u32>,
+    /// What each card's frame was drawn from, and the cards whose frames
+    /// are out of date: kept showing while the cards move (drawing one
+    /// takes several frames' time), drawn again once they rest.
+    drawn: std::collections::HashMap<usize, Drawn>,
+    stale: std::collections::HashSet<usize>,
+    /// When the cards were last checked against what they were drawn from
+    /// (a media card's progress bar moves by itself).
     progress_checked: Instant,
+    /// Whether the last turn of the loop showed a frame: the display paces
+    /// the next (device::Display's flip waits for it), so no wait before it.
+    showed: bool,
     /// The wakes Home Assistant asked for that were done, and when the
     /// display was last kept lit for it.
     wakes: u64,
@@ -268,6 +279,8 @@ struct Runtime {
     /// A value screen kept between frames (paint::Live): what it was drawn
     /// from, the frame, and what changes it.
     live: Option<(String, paint::Canvas, paint::Live)>,
+    /// The glance, while its line of what's on scrolls.
+    ticker: Option<Ticker>,
     last_frame: Instant,
     last_check: Instant,
     nlclient: bool,
@@ -323,6 +336,72 @@ struct Runtime {
     /// Frames of the animation under way: how many, how long all told, the
     /// longest.
     frames: (u32, Duration, Duration),
+    /// Where those frames' time went (prof), all told and in the longest.
+    spent: ([u32; prof::PARTS], [u32; prof::PARTS]),
+    /// When the last frame showed, the time between frames one after the
+    /// other all told, how many those were, and how many came later than
+    /// the display's next refresh but one.
+    paced: (Option<Instant>, Duration, u32, u32),
+}
+
+/// What a card's frame shows: its card (none for Settings), whether a
+/// scene's says it ran, and a media card's progress bar in pixels.
+#[derive(Clone, PartialEq)]
+struct Drawn {
+    card: Option<Card>,
+    done: bool,
+    progress: Option<u32>,
+}
+
+impl Drawn {
+    /// Whether `other` is the same card showing something else, rather than
+    /// another card in its place.
+    fn same_card(&self, other: &Drawn) -> bool {
+        match (&self.card, &other.card) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::mem::discriminant(a) == std::mem::discriminant(b) && card_name(a) == card_name(b),
+            _ => false,
+        }
+    }
+}
+
+fn card_name(card: &Card) -> &str {
+    match card {
+        Card::Lights(card) => &card.name,
+        Card::Climate(card) => &card.name,
+        Card::Media(card) => &card.name,
+        Card::Action(card) => &card.name,
+        Card::Camera(card) => &card.name,
+        Card::Options(card) => &card.name,
+        Card::Cover(card) => &card.name,
+        Card::Unknown => "",
+    }
+}
+
+/// The glance with a line too long to show whole, scrolling through its
+/// place: what it shows (screens::glance_key), its still part and the frame
+/// with the words on it, how far the words go before they are back where
+/// they began, since when they have been going, and how far along they
+/// were last drawn.
+struct Ticker {
+    key: String,
+    still: paint::Canvas,
+    canvas: paint::Canvas,
+    round: f32,
+    since: Instant,
+    shown: f32,
+}
+
+/// How long the glance's line rests at its start, and how fast it then
+/// scrolls, in pixels a second: slow enough to read across a room.
+const TICKER_REST: f32 = 1.8;
+const TICKER_SPEED: f32 = 36.0;
+
+/// How far along the line is, `elapsed` seconds after it began, going
+/// `round` pixels before it's back at its start.
+fn ticker_offset(elapsed: f32, round: f32) -> f32 {
+    let along = elapsed % (TICKER_REST + round / TICKER_SPEED);
+    if along < TICKER_REST { 0.0 } else { (along - TICKER_REST) * TICKER_SPEED }
 }
 
 struct Glide {
@@ -355,6 +434,11 @@ const LONG_PRESS: Duration = Duration::from_millis(600);
 /// Settings: it was left.
 const SETTINGS_LEFT: u32 = 4;
 
+/// A frame this long after the one before came late: the display, at 60 Hz,
+/// showed the one before twice. And a gap this long is no movement at all.
+const LATE: Duration = Duration::from_millis(21);
+const LULL: Duration = Duration::from_millis(150);
+
 /// How fast what shows catches up with the ring: most of the way in this.
 const FOLLOW: f32 = 0.04;
 /// How fast the cards zoom out as the ring starts, and in as they settle.
@@ -368,12 +452,13 @@ impl Runtime {
             ui, sender, fonts, display, input, beeper: device::Beeper::open(), machine: Machine::new(now),
             generation: u64::MAX, saved: None, home: None, transition: Transition::Cut, view: None,
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
-            progress: Default::default(), progress_checked: Instant::now(), wakes: 0, kept_on: Instant::now(),
+            drawn: Default::default(), stale: Default::default(), progress_checked: Instant::now(), showed: false,
+            wakes: 0, kept_on: Instant::now(),
             alerts: 0, ran: None, glance_minute: 0, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
             seen: (SEEN_FAR.load(std::sync::atomic::Ordering::Relaxed), SEEN_NEAR.load(std::sync::atomic::Ordering::Relaxed)),
             rest: false, black: false, beat: 0, last_beat: now,
-            scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
-            last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
+            scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, ticker: None, last_frame: now,
+            last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(), spent: Default::default(), paced: Default::default(),
             pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
             nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
             recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
@@ -389,12 +474,16 @@ impl Runtime {
         self.machine.fledge = std::path::Path::new(THEME).exists();
         paint::set_theme(if self.machine.fledge { paint::Theme::Fledge } else { paint::Theme::Nest });
         loop {
-            // A frame each 8 ms while anything moves; otherwise input or time.
+            // A frame each 8 ms while anything moves (the cards as fast as the
+            // display takes them); otherwise input or time.
             // Quick while anything moves; a slower beat when there's nothing
             // to show (no cards, or asleep on nlclient's dial), to wake the
             // unit less, as input still ends the wait at once.
             let idle = matches!(self.machine.mode, Mode::Idle) || (self.machine.mode == Mode::Home && !device::lit());
-            let wait = if self.animating() || self.pressed.is_some() || self.back_since.is_some() {
+            let wait = if self.moving() && std::mem::take(&mut self.showed) {
+                // The cards on the move: the display's flip paces the frames.
+                0
+            } else if self.animating() || self.pressed.is_some() || self.back_since.is_some() {
                 8
             } else if idle {
                 250
@@ -404,7 +493,8 @@ impl Runtime {
             let events = self.input.wait(Duration::from_millis(wait));
             let now = Instant::now();
             let mut effects = Vec::new();
-            if now.duration_since(self.last_check) >= Duration::from_secs(2) {
+            // Not while the cards move: looking through /proc costs a frame.
+            if now.duration_since(self.last_check) >= Duration::from_secs(2) && !self.moving() {
                 self.last_check = now;
                 self.nlclient = !crate::pids("nlclient").is_empty();
                 let rests = device::rests();
@@ -417,8 +507,7 @@ impl Runtime {
                 let (generation, cards) = self.ui.snapshot();
                 self.generation = generation;
                 self.machine.set_cards(cards, &mut effects);
-                self.cards.clear();
-                self.shrunk.clear();
+                self.revalidate();
                 // A notification's picture may come after it.
                 let key = self.machine.alert.as_ref().and_then(|a| a.picture.clone());
                 if let (Some(alert), Some(key)) = (&mut self.machine.alert, key) {
@@ -426,7 +515,7 @@ impl Runtime {
                 }
             }
             self.machine.set_active(self.nlclient, now, &mut effects);
-            if now.duration_since(self.nest_checked) >= Duration::from_secs(1) {
+            if now.duration_since(self.nest_checked) >= Duration::from_secs(1) && !self.moving() {
                 self.nest_checked = now;
                 self.refresh_nest();
             }
@@ -477,11 +566,8 @@ impl Runtime {
             }
             if self.machine.ran != self.ran {
                 // A scene's card says it ran, then goes back.
-                for (slot, _) in [self.ran, self.machine.ran].into_iter().flatten() {
-                    self.cards.remove(&(slot + 1));
-                    self.shrunk.remove(&(slot + 1));
-                }
                 self.ran = self.machine.ran;
+                self.revalidate();
             }
             let nest_alerts = NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed);
             if nest_alerts != self.nest_alerts {
@@ -594,21 +680,26 @@ impl Runtime {
             let elapsed = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
             self.last_frame = now;
             let swept = self.sweep(elapsed);
+            if self.machine.mode != Mode::Glance {
+                self.ticker = None;
+            }
             let mut dirty = self.machine.take_dirty() | std::mem::take(&mut self.force_draw) || self.pulse.is_some()
-                || self.gliding() || self.recolour.is_some();
+                || self.gliding() || self.recolour.is_some() || self.ticker_due();
             if self.machine.mode == Mode::Glance && unix_now() as i64 / 60 != self.glance_minute {
                 // The glance's clock, as the minute turns.
                 self.glance_minute = unix_now() as i64 / 60;
                 dirty = true;
             }
             if now.duration_since(self.progress_checked) >= Duration::from_millis(500) {
+                // A media card's progress bar has moved a pixel.
                 self.progress_checked = now;
-                dirty |= self.progress_moved();
+                dirty |= self.revalidate();
             }
             if self.machine.owns() && self.display.lost() {
                 // The display was panned away (as it lit): show the UI again, whole.
                 dirty = true;
                 self.live = None;
+                self.ticker = None;
             }
             if dirty && self.machine.position().is_none() {
                 // A light switched in a list shows on its card: the cards
@@ -617,8 +708,7 @@ impl Runtime {
             }
             if self.cards_stale && self.machine.position().is_some() {
                 self.cards_stale = false;
-                self.cards.clear();
-                self.shrunk.clear();
+                self.revalidate();
             }
             if self.machine.owns() {
                 let started = Instant::now();
@@ -636,9 +726,24 @@ impl Runtime {
                         }
                     }
                 };
+                let spent = prof::take();
+                self.showed = drew;
                 if drew {
                     let took = started.elapsed();
+                    if took > self.frames.2 {
+                        self.spent.1 = spent;
+                    }
+                    for (sum, part) in self.spent.0.iter_mut().zip(spent) {
+                        *sum += part;
+                    }
                     self.frames = (self.frames.0 + 1, self.frames.1 + took, self.frames.2.max(took));
+                    let shown = Instant::now();
+                    if let Some(gap) = self.paced.0.map(|last| shown.duration_since(last)).filter(|gap| *gap < LULL) {
+                        let late = (gap > LATE) as u32;
+                        self.paced = (Some(shown), self.paced.1 + gap, self.paced.2 + 1, self.paced.3 + late);
+                    } else {
+                        self.paced.0 = Some(shown);
+                    }
                 }
             } else {
                 self.view = None;
@@ -665,12 +770,18 @@ impl Runtime {
             }
             if !self.animating() && self.machine.mode != Mode::Idle && !self.cards_stale {
                 // One card at a time while nothing moves, so the first turn
-                // finds them all drawn.
-                let deck = self.machine.deck().len();
-                if let Some(index) = (1..deck).find(|i| !self.cards.contains_key(i)) {
+                // finds them all drawn and up to date: those nearest what
+                // shows first.
+                let deck = self.machine.deck().len() as i64;
+                let at = self.view.map_or(0, |view| view.round() as i64);
+                let nearest = (0..deck).flat_map(|d| [at - d, at + d + 1]).filter(|k| (0..deck).contains(k));
+                let keys: Vec<usize> = nearest.map(|k| self.key(k)).filter(|&index| index != 0).collect();
+                if let Some(&index) = keys.iter().find(|i| self.stale.contains(i) || !self.cards.contains_key(i)) {
                     self.prepare_key(index);
-                } else if let Some(index) = (1..deck).find(|i| !self.shrunk.contains_key(i)) {
-                    let shrunk = zoom::shrink(&self.cards[&index]);
+                    // Shown, if the cards are: it may be one of those showing.
+                    self.force_draw |= self.view.is_some();
+                } else if let Some(&index) = keys.iter().find(|i| !self.shrunk.contains_key(i) && self.cards.contains_key(i)) {
+                    let shrunk = prof::time(prof::Part::Shrink, || zoom::shrink(&self.cards[&index]));
                     self.shrunk.insert(index, shrunk);
                 }
             }
@@ -678,22 +789,37 @@ impl Runtime {
                 // Only a movement with a frame that missed the display's
                 // 60 Hz: anything else is as it should be.
                 let (count, total, longest) = std::mem::take(&mut self.frames);
-                if longest > Duration::from_millis(17) {
-                    logf!("ui: {count} frames, {:.1} ms each, the longest {} ms",
-                          total.as_secs_f32() * 1000.0 / count as f32, longest.as_millis());
+                let (all, worst) = std::mem::take(&mut self.spent);
+                let (_, span, gaps, late) = std::mem::take(&mut self.paced);
+                if longest > Duration::from_millis(17) || late * 10 > gaps {
+                    let rate = if gaps > 0 { gaps as f32 / span.as_secs_f32() } else { 0.0 };
+                    logf!("ui: {count} frames, {:.1} ms each ({}), the longest {} ms ({}); {rate:.0} a second, {late} late",
+                          total.as_secs_f32() * 1000.0 / count as f32, prof::describe(&all, count),
+                          longest.as_millis(), prof::describe(&worst, 1));
                 }
             }
         }
     }
 
-    /// Whether something on the display is on its way somewhere.
-    fn animating(&self) -> bool {
+    /// Whether the cards are on their way somewhere: following the ring,
+    /// or zooming.
+    fn moving(&self) -> bool {
         let following = match (self.view, self.machine.position()) {
             (Some(view), Some(target)) => (view - self.nearest(view, target)).abs() > 0.001,
             _ => false,
         };
         let zooming = self.view.is_some() && (self.zoom - self.zoom_target()).abs() > 0.002;
-        following || zooming || self.sweeping() || self.pulse.is_some() || self.gliding()
+        following || zooming
+    }
+
+    /// Whether the glance's scrolling line has moved on since it was drawn.
+    fn ticker_due(&self) -> bool {
+        self.ticker.as_ref().is_some_and(|t| ticker_offset(t.since.elapsed().as_secs_f32(), t.round) != t.shown)
+    }
+
+    /// Whether something on the display is on its way somewhere.
+    fn animating(&self) -> bool {
+        self.moving() || self.sweeping() || self.pulse.is_some() || self.gliding() || self.ticker.is_some()
             || (self.now_shown.0 - self.now_shown.1).abs() > 0.01 || self.recolour.is_some()
     }
 
@@ -888,13 +1014,15 @@ impl Runtime {
         let shrunk = self.zoom < 0.95;
         let z = if (self.zoom - zoom::zoomed()).abs() < 0.003 { zoom::zoomed() } else { self.zoom };
         let count = self.machine.deck().len() as i64;
-        for k in (at.floor() as i64 - 2).max(0)..=(at.ceil() as i64 + 2).min(count - 1) {
+        // Only the cards that show: the rest are drawn while nothing moves.
+        let reach = zoom::reach(z);
+        for k in ((at - reach).ceil() as i64).max(0)..=((at + reach).floor() as i64).min(count - 1) {
             self.prepare(k);
             let index = self.key(k);
             if shrunk && !self.shrunk.contains_key(&index) {
                 let full = if index == 0 { self.home.clone() } else { self.cards.get(&index).cloned() };
                 if let Some(full) = full {
-                    self.shrunk.insert(index, zoom::shrink(&full));
+                    self.shrunk.insert(index, prof::time(prof::Part::Shrink, || zoom::shrink(&full)));
                 }
             }
         }
@@ -913,17 +1041,20 @@ impl Runtime {
                 cards.get(&index).map(Vec::as_slice)
             }
         };
-        zoom::compose(&mut self.scratch, at, z, if shrunk { zoom::zoomed() } else { 1.0 }, get);
+        let scale = if shrunk { zoom::zoomed() } else { 1.0 };
+        prof::time(prof::Part::Compose, || zoom::compose(&mut self.scratch, at, z, scale, get));
         // The chosen card's name above and the dots under, as they zoom
         // out; the name fades out and in between cards.
         let fade = ((1.0 - self.zoom) / (1.0 - zoom::zoomed())).clamp(0.0, 1.0);
         let nearest = at.round().clamp(0.0, count as f32 - 1.0) as usize;
         let title = fade * (1.0 - 2.0 * (at - at.round()).abs()).clamp(0.0, 1.0);
         let name = self.name(nearest);
-        paint::around_cards(&mut self.scratch, &self.fonts, &name, title, count as usize, nearest, fade);
-        if self.machine.hint {
-            paint::hint(&mut self.scratch, &self.fonts, "Turn to browse · press to open");
-        }
+        prof::time(prof::Part::Overlay, || {
+            paint::around_cards(&mut self.scratch, &self.fonts, &name, title, count as usize, nearest, fade);
+            if self.machine.hint {
+                paint::hint(&mut self.scratch, &self.fonts, "Turn to browse · press to open");
+            }
+        });
         self.display.show(&self.scratch);
     }
 
@@ -946,24 +1077,59 @@ impl Runtime {
         }
     }
 
-    /// Forgets each media card whose progress bar has moved a pixel, so it
-    /// is drawn again; whether any had.
-    fn progress_moved(&mut self) -> bool {
-        let now = unix_now();
-        let mut moved = false;
-        for slot in self.machine.deck() {
-            let Slot::Card(slot) = slot else { continue };
-            let index = slot + 1;
-            let Some(Card::Media(card)) = self.machine.cards.cards.get(slot) else { continue };
-            let Some(done) = card.progress(now) else { continue };
-            let pixels = (done * screens::PROGRESS_WIDTH) as u32;
-            if self.progress.insert(index, pixels).is_some_and(|was| was != pixels) {
-                self.cards.remove(&index);
-                self.shrunk.remove(&index);
-                moved = true;
+    /// What the card with frame key `index` would be drawn from now; None
+    /// for no card there.
+    fn source(&self, index: usize) -> Option<Drawn> {
+        let count = self.machine.cards.cards.len();
+        if index == 0 {
+            return None;
+        }
+        if index > count {
+            return Some(Drawn { card: None, done: false, progress: None });
+        }
+        let slot = index - 1;
+        let card = self.machine.cards.cards.get(slot).filter(|card| !matches!(card, Card::Unknown))?;
+        let progress = match card {
+            Card::Media(card) => card.progress(unix_now()).map(|done| (done * screens::PROGRESS_WIDTH) as u32),
+            _ => None,
+        };
+        Some(Drawn { card: Some(card.clone()), done: self.machine.ran.is_some_and(|(ran, _)| ran == slot), progress })
+    }
+
+    /// Checks each card's frame against what it would be drawn from now: a
+    /// card that shows something else is out of date (stale), and a frame
+    /// of a card no longer there is forgotten. Returns whether any changed.
+    fn revalidate(&mut self) -> bool {
+        let mut changed = false;
+        let indices: Vec<usize> = self.cards.keys().copied().collect();
+        for index in indices {
+            let source = self.source(index);
+            match (self.drawn.get(&index), &source) {
+                (Some(drawn), Some(source)) if drawn == source => {}
+                (Some(drawn), Some(source)) if drawn.same_card(source) => changed |= self.stale.insert(index),
+                _ => {
+                    self.forget(index);
+                    changed = true;
+                }
             }
         }
-        moved
+        changed
+    }
+
+    /// Forgets the frames of the card with key `index`.
+    fn forget(&mut self, index: usize) {
+        self.cards.remove(&index);
+        self.shrunk.remove(&index);
+        self.drawn.remove(&index);
+        self.stale.remove(&index);
+    }
+
+    /// Forgets every card's frames.
+    fn forget_all(&mut self) {
+        self.cards.clear();
+        self.shrunk.clear();
+        self.drawn.clear();
+        self.stale.clear();
     }
 
     /// Card `at`'s key (wrapping round the deck) in the frames drawn: the
@@ -983,31 +1149,34 @@ impl Runtime {
         self.prepare_key(self.key(at));
     }
 
-    /// Draws the card with frame key `index` if it isn't yet.
+    /// Draws the card with frame key `index` if it isn't yet, or if it is
+    /// out of date and the cards are at rest: while they move, the frame it
+    /// has shows.
     fn prepare_key(&mut self, index: usize) {
-        if index == 0 || self.cards.contains_key(&index) {
+        if index == 0 || self.cards.contains_key(&index) && !(self.stale.contains(&index) && !self.moving()) {
             return;
         }
-        let count = self.machine.cards.cards.len();
-        let card = |slot: usize| self.machine.cards.cards.get(slot);
-        let screen = match if index > count { Slot::Settings } else { Slot::Card(index - 1) } {
-            Slot::Card(slot) => match card(slot) {
-                Some(Card::Lights(card)) => Screen::LightsCard { card },
-                Some(Card::Climate(card)) => Screen::ClimateCard { card, target: None },
-                Some(Card::Media(card)) => Screen::MediaCard { card, volume: None, progress: card.progress(unix_now()) },
-                Some(Card::Action(card)) => {
-                    Screen::ActionCard { card, done: self.machine.ran.is_some_and(|(ran, _)| ran == slot) }
-                }
-                Some(Card::Camera(card)) => Screen::CameraCard { card },
-                Some(Card::Options(card)) => Screen::OptionsCard { card },
-                Some(Card::Cover(card)) => Screen::CoverCard { card },
-                Some(Card::Unknown) | None => return,
-            },
-            _ => Screen::SettingsCard,
+        let Some(source) = self.source(index) else { return };
+        let screen = match &source.card {
+            Some(Card::Lights(card)) => Screen::LightsCard { card },
+            Some(Card::Climate(card)) => Screen::ClimateCard { card, target: None },
+            Some(Card::Media(card)) => {
+                let progress = source.progress.map(|pixels| pixels as f32 / screens::PROGRESS_WIDTH);
+                Screen::MediaCard { card, volume: None, progress }
+            }
+            Some(Card::Action(card)) => Screen::ActionCard { card, done: source.done },
+            Some(Card::Camera(card)) => Screen::CameraCard { card },
+            Some(Card::Options(card)) => Screen::OptionsCard { card },
+            Some(Card::Cover(card)) => Screen::CoverCard { card },
+            Some(Card::Unknown) => return,
+            None => Screen::SettingsCard,
         };
-        let mut frame = device::frame(screens::draw(&self.fonts, &screen, None));
-        zoom::round(&mut frame);
+        let mut frame = prof::time(prof::Part::Draw, || device::frame(screens::draw(&self.fonts, &screen, None)));
+        prof::time(prof::Part::Round, || zoom::round(&mut frame));
         self.cards.insert(index, frame);
+        self.shrunk.remove(&index);
+        self.stale.remove(&index);
+        self.drawn.insert(index, source);
     }
 
     /// Card `at` as a frame (nlclient's for the thermostat).
@@ -1178,8 +1347,7 @@ impl Runtime {
                 paint::set_theme(if fledge { paint::Theme::Fledge } else { paint::Theme::Nest });
                 logf!("ui: the {} theme", if fledge { "Fledge" } else { "Nest" });
                 // Everything drawn so far is in the other theme.
-                self.cards.clear();
-                self.shrunk.clear();
+                self.forget_all();
                 self.stills.clear();
                 self.live = None;
                 self.glide = None;
@@ -1244,9 +1412,9 @@ impl Runtime {
     fn draw_home(&mut self) {
         let Some(nest) = &self.machine.nest else { return };
         let screen = Screen::NestCard { nest, now: unix_now() };
-        let mut frame = device::frame(screens::draw(&self.fonts, &screen, None));
-        zoom::round(&mut frame);
-        self.shrunk.insert(0, zoom::shrink(&frame));
+        let mut frame = prof::time(prof::Part::Draw, || device::frame(screens::draw(&self.fonts, &screen, None)));
+        prof::time(prof::Part::Round, || zoom::round(&mut frame));
+        self.shrunk.insert(0, prof::time(prof::Part::Shrink, || zoom::shrink(&frame)));
         self.home = Some(frame);
     }
 
@@ -1423,6 +1591,41 @@ impl Runtime {
         let sweep = self.sweep.as_ref().map(|(_, shown)| *shown);
         let fade = self.transition == Transition::Fade || std::mem::take(&mut self.fade_next);
         self.transition = Transition::Cut;
+        if let Screen::Glance { glance, cards, now } = &screen {
+            if let Some(round) = screens::glance_scroll(&self.fonts, cards) {
+                // A line too long for its place scrolls: the glance drawn
+                // once, then only the line, where it is.
+                let key = screens::glance_key(glance, cards, *now);
+                let fresh = !matches!(&self.ticker, Some(ticker) if ticker.key == key);
+                if fresh {
+                    let still = screens::glance_still(&self.fonts, glance, cards, *now);
+                    // The same words go on from where they were, as the minute turns.
+                    let since = match &self.ticker {
+                        Some(ticker) if ticker.round == round => ticker.since,
+                        _ => Instant::now(),
+                    };
+                    self.ticker = Some(Ticker { key, canvas: still.clone(), still, round, since, shown: -1.0 });
+                }
+                let ticker = self.ticker.as_mut().expect("just made");
+                ticker.shown = ticker_offset(ticker.since.elapsed().as_secs_f32(), round);
+                let columns = screens::glance_words(&mut ticker.canvas, &ticker.still, &self.fonts, cards, ticker.shown);
+                (self.live, self.glide) = (None, None);
+                if fresh || fade {
+                    let frame = ticker.canvas.pixmap.data().to_vec();
+                    if fade {
+                        let from = self.display.save();
+                        self.animate(&from, &frame, Transition::Fade);
+                    }
+                    self.display.show(&frame);
+                } else if let Some((first, last)) = columns {
+                    // An upright column is a framebuffer row.
+                    let ticker = self.ticker.as_ref().expect("just made");
+                    self.display.show_rows(ticker.canvas.pixmap.data(), first as usize, last as usize);
+                }
+                return;
+            }
+        }
+        self.ticker = None;
         if let Some((selected, first)) = screens::list_place(&screen) {
             let frame = Self::draw_list(&mut self.glide, &self.fonts, &screen, selected - first, fade);
             if fade {
@@ -1628,6 +1831,32 @@ fn ease(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_card_showing_something_else_is_the_same_card_and_another_in_its_place_is_not() {
+        let cards = Cards::parse(br#"{"cards":[
+            {"kind":"climate","id":"climate.a","name":"Kitchen","icon":"","mode":"heat","action":"idle","target":19,"current":21,"min":5,"max":35,"step":1},
+            {"kind":"climate","id":"climate.a","name":"Kitchen","icon":"","mode":"heat","action":"heating","target":22,"current":21,"min":5,"max":35,"step":1},
+            {"kind":"climate","id":"climate.b","name":"Utility","icon":"","mode":"heat","action":"idle","target":19,"current":21,"min":5,"max":35,"step":1}]}"#).unwrap();
+        let drawn = |i: usize, done| Drawn { card: Some(cards.cards[i].clone()), done, progress: None };
+        let settings = Drawn { card: None, done: false, progress: None };
+        assert!(drawn(0, false) == drawn(0, false));
+        assert!(drawn(0, false) != drawn(1, false) && drawn(0, false).same_card(&drawn(1, false)), "heating now: out of date");
+        assert!(drawn(0, false) != drawn(0, true) && drawn(0, false).same_card(&drawn(0, true)), "a scene that ran");
+        assert!(!drawn(0, false).same_card(&drawn(2, false)), "another card there");
+        assert!(!drawn(0, false).same_card(&settings) && settings.same_card(&settings));
+    }
+
+    #[test]
+    fn the_glance_s_line_rests_then_scrolls_and_comes_round() {
+        let round = 360.0;
+        assert_eq!(ticker_offset(0.0, round), 0.0);
+        assert_eq!(ticker_offset(TICKER_REST - 0.1, round), 0.0, "resting at its start");
+        assert!((ticker_offset(TICKER_REST + 1.0, round) - TICKER_SPEED).abs() < 0.01);
+        let period = TICKER_REST + round / TICKER_SPEED;
+        assert!(ticker_offset(period - 0.01, round) > round - 1.0, "nearly round");
+        assert_eq!(ticker_offset(period + 0.5, round), 0.0, "and at its start again");
+    }
 
     #[test]
     fn going_in_and_out_fades_and_the_rest_cuts() {
@@ -1898,7 +2127,8 @@ mod shots {
         save(&screens::draw(&fonts, &Screen::LightWarmth { light: &tunable, value: 2700 }, None), &format!("{out}/9b-warmth.png"));
         save(&screens::draw(&fonts, &Screen::LightHue { light: &tunable, value: 200 }, None), &format!("{out}/9c-colour.png"));
         let mut with_art = media.clone();
-        let size = model::ART_MAX * 7 / 10;
+        // The size the integration sends album art at.
+        let size = 168;
         let rgb = (0..size * size).flat_map(|i| [(i % size * 255 / size) as u8, (i / size * 255 / size) as u8, 160]);
         with_art.art = Some(Arc::new(Art { size, rgb: rgb.collect() }));
         save(&screens::draw(&fonts, &Screen::MediaCard { card: &with_art, volume: None, progress: Some(0.4) }, None), &format!("{out}/3b-art.png"));
@@ -1914,7 +2144,7 @@ mod shots {
         };
         let now = 1_794_172_380.0;
         let heating = state(serde_json::json!({"action": "heating", "target": 21.5,
-            "time_to_target": "2026-11-09T08:10:00Z", "hot_water_boost": "60"}));
+            "time_to_target": "2026-11-08T21:35:00Z", "hot_water_boost": "60"}));
         let shots = [
             ("t1-nest-idle", state(serde_json::json!({}))),
             ("t2-nest-heating", heating.clone()),
@@ -1940,13 +2170,13 @@ mod shots {
              &format!("{out}/t9-eco-set.png"));
         save(&screens::draw(&fonts, &Screen::ThemePick { fledge: true }, None), &format!("{out}/t10-theme.png"));
         let cold = state(serde_json::json!({"action": "heating", "target": 22.0, "current_temperature": 19.5,
-            "time_to_target": "2026-11-09T08:13:00Z"}));
+            "time_to_target": "2026-11-08T21:38:00Z"}));
         for (name, phase) in [("p1-pulse-start", Some(0.15)), ("p2-pulse-mid", Some(0.4)), ("p3-pulse-fade", Some(0.85)), ("p0-rest", None)] {
             save(&screens::draw(&fonts, &Screen::NestSet { nest: &cold, target: 22.0, pulse: phase, setting: false, shown: None }, None),
                  &format!("{out}/{name}.png"));
         }
         let scheduled = state(serde_json::json!({"action": "heating", "target": 22.0, "current_temperature": 21.0,
-            "time_to_target": "2026-11-09T08:13:00Z", "next_change": "18:00"}));
+            "time_to_target": "2026-11-08T21:38:00Z", "next_change": "18:00"}));
         save(&screens::draw(&fonts, &Screen::NestCard { nest: &scheduled, now }, None), &format!("{out}/n1-card.png"));
         save(&screens::draw(&fonts, &Screen::NestSet { nest: &scheduled, target: 22.5, pulse: None, setting: true, shown: None }, None),
              &format!("{out}/n2-set-up.png"));

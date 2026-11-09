@@ -1055,6 +1055,58 @@ fn text_with(canvas: &mut Canvas, font: &FontArc, size: f32, x: f32, y: f32, tex
     x
 }
 
+/// A line of words too long for its place, scrolling through it: `text`
+/// (`words` wide) in the window `width` wide from `left`, `offset` pixels
+/// along, and after `gap` the same again coming in behind it, so the line
+/// goes round. Its ends fade into what's behind (`still`: the canvas as it
+/// is without the words). Returns the upright columns it drew in.
+pub struct Ticker<'a> {
+    pub font: &'a FontArc,
+    pub size: f32,
+    pub text: &'a str,
+    pub words: f32,
+    pub left: f32,
+    pub width: f32,
+    pub baseline: f32,
+    pub colour: [u8; 3],
+    pub gap: f32,
+}
+
+pub fn ticker(canvas: &mut Canvas, still: &Canvas, line: &Ticker, offset: f32) -> (u32, u32) {
+    const FADE: i32 = 22;
+    let (x0, x1) = (line.left.floor() as i32, (line.left + line.width).ceil() as i32);
+    let (top, height) = ((line.baseline - line.size * 1.05).floor() as i32, (line.size * 1.5).ceil() as usize);
+    canvas.restore(still, 0, top, SIZE as usize, height);
+    // At rest its first letter stands clear of the faded end.
+    let origin = line.left + FADE as f32 - offset;
+    for start in [origin, origin + line.words + line.gap] {
+        if start < x1 as f32 && start + line.words > x0 as f32 {
+            text_at(canvas, line.font, line.size, start, line.baseline, line.text, 0.0, line.colour, 1.0);
+        }
+    }
+    // Only in its window: the rest as it was, and the ends fading out.
+    canvas.restore(still, 0, top, x0.max(0) as usize, height);
+    canvas.restore(still, x1, top, (SIZE as i32 - x1).max(0) as usize, height);
+    let (y0, y1) = (top.max(0) as u32, (top + height as i32).clamp(0, SIZE as i32) as u32);
+    for step in 0..FADE {
+        let keep = (step as f32 + 0.5) / FADE as f32;
+        for x in [x0 + step, x1 - 1 - step] {
+            if !(0..SIZE as i32).contains(&x) {
+                continue;
+            }
+            for y in y0..y1 {
+                let at = canvas.at(x as u32, y);
+                let (from, to) = (still.pixmap.data(), canvas.pixmap.data_mut());
+                for k in 0..3 {
+                    let (old, new) = (from[at + k] as f32, to[at + k] as f32);
+                    to[at + k] = (old + (new - old) * keep).round() as u8;
+                }
+            }
+        }
+    }
+    (x0.clamp(0, SIZE as i32 - 1) as u32, (x1 - 1).clamp(0, SIZE as i32 - 1) as u32)
+}
+
 /// Draws `text` centred on `cx`.
 #[allow(clippy::too_many_arguments)]
 pub fn text(canvas: &mut Canvas, font: &FontArc, size: f32, cx: f32, y: f32, text: &str, spacing: f32, c: [u8; 3]) {
@@ -1246,6 +1298,39 @@ mod tests {
         // tiny-skia samples edges finer along one axis than the other.
         assert!(worst <= 16, "differs by up to {worst} (antialiasing of turned paths)");
         assert_eq!(&p[panel.at(0, 0)..panel.at(0, 0) + 3], &[30, 20, 10]);
+    }
+
+    /// A scrolling line stays in its window, and comes round to where it began.
+    #[test]
+    fn a_ticker_draws_only_in_its_window_and_comes_round() {
+        let font = FontArc::try_from_slice(include_bytes!("fonts/DMSans-Medium.ttf")).unwrap();
+        let text = "2 lights on · playing The Hitchhiker's Guide to the Galaxy";
+        let words = measure(&font, 23.0, text, 0.0);
+        for panel in [false, true] {
+            let still = canvas_for([10, 20, 30], panel);
+            let line = Ticker { font: &font, size: 23.0, text, words, left: 95.0, width: 290.0, baseline: 412.0,
+                                colour: [255, 211, 154], gap: 72.0 };
+            let draw = |offset: f32| {
+                let mut canvas = still.clone();
+                let columns = ticker(&mut canvas, &still, &line, offset);
+                (canvas, columns)
+            };
+            let (start, columns) = draw(0.0);
+            assert_eq!(columns, (95, 384));
+            let differs = |canvas: &Canvas, x: u32, y: u32| {
+                let at = canvas.at(x, y);
+                canvas.pixmap.data()[at..at + 3] != still.pixmap.data()[at..at + 3]
+            };
+            let drawn = |canvas: &Canvas, columns: std::ops::Range<u32>| {
+                columns.flat_map(|x| (380..430).map(move |y| (x, y))).filter(|&(x, y)| differs(canvas, x, y)).count()
+            };
+            assert!(drawn(&start, 95..385) > 500, "the words show in the window (panel {panel})");
+            assert_eq!(drawn(&start, 0..95) + drawn(&start, 385..SIZE), 0, "and nowhere else");
+            let (later, _) = draw(140.0);
+            assert!(later.pixmap.data() != start.pixmap.data(), "it moves");
+            let (round, _) = draw(words + 72.0);
+            assert!(round.pixmap.data() == start.pixmap.data(), "and comes round to its start");
+        }
     }
 
     /// A Live ring drawn through a sweep ends as a ring drawn whole.
