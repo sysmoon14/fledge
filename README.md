@@ -138,9 +138,10 @@ network doesn't need internet access.
    arm64, riscv64; glibc 2.28+). Prebuilt downloads of the app aren't published
    yet: build it with the steps in [BUILDING.md](BUILDING.md) (on macOS,
    `sh utils/make_macos_app.sh` makes `dist/Fledge.app`).
-3. **Patch the thermostat:** open the app, tick the integrations on the Patch
-   page (MQTT for Home Assistant), fill in their settings, plug in the
-   thermostat, press **Start** and follow the prompts.
+3. **Set it up:** open the app and follow **Set up**: connect the thermostat,
+   give it your Home Assistant's MQTT broker, choose its features, then review
+   and patch. Review offers to back up the whole NAND first (**Back up, then
+   patch**, the default); take it on the first run.
 4. **In Home Assistant:** the thermostat appears through MQTT. Add the
    [Fledge integration](https://github.com/sysmoon14/fledge-homeassistant) to put
    your devices on its screen.
@@ -193,11 +194,17 @@ Logs go to `~/.local/share/fledge/logs/<timestamp>/fledge.log` (or under
 
 ## The app and the command line
 
-**App:** the Patch page sets up the integrations and patches the unit. The
-sidebar's other pages are Backups (the whole-NAND images the app keeps, with
-back up, restore and delete), Logs (every run's steps and log), About and, under
-Advanced, the 3rd generation's application boot and a serial console on a
-patched unit's USB root shell.
+**App:** Set up is one guided flow: Connect, Home Assistant (the broker, and
+updates through it), Features (blocking Google, Matter, Zigbee, SSH with a key
+it can create, and password login off unless you allow it, the USB console,
+Doom), then Review, which shows the choices,
+offers the whole-NAND backup and folds away the developer options (dry run,
+slot, device, entry point, overlay, another cloud, backplate simulator). The run
+shows in place, and Done says what to do next. The sidebar's other pages are
+Backups (the whole-NAND images the app keeps, with back up, restore and delete),
+Logs (every run's steps and log), About and, under Tools, the 3rd generation's
+application boot and a serial console on a patched unit's USB root shell. The
+external temperature is the command line's only (`--external-temperature`).
 
 **CLI (Linux and macOS):** the same executable, run with arguments, works from a
 terminal, over SSH or headless, with a few things the app doesn't have
@@ -220,12 +227,14 @@ Common options:
   --backup              Save the original root volume before patching
   --dry-run             List the changes, write nothing
   --mqtt <URL>          Relay to this MQTT broker
+  --updates             Install Fledge's signed releases from Home Assistant (needs --mqtt)
   --matter              Serve the unit over Matter (default code 0347-100-5534)
   --matter-thread       Serve Matter over Thread too (replaces Heat Link; excludes --zigbee)
   --zigbee              Join a Zigbee network as a router (replaces Heat Link)
   --external-temperature  Regulate from temperatures sent to it; turns off Bluetooth (3rd generation)
   --doom                Install Doom, launched from the Fledge page in the Nest's settings
   --ssh                 Run an SSH server on the unit
+  --ssh-key-only        SSH takes the --ssh-public-key only, refusing root's password
   --block-cloud         Cut the unit off from Nest's and Google's servers
 ```
 Run it with `--help` for every option.
@@ -235,17 +244,21 @@ you turned on: Matter's pairing code and QR, Zigbee pairing, and Doom.
 
 ## Updating
 
-- **The thermostat:** a patched unit with MQTT shows a Home Assistant update
+- **The thermostat:** a unit patched with updates on (the app's default with
+  Home Assistant; `--updates` on the command line) shows a Home Assistant update
   entity. Releases are signed; the unit checks the signature, installs, and
   rolls back by itself if the new build doesn't come up. It checks daily, and
-  whenever the Fledge integration updates.
+  whenever the Fledge integration updates. With updates off it never checks,
+  shows no update entity (and removes one an earlier patch left), and only a new
+  patch from the app brings it a newer build.
 - **The app:** release builds check for a newer release when they start and
   offer to install it. Development builds never update.
 
 ## Undo it
-- **Before the first run:** the app's Backups page, Back up unit (or
-  `fledge backup`) saves the whole NAND to a file, checked with a second
-  read. `fledge verify` compares a backup with the unit.
+- **Before the first run:** Review's **Back up, then patch**, or the app's
+  Backups page, Back up unit (or `fledge backup`), saves the whole NAND to a
+  file, checked with a second read. `fledge verify` compares a backup with
+  the unit.
 - **To go back to stock:** Restore to unit (or `fledge restore`) writes
   that backup back to the unit.
 - `--backup` also saves the original root volume before each patch.
