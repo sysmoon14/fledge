@@ -82,6 +82,26 @@ figcaption { font-size: 14px; color: var(--muted); margin-top: 8px; }
 footer { border-top: 1px solid var(--line); padding-block: 34px 60px; color: var(--muted); font-size: 14px; display: grid; gap: 8px; }
 footer p { max-width: 80ch; }
 
+/* Home Assistant: the integration's own page, in a window, by tab. */
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 34px; }
+.tabs button { font: inherit; font-size: 15px; font-weight: 500; color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 19px; height: 38px; padding: 0 16px; cursor: pointer; }
+.tabs button:hover { color: var(--ink); border-color: #2c3748; }
+.tabs button[aria-selected="true"] { color: var(--ink); background: var(--lift); border-color: var(--heat); }
+.tabs button:focus-visible { outline: 2px solid var(--heat-soft); outline-offset: 2px; }
+.window { margin-top: 16px; border-radius: 16px; overflow: hidden; border: 1px solid var(--line); background: #111318; box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8); }
+.window .bar { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; background: #171a21; border-bottom: 1px solid #1f2430; font-size: 13px; color: var(--muted); }
+.window .bar i { width: 10px; height: 10px; border-radius: 50%; background: #2a303b; }
+.window .bar span { margin-left: 10px; }
+.window img { width: 100%; height: auto; aspect-ratio: 32 / 25; object-fit: cover; object-position: top; }
+.window img[hidden] { display: none; }
+.tabcaption { margin-top: 14px; color: var(--muted); max-width: 70ch; min-height: 3.2em; }
+.feature { display: grid; gap: 18px; margin-top: 56px; }
+.feature > div { max-width: 66ch; }
+.feature p { color: var(--muted); margin-top: 10px; }
+.feature img { border-radius: 14px; border: 1px solid var(--line); height: auto; }
+.addha { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 40px; align-items: center; }
+.addha p { color: var(--muted); font-size: 15px; flex-basis: 100%; }
+
 @media (max-width: 820px) {
   .hero, .steps { grid-template-columns: minmax(0, 1fr); gap: 30px; }
   .hero { padding-block: 16px 52px; }
@@ -97,6 +117,7 @@ footer p { max-width: 80ch; }
     <a class="brand" href="./"><img src="fledge.svg" alt="">Fledge</a>
     <nav>
       <a class="wide" href="#cards">On the screen</a>
+      <a class="wide" href="#home-assistant">Home Assistant</a>
       <a class="wide" href="#setup">Set-up</a>
       <a href="https://github.com/sysmoon14/fledge">GitHub</a>
     </nav>
@@ -133,6 +154,41 @@ footer p { max-width: 80ch; }
   </div>
 </section>
 
+<section id="home-assistant">
+  <div class="wrap">
+    <h2>Arranged from Home Assistant.</h2>
+    <p class="intro">The Fledge integration adds its own page to Home Assistant's sidebar. Every card on it is drawn by a port of the code that draws it on the thermostat, live from your devices, so what you see there is what the Nest will show.</p>
+    <div class="tabs" role="tablist" aria-label="The Fledge page in Home Assistant">
+      <button role="tab" id="t-ring" aria-controls="p-ring" aria-selected="true" data-caption="Drag your devices into the ring's order, rename any of them for the Nest, and choose one to wake straight to. Turn the ring on the page to try the order before you save.">Arrange the ring</button>
+      <button role="tab" id="t-preview" aria-controls="p-preview" aria-selected="false" tabindex="-1" data-caption="Each card as the Nest will draw it, in Fledge's look or the Nest's own, with what a turn and a press will do.">See every card</button>
+      <button role="tab" id="t-wake" aria-controls="p-wake" aria-selected="false" tabindex="-1" data-caption="What the Nest shows when you walk up, when it sees you across the room, and how long the screen stays on.">Wake and presence</button>
+      <button role="tab" id="t-notify" aria-controls="p-notify" aria-selected="false" tabindex="-1" data-caption="Write a notification, send it to the Nest to see it, and copy it as an automation action.">Notifications</button>
+    </div>
+    <div class="window">
+      <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span>Home Assistant · Fledge</span></div>
+      <img role="tabpanel" id="p-ring" aria-labelledby="t-ring" src="ha/ring.webp" width="2560" height="2000" alt="The Fledge page's Cards tab: the ring order on the left (the Hallway thermostat, lights, heating zones, a speaker and a camera), the Kitchen heating zone drawn as the Nest shows it in the middle, heating to 21 degrees, and its settings on the right.">
+      <img role="tabpanel" id="p-preview" aria-labelledby="t-preview" src="ha/preview.webp" width="2560" height="2000" alt="The Cards tab on Bedroom Lights, drawn in the Nest's own look at 60 percent, with Wake straight to this card switched on." loading="lazy" hidden>
+      <img role="tabpanel" id="p-wake" aria-labelledby="t-wake" src="ha/wake.webp" width="2560" height="2000" alt="The Wake and presence tab: what the Nest wakes to, what someone across the room and someone close up see, how long the screen stays on, and the weather for the glance." loading="lazy" hidden>
+      <img role="tabpanel" id="p-notify" aria-labelledby="t-notify" src="ha/notify.webp" width="2560" height="2000" alt="The Notifications tab: a test notification, Washing's done, with a button to send it to the Nest, and the same notification as an automation action." loading="lazy" hidden>
+    </div>
+    <p class="tabcaption" id="tabcaption" aria-live="polite">Drag your devices into the ring's order, rename any of them for the Nest, and choose one to wake straight to. Turn the ring on the page to try the order before you save.</p>
+
+    <div class="feature">
+      <div>
+        <h3>The Nest's schedules, on your dashboards</h3>
+        <p>Two dashboard cards show the week's heating and hot water at a glance, and edit them: change a time or a temperature, copy a day to the rest of the week, and save. The Nest gets the whole schedule in one write.</p>
+      </div>
+      <img src="ha/schedules.webp" width="2560" height="1110" alt="Three dashboard cards: the week's heating schedule as orange bars by temperature, Monday's heating times being edited, and the hot water schedule's two-hour slots." loading="lazy">
+    </div>
+
+    <div class="addha">
+      <a class="button primary" href="https://my.home-assistant.io/redirect/hacs_repository/?owner=sysmoon14&amp;repository=fledge-homeassistant&amp;category=integration">Open in the Marketplace</a>
+      <a class="button quiet" href="https://my.home-assistant.io/redirect/config_flow_start/?domain=fledge">Add the integration</a>
+      <p>Download it, restart Home Assistant, then add it. Each button opens the right page in your own Home Assistant.</p>
+    </div>
+  </div>
+</section>
+
 <section>
   <div class="wrap">
     <h2>Still a Nest.</h2>
@@ -157,7 +213,7 @@ footer p { max-width: 80ch; }
       <ol>
         <li><div><h3>Plug the display into your computer</h3><p>Take it off its base and connect it with a micro-USB cable that carries data. The Fledge app runs on macOS, Windows and Linux.</p></div></li>
         <li><div><h3>Follow Set up in the app</h3><p>Give it your MQTT broker and choose what you want. It offers a full backup of the thermostat first, so you can always put it back exactly as it was.</p></div></li>
-        <li><div><h3>Add the integration in Home Assistant</h3><p>The thermostat appears by itself. The <a href="https://github.com/sysmoon14/fledge-homeassistant">Fledge integration</a> puts your devices on its screen, in the order you drag them into.</p></div></li>
+        <li><div><h3>Add the integration in Home Assistant</h3><p>The thermostat appears by itself. The <a href="#home-assistant">Fledge integration</a> puts your devices on its screen, in the order you drag them into.</p></div></li>
       </ol>
       <img src="app.png" alt="The Fledge app's Set up page, on its first step: Connect your thermostat, with a 3rd generation thermostat found over USB." loading="lazy">
     </div>
@@ -176,5 +232,29 @@ footer p { max-width: 80ch; }
     <p><a href="https://github.com/sysmoon14/fledge">sysmoon14/fledge</a> · <a href="https://github.com/sysmoon14/fledge-homeassistant">sysmoon14/fledge-homeassistant</a> · <a href="https://github.com/sysmoon14/fledge/releases">Releases</a></p>
   </div>
 </footer>
+<script>
+// The Home Assistant tabs: a click, or the arrow keys, shows that tab's picture.
+(() => {
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  const caption = document.getElementById("tabcaption");
+  const show = (tab, focus) => {
+    for (const t of tabs) {
+      const on = t === tab;
+      t.setAttribute("aria-selected", on);
+      t.tabIndex = on ? 0 : -1;
+      document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+    }
+    caption.textContent = tab.dataset.caption;
+    if (focus) tab.focus();
+  };
+  tabs.forEach((tab, i) => {
+    tab.addEventListener("click", () => show(tab));
+    tab.addEventListener("keydown", (e) => {
+      const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+      if (step) { e.preventDefault(); show(tabs[(i + step + tabs.length) % tabs.length], true); }
+    });
+  });
+})();
+</script>
 </body>
 </html>
