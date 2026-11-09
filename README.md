@@ -42,6 +42,17 @@ then hands it the rest of your home:
 The cards come with the **[Fledge integration for Home Assistant](https://github.com/sysmoon14/fledge-homeassistant)**:
 pick your devices, and choose (or automate) what the thermostat wakes to.
 
+> [!WARNING]
+> **Fledge has been tested on exactly one thermostat.** That's a Nest Learning
+> Thermostat (3rd generation) on Nest firmware **6.4-8**, a European model with
+> a Heat Link driving heating and hot water, set up with **MQTT and Home
+> Assistant**. Nothing else has been tested with Fledge: other generations, other
+> firmware versions, US or multi-stage wiring, heat pumps, cooling, Matter,
+> Zigbee and Thread. They may work, since Fledge builds on
+> [unfr0zen](https://github.com/unfr0zen/unfr0zen), which was tested more widely
+> ([Supported thermostats](#supported-thermostats)), but Fledge changes a lot on
+> top of it. If you run it on anything else, you are the first.
+
 > [!CAUTION]
 > **This rewrites the flash of the device that runs your heating.** A failed run
 > or a bad patch can leave the thermostat unbootable, or running without
@@ -87,7 +98,21 @@ screens come back for Nest's dial and More Nest settings.
 | Nest Learning Thermostat (2nd generation) | `j49` | TI AM3703 | ✅ | ✅ | ✅ | ✅ |
 | Nest Learning Thermostat (1st generation) | `diamond` | TI AM3703 | 🧪 | 🧪 | — | — |
 
-✅ tested on a unit · 🧪 built, not yet tested on a unit · — not available
+✅ tested on a unit by upstream unfr0zen · 🧪 built, not yet tested on a unit · — not available
+
+These ticks are **unfr0zen's** testing, before Fledge's changes. Fledge itself
+has only been tested on one unit:
+
+| | Generation | Nest firmware | Setup |
+|-|-|-|-|
+| Tested with Fledge | 3rd | 6.4-8 | European, Heat Link, heating and hot water, MQTT with Home Assistant |
+| Tested by upstream unfr0zen | 3rd | 5.9.4-5, 6.3-5, 6.4-8, 6.5-14 | |
+| Tested by upstream unfr0zen | 2nd | 5.9.4-5 | |
+
+Other firmware versions aren't blocked: the patch finds what it changes by its
+structure and keeps the stock nlclient beside the run log. Running Fledge on
+something not in the first row? [Open an issue](https://github.com/sysmoon14/fledge/issues/new)
+with the run log, whether it worked or not.
 
 The home screen cards are developed and tested on the 3rd generation.
 
