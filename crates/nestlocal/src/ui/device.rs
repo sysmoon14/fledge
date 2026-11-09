@@ -20,6 +20,8 @@ use std::time::Duration;
 
 
 pub const OWNER: &str = "/var/run/unfr0zen/screen.owner";
+const REST: &str = "/var/run/unfr0zen/screen.rest";
+const KEEPER_RESTS: &str = "/var/run/unfr0zen/keeper.rests";
 const RING: &str = "2280000.adc";
 const BUTTON: &str = "gpio-keys";
 const BEEPER: &str = "pwm-beeper";
@@ -33,7 +35,7 @@ const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
 
 pub fn own(yes: bool) {
     let result = if yes {
-        crate::settings_ui::publish("screen.owner", std::process::id().to_string().as_bytes())
+        crate::settings_ui::publish("screen.owner", format!("{} 0", std::process::id()).as_bytes())
     } else {
         match std::fs::remove_file(OWNER) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
@@ -42,6 +44,36 @@ pub fn own(yes: bool) {
     };
     if let Err(e) = result {
         crate::logf!("ui: {OWNER}: {e}");
+    }
+}
+
+/// The owner's heartbeat: nlclient's patch (keeper.rests and on) takes the
+/// display back from an owner whose beat stops changing.
+pub fn beat(beat: u32) {
+    if let Err(e) = crate::settings_ui::publish("screen.owner", format!("{} {beat}", std::process::id()).as_bytes()) {
+        crate::logf!("ui: {OWNER}: {e}");
+    }
+}
+
+/// Whether nlclient's patch can leave the display to go out while the UI
+/// holds it (screen.rest), and takes it back from a hung owner.
+pub fn rests() -> bool {
+    Path::new(KEEPER_RESTS).exists()
+}
+
+/// Leaves the display to nlclient's own timing (true) though the UI holds
+/// it, or has nlclient keep it lit while the UI owns it.
+pub fn rest(yes: bool) {
+    let result = if yes {
+        crate::settings_ui::publish("screen.rest", b"")
+    } else {
+        match std::fs::remove_file(REST) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    };
+    if let Err(e) = result {
+        crate::logf!("ui: {REST}: {e}");
     }
 }
 

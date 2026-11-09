@@ -306,6 +306,10 @@ pub struct Machine {
     pub volume_at: Option<Instant>,
     /// The Fledge theme rather than the Nest's.
     pub fledge: bool,
+    /// nlclient's screen patch lets the UI hold the display at rest, its own
+    /// timing putting it out (keeper.rests): the UI never hands it back but
+    /// to nlclient's own screens (holds_screen).
+    pub rests: bool,
 }
 
 impl Machine {
@@ -315,6 +319,7 @@ impl Machine {
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, dial_offset: 0.0, volume_at: None, fledge: false,
+            rests: false,
         }
     }
 
@@ -445,9 +450,46 @@ impl Machine {
     }
 
     /// Whether the UI shows on the display: its own screens, and the cards
-    /// while a turn from the lit thermostat is under way.
+    /// while a turn from the lit thermostat is under way; at rest too, dark,
+    /// when it holds the screen.
     pub fn owns(&self) -> bool {
-        self.mode.owning() || (self.mode == Mode::Home && self.turn != 0)
+        self.mode.owning() || (self.mode == Mode::Home && (self.turn != 0 || self.holds_screen()))
+    }
+
+    /// Whether the UI keeps the display at rest (Home, black) rather than
+    /// handing it back to nlclient's dial: unless Nest's own dial is the
+    /// thermostat, and only with a screen patch that lets it go dark.
+    pub fn holds_screen(&self) -> bool {
+        self.rests && !self.nest_dial
+    }
+
+    /// Whether nlclient's own timing puts the display out (the UI not
+    /// keeping it lit): at rest, and under the glance, which lasts as long
+    /// as nlclient keeps it lit for whoever's in the room.
+    pub fn resting(&self) -> bool {
+        self.holds_screen() && self.turn == 0 && matches!(self.mode, Mode::Home | Mode::Glance)
+    }
+
+    /// Whether nlclient's screen patch lets the display rest held.
+    pub fn set_rests(&mut self, rests: bool, out: &mut Vec<Effect>) {
+        self.rests = rests;
+        self.dirty = true;
+        self.sync(out);
+    }
+
+    /// The Nest shows one of its alerts (its log said so): its screen and
+    /// ring until it's done, as Nest's own dial is.
+    pub fn nest_alert(&mut self, now: Instant, out: &mut Vec<Effect>) {
+        if matches!(self.mode, Mode::Idle | Mode::Native) {
+            return;
+        }
+        logf!("ui: the Nest shows an alert: its screen");
+        self.alert = None;
+        self.alert_until = None;
+        self.settings_open = false;
+        self.last_input = now;
+        self.go(Mode::Native, out);
+        out.push(Effect::WakeDisplay);
     }
 
     /// Where the cards are as the ring turns: the card's place in the deck,
@@ -456,6 +498,7 @@ impl Machine {
     pub fn position(&self) -> Option<f32> {
         let partial = self.turn as f32 / CARD_STEP as f32;
         match self.mode {
+            Mode::Home if self.turn == 0 && self.holds_screen() => None,
             Mode::Home => Some(self.place(Slot::Thermostat) as f32 + partial),
             Mode::Chooser(index) => Some(index as f32 + partial),
             _ => None,
@@ -1353,7 +1396,7 @@ impl Machine {
             }
             Mode::ClimateSet { slot, .. } | Mode::Volume { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
             Mode::Camera { slot } if idle >= CAMERA_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
-            Mode::Glance if idle >= GLANCE_IDLE => Some(Mode::Home),
+            Mode::Glance if idle >= GLANCE_IDLE && !self.holds_screen() => Some(Mode::Home),
             Mode::OptionList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
             Mode::Members { slot, .. } if idle >= LIST_IDLE => Some(self.dimmer(slot, 0)),
             Mode::CoverSet { slot, .. } if idle >= CONTROL_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
@@ -1800,6 +1843,77 @@ mod tests {
         rig.tick();
         rig.wait(GLANCE_IDLE);
         assert_eq!(rig.machine.mode, Mode::Home, "untouched, it goes");
+    }
+
+    /// A rig whose screen patch lets the UI hold the display at rest.
+    fn holding(cards: Cards) -> (Rig, Vec<Effect>) {
+        let mut rig = Rig::with(cards);
+        let mut out = vec![];
+        rig.machine.set_rests(true, &mut out);
+        (rig, out)
+    }
+
+    #[test]
+    fn held_at_rest_the_display_is_never_handed_back_to_nlclient_s_dial() {
+        let (mut rig, out) = holding(cards());
+        assert_eq!(out, vec![Effect::Own(true)], "at rest, held");
+        assert!(rig.machine.resting() && rig.machine.position().is_none(), "black, nlclient's timing putting it out");
+        rig.turn(CARD_STEP);
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)) && !rig.machine.resting(), "the cards keep it lit");
+        let out = rig.wait(CARD_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Home);
+        assert!(!out.contains(&Effect::Own(false)), "left alone: dark, not the Nest's dial");
+        assert!(rig.machine.owns() && rig.machine.resting());
+        rig.turn(CARD_STEP / 4);
+        assert!(rig.machine.position().is_some() && !rig.machine.resting(), "a turn on the lit display: the cards follow");
+    }
+
+    #[test]
+    fn held_at_rest_the_glance_lasts_as_long_as_the_display_is_lit() {
+        let (mut rig, _) = holding(Cards::parse(br#"{"cards":[{"kind":"climate","id":"climate.k","name":"K"}],
+            "glance":{"offset":0}}"#).unwrap());
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        rig.lit = true;
+        rig.tick();
+        assert_eq!(rig.machine.mode, Mode::Glance);
+        assert!(rig.machine.resting(), "nlclient's own timing, as for Farsight");
+        rig.wait(GLANCE_IDLE * 2);
+        assert_eq!(rig.machine.mode, Mode::Glance, "still lit: still there");
+        rig.lit = false;
+        let out = rig.wait(Duration::from_secs(2));
+        assert_eq!(rig.machine.mode, Mode::Home);
+        assert!(!out.contains(&Effect::Own(false)));
+    }
+
+    #[test]
+    fn with_nest_s_own_dial_the_display_is_handed_back_at_rest_as_before() {
+        let mut rig = Rig::new();
+        rig.machine.nest_dial = true;
+        let mut out = vec![];
+        rig.machine.set_rests(true, &mut out);
+        assert!(out.is_empty() && !rig.machine.owns());
+    }
+
+    #[test]
+    fn a_nest_alert_gets_the_nest_s_screen_and_the_cards_come_back_after() {
+        let (mut rig, _) = holding(cards());
+        rig.turn(CARD_STEP);
+        let mut out = vec![];
+        rig.machine.nest_alert(rig.now, &mut out);
+        assert_eq!(rig.machine.mode, Mode::Native);
+        assert!(out.contains(&Effect::Own(false)) && out.contains(&Effect::Hold(false)) && out.contains(&Effect::WakeDisplay));
+        rig.dial = false;
+        rig.wait(NATIVE_IDLE * 2);
+        assert_eq!(rig.machine.mode, Mode::Native, "while the alert shows");
+        rig.dial = true;
+        let out = rig.wait(NATIVE_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Home);
+        assert!(out.contains(&Effect::Own(true)), "its dial again: held, dark");
+        let mut out = vec![];
+        rig.machine.nest_alert(rig.now, &mut out);
+        rig.machine.nest_alert(rig.now, &mut out);
+        assert_eq!(out.iter().filter(|e| **e == Effect::Own(false)).count(), 1, "once");
     }
 
     #[test]

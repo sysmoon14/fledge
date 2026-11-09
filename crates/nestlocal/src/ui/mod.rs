@@ -51,6 +51,15 @@ use crate::logf;
 ///   5  the thermostat anywhere among the cards (thermostat)
 pub const PROTOCOL: u32 = 5;
 
+/// The alerts the Nest has shown, as its log tells them (motion.rs):
+/// each hands it its own screen until it's done.
+static NEST_ALERTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The Nest shows one of its own alerts.
+pub fn nest_alert() {
+    NEST_ALERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Default)]
 pub struct Ui {
     /// Home Assistant's cards and a count of their changes.
@@ -222,6 +231,15 @@ struct Runtime {
     ran: Option<(usize, Instant)>,
     /// The minute the glance's clock last showed.
     glance_minute: i64,
+    /// The Nest's own alerts taken (NEST_ALERTS).
+    nest_alerts: u64,
+    /// Whether nlclient was last told the display rests (device::rest), and
+    /// the owner's heartbeat, last beaten when.
+    rest: bool,
+    /// Whether the display shows the UI's black at rest, as last drawn.
+    black: bool,
+    beat: u32,
+    last_beat: Instant,
     /// How big the cards show (1 full size, zoom::zoomed() while moving).
     zoom: f32,
     /// A frame to compose zoomed cards in.
@@ -332,7 +350,8 @@ impl Runtime {
             generation: u64::MAX, saved: None, home: None, transition: Transition::Cut, view: None,
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             progress: Default::default(), progress_checked: Instant::now(), wakes: 0, kept_on: Instant::now(),
-            alerts: 0, ran: None, glance_minute: 0,
+            alerts: 0, ran: None, glance_minute: 0, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
+            rest: false, black: false, beat: 0, last_beat: now,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
@@ -345,6 +364,7 @@ impl Runtime {
     fn run(mut self) {
         logf!("ui: ready for home screen cards");
         hold_state(false);
+        device::rest(false);
         self.machine.nest_dial = std::path::Path::new(NEST_DIAL).exists();
         self.machine.fledge = std::path::Path::new(THEME).exists();
         paint::set_theme(if self.machine.fledge { paint::Theme::Fledge } else { paint::Theme::Nest });
@@ -367,6 +387,11 @@ impl Runtime {
             if now.duration_since(self.last_check) >= Duration::from_secs(2) {
                 self.last_check = now;
                 self.nlclient = !crate::pids("nlclient").is_empty();
+                let rests = device::rests();
+                if rests != self.machine.rests {
+                    logf!("ui: {}", if rests { "holds the display at rest" } else { "hands the display back at rest" });
+                    self.machine.set_rests(rests, &mut effects);
+                }
             }
             if self.ui.generation() != self.generation {
                 let (generation, cards) = self.ui.snapshot();
@@ -437,6 +462,11 @@ impl Runtime {
                     self.shrunk.remove(&(slot + 1));
                 }
                 self.ran = self.machine.ran;
+            }
+            let nest_alerts = NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed);
+            if nest_alerts != self.nest_alerts {
+                self.nest_alerts = nest_alerts;
+                self.machine.nest_alert(now, &mut effects);
             }
             let wakes = self.ui.wakes.load(std::sync::atomic::Ordering::Relaxed);
             if wakes != self.wakes {
@@ -519,6 +549,20 @@ impl Runtime {
             for effect in effects {
                 self.apply(effect);
             }
+            if self.machine.mode != Mode::Home || !self.machine.owns() || self.machine.position().is_some() {
+                self.black = false;
+            }
+            let rest = self.machine.owns() && self.machine.resting();
+            if rest != self.rest {
+                self.rest = rest;
+                device::rest(rest);
+            }
+            if self.machine.owns() && now.duration_since(self.last_beat) >= Duration::from_secs(1) {
+                // Alive: nlclient's patch gives the display back to a hung UI.
+                self.last_beat = now;
+                self.beat = self.beat.wrapping_add(1) % 1_000_000;
+                device::beat(self.beat);
+            }
             let elapsed = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
             self.last_frame = now;
             let swept = self.sweep(elapsed);
@@ -554,6 +598,10 @@ impl Runtime {
                     Some(target) => self.follow(target, elapsed, dirty),
                     None => {
                         self.view = None;
+                        if self.machine.mode == Mode::Home {
+                            // At rest, dark: a turn starts from the thermostat, full size.
+                            self.zoom = 1.0;
+                        }
                         (dirty || swept) && {
                             self.draw();
                             true
@@ -1320,6 +1368,22 @@ impl Runtime {
     fn draw(&mut self) {
         if let Mode::Menu { view, actions, selected } = self.machine.mode.clone() {
             return self.draw_menu(&view, &actions, selected);
+        }
+        if self.machine.mode == Mode::Home {
+            // Held at rest: nothing, as the display goes out by itself.
+            if self.black && self.transition != Transition::Fade && !self.display.lost() {
+                return;
+            }
+            self.black = true;
+            let black = vec![0; (paint::SIZE * paint::SIZE * 4) as usize];
+            if std::mem::replace(&mut self.transition, Transition::Cut) == Transition::Fade {
+                let from = self.display.save();
+                self.animate(&from, &black, Transition::Fade);
+            }
+            self.live = None;
+            self.glide = None;
+            self.display.show(&black);
+            return;
         }
         let mode = self.machine.mode.clone();
         let Some(mut screen) = Self::screen(&self.machine, &mode) else { return };

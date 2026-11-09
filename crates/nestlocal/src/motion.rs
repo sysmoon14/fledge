@@ -81,6 +81,11 @@ pub fn event(line: &str) -> Option<Sensor> {
     }
 }
 
+/// Whether a line of nlclient's log says it shows one of its alerts.
+pub fn nest_alert(line: &str) -> bool {
+    line.contains("alert manager: showing alert:")
+}
+
 /// Reads what was appended to a log since the last read, whole lines only,
 /// starting from wherever the log ended when it was first opened.
 struct Follower {
@@ -135,7 +140,12 @@ pub fn start(bridge: Arc<Bridge>) {
         loop {
             tokio::time::sleep(POLL).await;
             let mut seen = Vec::new();
-            for sensor in log.lines().iter().filter_map(|l| event(l)) {
+            let lines = log.lines();
+            if lines.iter().any(|l| nest_alert(l)) {
+                logf!("motion: the Nest shows an alert");
+                crate::ui::nest_alert();
+            }
+            for sensor in lines.iter().filter_map(|l| event(l)) {
                 if !seen.contains(&sensor) {
                     seen.push(sensor);
                 }
@@ -161,6 +171,13 @@ mod tests {
         assert_eq!(event(TP), Some(Sensor::Near));
         assert_eq!(event(READING), None, "a raw reading is not an event");
         assert_eq!(event("czcomms: promoting hot water schedule"), None);
+    }
+
+    #[test]
+    fn a_nest_alert_showing_is_seen_and_one_queued_isnt() {
+        assert!(nest_alert("2026-11-09 12:00:00.000000 09AB01AC36230301 nlclient[500:main] (2) alert manager: showing alert: heatlinkbattery"));
+        assert!(!nest_alert("alert manager: queuing alert type:heatlinkbattery"));
+        assert!(!nest_alert(PIR));
     }
 
     #[test]
