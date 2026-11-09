@@ -294,8 +294,9 @@ const PULSE: Duration = Duration::from_millis(1800);
 const PULSE_EVERY: Duration = Duration::from_secs(30);
 /// How fast a list's highlight glides to its row: most of the way in this.
 const GLIDE: f32 = 0.05;
-/// How long the thermostat's dial takes to change colour.
-const RECOLOUR: Duration = Duration::from_millis(220);
+/// How long the thermostat's dial takes to change colour: slow enough to
+/// read as the heating lighting, not a switch.
+const RECOLOUR: Duration = Duration::from_millis(700);
 /// How long fading from one screen to the next takes.
 const FADE: Duration = Duration::from_millis(280);
 

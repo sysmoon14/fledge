@@ -293,7 +293,7 @@ pub struct Machine {
     /// to for SET_SHOWN after.
     pub set_at: Option<Instant>,
     /// How far the thermostat's ring has gone towards its next step (-1..1),
-    /// its mark following.
+    /// its mark following, and staying there at rest, as the Nest's does.
     pub dial_offset: f64,
     /// When a media player's ring last turned: its volume shows large for
     /// VOLUME_SHOWN after, its track the rest of the time.
@@ -1349,12 +1349,6 @@ impl Machine {
                 self.pictured = Some(now);
             }
         }
-        // At rest, the thermostat's mark settles back on its target.
-        if matches!(self.mode, Mode::Thermostat { .. }) && idle >= SETTLE && self.dial_offset != 0.0 {
-            self.dial_offset = 0.0;
-            self.turn = 0;
-            self.dirty = true;
-        }
         // The thermostat's target once the ring rests; Home Assistant's
         // devices as it turns.
         let settling = matches!(self.mode, Mode::Thermostat { .. }) && idle < SETTLE;
@@ -1936,7 +1930,7 @@ mod tests {
         assert_eq!((&rig.machine.mode, rig.machine.dial_offset), (&Mode::Thermostat { target: 20.0 }, 0.5),
                    "still 20, the mark half way to the next step");
         assert!(sent(&rig.wait(SETTLE * 2)).is_empty(), "nothing sent");
-        assert_eq!(rig.machine.dial_offset, 0.0, "at rest, the mark back on its target");
+        assert_eq!(rig.machine.dial_offset, 0.5, "at rest, the mark stays where the hand left it");
         rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
         rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
         assert_eq!(sent(&rig.wait(SETTLE * 2)), vec![("target".into(), "20.5".into())], "a whole step: sent");
