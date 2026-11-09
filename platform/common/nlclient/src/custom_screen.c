@@ -109,9 +109,8 @@ extern int native_enqueue(void *, const void *, void *);
 #define CUSTOM_IMAGE "/nestlabs/share/images/G_unfr0zen_192px.png"
 #define FALLBACK_IMAGE CUSTOM_IMAGE
 #define MENU_GLYPH "/nestlabs/share/images/G_unfr0zen_glyph_80px.png"
-#define LIGHTS_FILE "/var/run/unfr0zen/lights"
-/* The Lights page's choices: each light, then Back. Home has at most five. */
-#define CUSTOM_CHOICES (CUSTOM_LIGHTS_MAX + 1)
+/* Choice slots, as many as nlclient's menus name ids for (choice_ids below). */
+#define CUSTOM_CHOICES 7
 struct custom_state {
     struct custom_flow flow;
     int active;
@@ -138,12 +137,6 @@ struct custom_state {
     nl_string choices[CUSTOM_CHOICES];
     u32 flags[3];
     const char *choice_ids[CUSTOM_CHOICES + 1];
-    struct custom_lights lights;
-    struct custom_dial dial;
-    /* The light page's brightness ring: each tick lit and unlit, and where. */
-    int ring_count;
-    short ring_x[CUSTOM_RING_MAX], ring_y[CUSTOM_RING_MAX];
-    void *ring_images[2][CUSTOM_RING_MAX];
     u8 layer_vtables[VTABLE_MAX];
     u8 screen_vtables[VTABLE_MAX];
 };
@@ -200,12 +193,6 @@ static void trace(void *raw, u32 type, u32 value) {
 static void show(void *raw, int opening);
 static int custom_wheel(void *raw, int value) {
     struct custom_state *s = state(raw);
-    /* On a light's page the ring is its brightness, not the scroller:
-     * keep the native result for a wheel event that moves nothing. */
-    if (s->active && s->flow.page == CUSTOM_LIGHT && s->flow.light < s->lights.count) {
-        if (custom_light_turn(&s->lights.light[s->flow.light], &s->dial, value)) show(raw, 0);
-        return native_layer_wheel(raw, 0);
-    }
     if (value) s->at_top = 0;
     int result = native_layer_wheel(raw, value);
 #ifdef CUSTOM_TRACE
@@ -410,61 +397,7 @@ static int request_action(int which) {
     if (written != 1 || closed != 0) return -1;
     return rename_setting(tmp, path);
 }
-/* Leaves the light's wanted state for nestlocal, which sends it to Home
- * Assistant. A newer request replaces one not yet taken: each is the
- * whole state wanted, so only the latest matters. */
-static void send_light(struct custom_state *s) {
-    if (s->flow.light >= s->lights.count) return;
-    char request[48];
-    custom_light_request(request, sizeof(request), s->lights.generation, s->flow.light,
-                         &s->lights.light[s->flow.light]);
-    unsigned int length = 0;
-    while (request[length]) length++;
-    void *file = native_fopen("/var/run/unfr0zen/lights.request.tmp", "w");
-    if (!file) return;
-    unsigned int written = native_fwrite(request, 1, length, file);
-    if (native_fclose(file) != 0 || written != length) return;
-    rename_setting("/var/run/unfr0zen/lights.request.tmp", "/var/run/unfr0zen/lights.request");
-}
-static void read_lights(struct custom_lights *lights) {
-    char text[CUSTOM_LIGHTS_MAX * (CUSTOM_LIGHT_NAME + 16) + 16];
-    read_text(LIGHTS_FILE, text, sizeof(text), "");
-    custom_lights_parse(text, lights);
-}
-static void release_image(void *image);
-/* Loaded when a light's page first opens; nestlocal renders them at start. */
-static void load_ring(struct custom_state *s) {
-    if (s->ring_count) return;
-    char layout[CUSTOM_RING_MAX * 12 + 8];
-    read_text("/var/run/unfr0zen/light-ring.layout", layout, sizeof(layout), "");
-    int count = custom_ring_parse(layout, s->ring_x, s->ring_y);
-    for (int i = 0; i < count; i++) {
-        for (int lit = 0; lit < 2; lit++) {
-            char path[64];
-            unsigned int at = custom_append(path, 0, sizeof(path), "/var/run/unfr0zen/light-ring-");
-            if (i < 10) at = custom_append(path, at, sizeof(path), "0");
-            at = custom_append_number(path, at, sizeof(path), i);
-            custom_append(path, at, sizeof(path), lit ? "-on.png" : "-off.png");
-            void *file = native_fopen(path, "rb");
-            if (!file) continue;
-            native_fclose(file);
-            int error = 0;
-            s->ring_images[lit][i] = native_image_load(path, &error);
-        }
-    }
-    s->ring_count = count;
-}
-static void release_ring(struct custom_state *s) {
-    for (int i = 0; i < s->ring_count; i++) {
-        for (int lit = 0; lit < 2; lit++) {
-            release_image(s->ring_images[lit][i]);
-            s->ring_images[lit][i] = 0;
-        }
-    }
-    s->ring_count = 0;
-}
-static int light_page(enum custom_page page) { return page == CUSTOM_LIGHTS || page == CUSTOM_LIGHT; }
-static void matter_detail(struct custom_state *s) {
+static void release_image(void *image);static void matter_detail(struct custom_state *s) {
     unsigned int n = 0;
     const char *code = s->activity_started ? s->code : "";
     const char *status = s->flow.page == CUSTOM_MATTER_PAIRING && !s->activity_started ? "Opening pairing..." : s->status;
@@ -543,63 +476,14 @@ static unsigned int enabled_features(void) {
            (option_word(options, "-zigbee") || option_word(options, "--zigbee") ? 2 : 0) |
            (option_word(options, "-doom") || option_word(options, "--doom") ? 4 : 0);
 }
-/* Home's choices, with Lights while Home Assistant has configured any. */
-static unsigned int home_features(struct custom_state *s) {
-    read_lights(&s->lights);
-    return enabled_features() | (s->lights.count ? 8 : 0);
-}
 static void clear_choices(struct custom_state *s, int from) {
     for (int i = from; i < CUSTOM_CHOICES; i++) native_string_copy(&s->choices[i], "");
-}
-/* The Lights page lists each light and Back; a light's own page shows its
- * name and brightness, and its one choice is what a press does. */
-static int show_lights(struct custom_state *s) {
-    native_config_invalidate(&s->config);
-    s->flags[0] = s->flags[1] = s->flags[2] = 0;
-    native_string_copy(&s->text[2], "");
-    char text[CUSTOM_LIGHT_NAME + 32];
-    if (s->flow.page == CUSTOM_LIGHT) {
-        struct custom_light *light = &s->lights.light[s->flow.light];
-        native_string_copy(&s->text[0], light->name);
-        custom_light_value(text, 0, sizeof(text), light);
-        native_string_copy(&s->text[1], text);
-        load_ring(s);
-        native_string_copy(&s->choices[0], light->on ? "Turn off" : "Turn on");
-        clear_choices(s, 1);
-        s->config.text_count = 2;
-        return 1;
-    }
-    native_string_copy(&s->text[0], "Lights");
-    native_string_copy(&s->text[1], "");
-    for (int i = 0; i < s->lights.count; i++) {
-        custom_light_label(text, sizeof(text), &s->lights.light[i]);
-        native_string_copy(&s->choices[i], text);
-    }
-    int rows = custom_lights_rows(s->lights.count);
-    native_string_copy(&s->choices[s->lights.count], s->flow.lights_first ? "More" : "Back");
-    if (custom_lights_done(s->lights.count)) native_string_copy(&s->choices[s->lights.count + 1], "Done");
-    clear_choices(s, rows);
-    s->config.text_count = 1;
-    return rows;
 }
 static void show(void *raw, int opening) {
     float old_y = *(float *)((u8 *)raw + 8);
     int old_selection = WORD(common(raw), 0x7c);
     struct custom_state *s = state(raw);
-    if (light_page(s->flow.page)) {
-        if (opening) {
-            struct custom_lights read;
-            read_lights(&read);
-            custom_lights_merge(&s->lights, &read, s->dial.hold > 0 ? s->flow.light : -1);
-        }
-        /* The list emptied, or shrank under the open light. */
-        if (!s->lights.count) { s->flow.page = CUSTOM_HOME; s->flow.lights_first = 0; }
-        else if (s->flow.light >= s->lights.count) { s->flow.light = 0; s->flow.page = CUSTOM_LIGHTS; }
-    }
     int choice_count;
-    if (light_page(s->flow.page)) {
-        choice_count = show_lights(s);
-    } else {
     if (s->flow.page != CUSTOM_HOME) {
         read_text(custom_matter(s->flow.page) ? "/var/run/unfr0zen/matter.status" :
                   "/var/run/unfr0zen/zigbee.status", s->status, sizeof(s->status), "Not enabled or service unavailable");
@@ -609,7 +493,7 @@ static void show(void *raw, int opening) {
     }
     int activity = custom_activity(s->flow.page);
     int matter_pairing = s->flow.page == CUSTOM_MATTER_PAIRING;
-    if (s->flow.page == CUSTOM_HOME) s->features = home_features(s);
+    if (s->flow.page == CUSTOM_HOME) s->features = enabled_features();
     choice_count = s->flow.page == CUSTOM_HOME ? custom_home_count(s->features) : activity ? 1 : 2;
     native_config_invalidate(&s->config);
     s->flags[0] = s->flags[1] = s->flags[2] = 0;
@@ -627,7 +511,7 @@ static void show(void *raw, int opening) {
         for (int i = 0; i < CUSTOM_CHOICES; i++) {
             int action = custom_home_action(i, s->features);
             native_string_copy(&s->choices[i], action == 0 ? "Matter" : action == 1 ? "Zigbee" :
-                               action == 2 ? "Done" : action == 3 ? "Doom" : action == 4 ? "Lights" : "");
+                               action == 2 ? "Done" : action == 3 ? "Doom" : "");
         }
     } else {
         read_text("/var/run/unfr0zen/matter.code", s->code, sizeof(s->code), "Code unavailable");
@@ -658,7 +542,6 @@ static void show(void *raw, int opening) {
             s->config.text_count = activity ? 2 : 1;
         }
     }
-    }
     if (s->image_page != s->flow.page) load_image(raw);
     s->config.choice_count = choice_count;
     void *base = common(raw);
@@ -666,8 +549,7 @@ static void show(void *raw, int opening) {
     WORD(base, 0x94) = 0;
     WORD(base, 0x98) = choice_count - 1;
     native_config_layout(raw, &s->config, 0x10000, choice_count);
-    int selection = opening ? (s->flow.page == CUSTOM_HOME ? s->flow.parent_selection :
-                               s->flow.page == CUSTOM_LIGHTS ? s->flow.light : 0) : old_selection;
+    int selection = opening ? (s->flow.page == CUSTOM_HOME ? s->flow.parent_selection : 0) : old_selection;
     if (selection >= choice_count) selection = choice_count - 1;
     if (selection < 0) selection = 0;
     native_select(raw, selection);
@@ -690,18 +572,10 @@ static int click(void *raw) {
     int selected = (int)WORD(common(raw), 0x7c);
     enum custom_page before = s->flow.page;
     int result;
-    if (light_page(before)) {
-        int chosen = custom_lights_choose(&s->flow, &s->lights, &s->dial, selected);
-        if (chosen == 2) return 2; /* Done: the stock exit, as on the UNFR0ZEN page */
-        if (chosen) send_light(s);
-        show(raw, s->flow.page != before);
-        return 1;
-    }
     if (before == CUSTOM_HOME) {
         int action = custom_home_action(selected, s->features);
         result = action < 0 ? 1 : custom_choose(&s->flow, action, request_action);
         if (result != 2) s->flow.parent_selection = selected;
-        if (s->flow.page == CUSTOM_LIGHTS) bytes_zero(&s->dial, sizeof(s->dial));
     } else result = custom_choose(&s->flow, selected, request_action);
     if (s->flow.page != before && custom_activity(s->flow.page)) {
         s->activity_ticks = 0; s->activity_started = 0;
@@ -710,33 +584,10 @@ static int click(void *raw) {
     if (result != 2) show(raw, s->flow.page != before);
     return result;
 }
-/* Every 250 ms on the light pages: send a settled brightness, leave an
- * idle light's page, and take Home Assistant's latest state. */
-static void refresh_lights(void *raw) {
-    struct custom_state *s = state(raw);
-    enum custom_page before = s->flow.page;
-    if (custom_light_tick(&s->dial)) send_light(s);
-    if (before == CUSTOM_LIGHT && s->dial.idle >= CUSTOM_LIGHT_IDLE && !s->dial.pending) {
-        custom_back(&s->flow);
-        show(raw, 1);
-        return;
-    }
-    struct custom_lights read;
-    read_lights(&read);
-    int held = s->dial.hold > 0 ? s->flow.light : -1;
-    int changed = custom_lights_merge(&s->lights, &read, held);
-    /* A different list: the open light may be another one now. */
-    if (changed == 2 && before == CUSTOM_LIGHT) s->flow.page = CUSTOM_LIGHTS;
-    if (changed) show(raw, s->flow.page != before);
-}
 static void refresh_status(void *raw) {
     struct custom_state *s = state(raw);
-    if (light_page(s->flow.page)) {
-        refresh_lights(raw);
-        return;
-    }
     if (s->flow.page == CUSTOM_HOME) {
-        if (s->features != home_features(s)) show(raw, 0);
+        if (s->features != enabled_features()) show(raw, 0);
         return;
     }
     if (s->flow.page == CUSTOM_ZIGBEE_CONFIRM || s->flow.page == CUSTOM_MATTER_CONFIRM) return;
@@ -794,7 +645,7 @@ static void stop_refresh(void *raw) {
 static void schedule_refresh(void *raw) {
     struct custom_state *s = state(raw);
     void *globals = PTR(common(raw), 0x8c);
-    native_send_timeout(&s->refresh_request, (u32)s, custom_activity(s->flow.page) || light_page(s->flow.page) ? 250 : 1000,
+    native_send_timeout(&s->refresh_request, (u32)s, custom_activity(s->flow.page) ? 250 : 1000,
                         PTR(common(raw), 0x14), common(raw), PTR(globals, GLOBALS_TIMER_OFFSET));
 }
 static int layer_event(void *raw, void *event, void *target) {
@@ -865,16 +716,6 @@ static int draw(void *raw, void *context) {
                         s->display * 0x10000 / 480, (void *)0);
         } else {
             draw_image(context, -width / 2, top - height, image, style);
-        }
-    }
-    /* The ring is fixed at the display's edge, behind the text; the
-     * drawing origin is the display's centre, as the home image's is. */
-    if (s->flow.page == CUSTOM_LIGHT && s->flow.light < s->lights.count) {
-        void (*draw_image)(void *, int, int, void *, int) = PTR(PTR(context, 0), 0x50);
-        int lit = custom_light_ticks(&s->lights.light[s->flow.light], s->ring_count);
-        for (int i = 0; i < s->ring_count; i++) {
-            void *tick = s->ring_images[i < lit][i];
-            if (tick) draw_image(context, s->ring_x[i], s->ring_y[i], tick, style);
         }
     }
     if (custom_activity(s->flow.page)) {
@@ -954,10 +795,7 @@ static void enter_screen(void *screen) {
     s->drawn = 0;
     attempt_begin();
     s->active = 1;
-    bytes_zero(&s->dial, sizeof(s->dial));
-    /* Open on Lights when Home Assistant has configured any. */
-    read_lights(&s->lights);
-    custom_open(&s->flow, s->lights.count);
+    custom_open(&s->flow);
     load_image(raw_layer(screen));
     native_screen_enter(screen);
     show(raw_layer(screen), 1);
@@ -968,7 +806,6 @@ static void exit_screen(void *screen) {
     stop_refresh(raw_layer(screen));
     struct custom_state *s = state(raw_layer(screen));
     for (int i = 0; i < 8; i++) { release_image(s->activity_images[i]); s->activity_images[i] = 0; }
-    release_ring(s);
 }
 static int screen_event(void *screen, void *event, void *target) {
     void *raw = raw_layer(screen);

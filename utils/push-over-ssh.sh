@@ -298,7 +298,7 @@ if [ $screen = 1 ] && [ "$(remote_hash /nestlabs/sbin/nlclient)" != "$nlclient_h
     swap /nestlabs/sbin/nlclient
     swap /etc/unfr0zen/nlclient.undo.gz
     # A fault in the screen's factory is remembered until reboot; a new build starts afresh.
-    on "rm -f /var/run/unfr0zen-screen.attempt; printf '%s\n' 'unfr0zen $(git describe --always --dirty 2>/dev/null || echo dev) (ssh)' > /etc/unfr0zen/version.unfr0zen-new && mv -f /etc/unfr0zen/version.unfr0zen-new /etc/unfr0zen/version && sync"
+    on "rm -f /var/run/unfr0zen-screen.attempt; printf '%s\n' 'Fledge $(git describe --always --dirty 2>/dev/null || echo dev) (ssh)' > /etc/unfr0zen/version.unfr0zen-new && mv -f /etc/unfr0zen/version.unfr0zen-new /etc/unfr0zen/version && sync"
     start_nlclient
     if stays_up nlclient 60; then
         say "nlclient: running the new build"
