@@ -175,6 +175,7 @@ pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
         // An owner file from before a restart names a pid that may be reused.
         device::own(false);
         paint::for_panel();
+        let _ = std::thread::Builder::new().name("ui-warm".into()).spawn(paint::warm);
         // The thermostat's own commands (an update's install) may start work
         // on nestlocal's runtime.
         let _runtime = handle.as_ref().map(|h| h.enter());
@@ -255,6 +256,9 @@ struct Runtime {
     glide: Option<Glide>,
     /// Something changed that the machine doesn't know of: draw.
     force_draw: bool,
+    /// The cards drawn are out of date (a device changed on its own
+    /// screen): drawn again when the cards next show.
+    cards_stale: bool,
     /// Whether the thermostat's dial says what it's set to (machine.set_at).
     set_words: bool,
     /// Whether a media player's page shows its volume large (the ring just
@@ -326,7 +330,7 @@ impl Runtime {
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
-            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
+            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, cards_stale: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
             recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
             dial: None, last_dial: now - Duration::from_secs(60),
         }
@@ -529,7 +533,12 @@ impl Runtime {
                 self.live = None;
             }
             if dirty && self.machine.position().is_none() {
-                // A light switched in a list shows on its card.
+                // A light switched in a list shows on its card: the cards
+                // drawn again once they show, not on every frame of a dial.
+                self.cards_stale = true;
+            }
+            if self.cards_stale && self.machine.position().is_some() {
+                self.cards_stale = false;
                 self.cards.clear();
                 self.shrunk.clear();
             }
@@ -572,7 +581,7 @@ impl Runtime {
                     }
                 }
             }
-            if !self.animating() && self.machine.mode != Mode::Idle {
+            if !self.animating() && self.machine.mode != Mode::Idle && !self.cards_stale {
                 // One card at a time while nothing moves, so the first turn
                 // finds them all drawn.
                 let deck = self.machine.deck().len();

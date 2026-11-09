@@ -316,6 +316,9 @@ pub fn ring_shaped(canvas: &mut Canvas, of: impl Fn(usize) -> (Color, Shape)) {
 /// and the ticks under it.
 type Drawn = ((i32, i32, usize, usize), std::ops::RangeInclusive<usize>);
 
+/// One of Fledge's circles over its arc: where, how big, its colour (RGBA).
+type Extra = (f32, f32, f32, [u8; 4]);
+
 /// A value screen kept between frames, so a frame redraws only what
 /// changed: ticks whose colour changed, and the number when it changed,
 /// over the screen's still part.
@@ -331,7 +334,7 @@ pub struct Live {
     pub columns: Option<(u32, u32)>,
     /// What Fledge's arc drew over itself last frame (its knob, dots and
     /// rounded ends): each one's box, and the ticks under it.
-    extras: Vec<Drawn>,
+    extras: Vec<(Extra, Drawn)>,
 }
 
 impl Live {
@@ -452,7 +455,7 @@ fn tick_pixels(tick: usize) -> &'static [RingPixel] {
 /// out a lit band's glow reaches.
 const ARC: f32 = 212.0;
 const BAND: f32 = 8.0;
-const HALO: f32 = 30.0;
+const HALO: f32 = 24.0;
 /// Fledge's knob (where the ring is set) and dot (the temperature now).
 const KNOB: f32 = 13.0;
 const DOT: f32 = 5.5;
@@ -567,10 +570,61 @@ fn arc(canvas: &mut Canvas, mut live: Option<&mut Live>, of: impl Fn(usize) -> (
         let (low, high) = ((at - reach).floor().max(0.0) as usize, ((at + reach).ceil().max(0.0) as usize).min(TICKS - 1));
         (rect, low..=high)
     };
+    let key = |&(x, y, r, c): &(f32, f32, f32, Color)| -> Extra {
+        let u = c.to_color_u8();
+        (x, y, r, [u.red(), u.green(), u.blue(), u.alpha()])
+    };
+    let new: Vec<(Extra, Drawn)> = extras.iter().map(|e| (key(e), boxed(e))).collect();
+    // Which circles draw again: only those that moved or changed, or whose
+    // slices or neighbours did; the rest (the arc's ends, a knob at rest)
+    // stay as they are, so a frame shows only what moved.
+    let mut redraw = vec![!live.as_deref().is_some_and(|l| !l.fresh); new.len()];
     if let Some(live) = live.as_deref_mut() {
-        // Last frame's knob, dot and ends, put back: their slices draw again.
-        for (rect, under) in std::mem::take(&mut live.extras) {
-            live.clear(canvas, rect, under);
+        let mut changed: Vec<bool> = slices.iter().enumerate().map(|(tick, &(tint, lit))| {
+            let u = canvas.colour(tint).to_color_u8();
+            let colour = [u.red() as u16, u.green() as u16, u.blue() as u16, u.alpha() as u16];
+            let shape = if lit { Shape::Wide } else { Shape::Short };
+            live.fresh || live.drawn[tick] != colour || live.shapes[tick] != shape
+        }).collect();
+        let previous = std::mem::take(&mut live.extras);
+        let overlaps = |a: &(i32, i32, usize, usize), b: &(i32, i32, usize, usize)| {
+            a.0 < b.0 + b.2 as i32 && b.0 < a.0 + a.2 as i32 && a.1 < b.1 + b.3 as i32 && b.1 < a.1 + a.3 as i32
+        };
+        let mut cleared = vec![false; previous.len()];
+        for (j, (extra, _)) in new.iter().enumerate() {
+            redraw[j] = !previous.iter().any(|(old, _)| old == extra);
+        }
+        loop {
+            let mut more = false;
+            for (i, (old, (rect, under))) in previous.iter().enumerate() {
+                if cleared[i] {
+                    continue;
+                }
+                let gone = !new.iter().any(|(extra, _)| extra == old);
+                let under_changed = under.clone().any(|t| changed[t]);
+                let near = new.iter().zip(&redraw).any(|((_, (r, _)), &again)| again && overlaps(r, rect))
+                    || previous.iter().zip(&cleared).any(|((_, (r, _)), &c)| c && overlaps(r, rect));
+                if gone || under_changed || near {
+                    cleared[i] = true;
+                    more = true;
+                    for t in under.clone() {
+                        changed[t] = true;
+                    }
+                    for (j, (extra, _)) in new.iter().enumerate() {
+                        if extra == old {
+                            redraw[j] = true;
+                        }
+                    }
+                }
+            }
+            if !more {
+                break;
+            }
+        }
+        for (i, (_, (rect, under))) in previous.into_iter().enumerate() {
+            if cleared[i] {
+                live.clear(canvas, rect, under);
+            }
         }
     }
     let panel = canvas.panel;
@@ -590,7 +644,7 @@ fn arc(canvas: &mut Canvas, mut live: Option<&mut Live>, of: impl Fn(usize) -> (
         for p in &pixels[starts[tick]..starts[tick + 1]] {
             let at = 4 * if panel { p.panel } else { p.upright } as usize;
             let band = p.short as u32 * a as u32 / 255;
-            let halo = if lit { p.long as u32 * a as u32 * 120 / (255 * 255) } else { 0 };
+            let halo = if lit { p.long as u32 * a as u32 * 140 / (255 * 255) } else { 0 };
             // The band over its glow, both of one colour.
             let cover = (255 - (255 - band) * (255 - halo) / 255) as u16;
             let from = match live.as_deref() {
@@ -612,15 +666,25 @@ fn arc(canvas: &mut Canvas, mut live: Option<&mut Live>, of: impl Fn(usize) -> (
             live.changed(low, high);
         }
     }
-    for extra in &extras {
+    for ((extra, (key, drawn)), again) in extras.iter().zip(new).zip(redraw) {
         let (x, y, r, c) = *extra;
-        circle(canvas, x, y, r, c);
+        if again {
+            circle(canvas, x, y, r, c);
+        }
         if let Some(live) = live.as_deref_mut() {
-            let (rect, under) = boxed(extra);
-            live.changed(rect.0.max(0) as u32, (rect.0 + rect.2 as i32).clamp(0, SIZE as i32) as u32);
-            live.extras.push((rect, under));
+            let (rect, _) = &drawn;
+            if again {
+                live.changed(rect.0.max(0) as u32, (rect.0 + rect.2 as i32).clamp(0, SIZE as i32) as u32);
+            }
+            live.extras.push((key, drawn));
         }
     }
+}
+
+/// Works out both rings' shapes ahead of their first frame, which would
+/// otherwise wait for them (half a second on the unit).
+pub fn warm() {
+    let _ = (ring_geometry(), arc_geometry());
 }
 
 fn ring_geometry() -> &'static (Vec<RingPixel>, Vec<usize>) {
@@ -749,9 +813,33 @@ pub fn picture_scaled(canvas: &mut Canvas, rgb: &[u8], size: u32, side: u32, cx:
     picture(canvas, &small, side, cx, cy, radius);
 }
 
+/// A filled circle, its edge softened over a pixel: drawn pixel by pixel
+/// over its box, a hundred times cheaper than a path on the unit (where
+/// the knob and its glow are drawn every frame the ring turns).
 pub fn circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, c: Color) {
-    if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
-        canvas.fill_path(&path, c);
+    let u = c.to_color_u8();
+    let [cr, cg, cb] = canvas.rgb([u.red(), u.green(), u.blue()]);
+    let a = u.alpha() as f32 / 255.0;
+    if a <= 0.0 || r <= 0.0 {
+        return;
+    }
+    let (x0, x1) = (((cx - r - 1.0).floor() as i32).max(0), ((cx + r + 1.0).ceil() as i32).min(SIZE as i32));
+    let (y0, y1) = (((cy - r - 1.0).floor() as i32).max(0), ((cy + r + 1.0).ceil() as i32).min(SIZE as i32));
+    for y in y0..y1 {
+        let dy = y as f32 + 0.5 - cy;
+        for x in x0..x1 {
+            let dx = x as f32 + 0.5 - cx;
+            let cover = (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0) * a;
+            if cover <= 0.0 {
+                continue;
+            }
+            let at = canvas.at(x as u32, y as u32);
+            let data = canvas.pixmap.data_mut();
+            for (k, v) in [cr, cg, cb].into_iter().enumerate() {
+                let old = data[at + k] as f32;
+                data[at + k] = (old + (v as f32 - old) * cover).round() as u8;
+            }
+        }
     }
 }
 
