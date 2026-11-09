@@ -18,7 +18,8 @@ mod nandmap;
 mod patch;
 mod run;
 mod setup;
-pub(crate) use setup::{code_line, group, inset, muted_line, numbered, option_card, small_accent_button};
+pub(crate) use setup::{card, code_line, field, group, inset, muted_line, numbered, option_card, page_heading, pill_button, small_accent_button,
+                       small_button, switch};
 #[cfg(test)]
 mod snapshot;
 mod terminal;
@@ -450,7 +451,7 @@ impl Updates {
 const WAIT_USB: Duration = Duration::from_secs(120);
 
 /// The window, fixed: every page is laid out for it.
-const WINDOW: [f32; 2] = [1080.0, 680.0];
+const WINDOW: [f32; 2] = [1080.0, 800.0];
 
 /// The sidebar's pages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1192,31 +1193,22 @@ impl App {
     }
 
     fn backups_page(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(tr!("backup.title")).font(medium(20.0)));
-            ui.add_space(4.0);
-            let dir = self.library.dir.clone();
-            let short = short_path(&dir);
-            if pill(ui, &short, ACCENT, INSET, true).on_hover_text(dir.display().to_string()).clicked() {
+        let dir = self.library.dir.clone();
+        page_heading(ui, tr!("backup.title"), tr!("backup.description"), |ui| {
+            if pill(ui, &short_path(&dir), ACCENT, INSET, true).on_hover_text(dir.display().to_string()).clicked() {
                 let _ = std::fs::create_dir_all(&dir).and_then(|_| open_path(&dir));
             }
         });
-        ui.add_space(2.0);
-        ui.label(egui::RichText::new(
-            tr!("backup.description")).color(MUTED));
-        ui.add_space(10.0);
         let frame = egui::Frame::new().inner_margin(egui::Margin { top: 10, ..egui::Margin::ZERO });
         egui::Panel::bottom("backup_actions").show_separator_line(true).frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Wide enough for the longer label, so the two match.
-                let size = egui::vec2(130.0, 28.0);
-                if accent_button_sized(ui, tr!("backup.create"), self.idle(), size)
+                if pill_button(ui, tr!("backup.create"), true, self.idle())
                     .on_hover_text(tr!("backup.create_hint"))
                     .clicked() {
                     let out = self.library.fresh_path();
                     self.start(Task::Backup(out));
                 }
-                if ui.add_enabled(self.idle(), egui::Button::new(tr!("backup.restore_file")).min_size(size))
+                if pill_button(ui, tr!("backup.restore_file"), false, self.idle())
                     .on_hover_text(tr!("backup.restore_file_hint"))
                     .clicked() {
                     self.choose_restore_image();
@@ -1225,7 +1217,7 @@ impl App {
         });
         // The pane holds the map exactly, whatever the display's pixel ratio.
         let detail_width = nandmap::width(ui.pixels_per_point()) + 2.0 * DETAIL_MARGIN;
-        let frame = egui::Frame::new().fill(SIDE).corner_radius(8).inner_margin(egui::Margin::same(DETAIL_MARGIN as i8));
+        let frame = egui::Frame::new().fill(CARD).corner_radius(14).inner_margin(egui::Margin::same(DETAIL_MARGIN as i8));
         egui::Panel::right("backup_detail").exact_size(detail_width).resizable(false).show_separator_line(false)
             .frame(frame).show(ui, |ui| self.backup_detail(ui));
         egui::ScrollArea::vertical().id_salt("backups").auto_shrink([false, false]).show(ui, |ui| {
@@ -1407,27 +1399,17 @@ impl App {
     /// The runs: the live one and every log folder, with the shown run's
     /// steps and log beside them.
     fn logs_page(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(tr!("page.logs")).font(medium(20.0)));
-            ui.add_space(4.0);
-            let dir = Self::logs_dir();
+        let (dir, any) = (Self::logs_dir(), !self.history.is_empty());
+        let mut delete = false;
+        page_heading(ui, tr!("page.logs"), tr!("logs.description"), |ui| {
             if pill(ui, &short_path(&dir), ACCENT, INSET, true).on_hover_text(dir.display().to_string()).clicked() {
                 let _ = std::fs::create_dir_all(&dir).and_then(|_| open_path(&dir));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = egui::RichText::new(tr!("logs.delete_old")).size(12.0);
-                if ui.add_enabled(!self.history.is_empty(), egui::Button::new(label))
-                    .on_hover_text(tr!("logs.delete_old_hint"))
-                    .clicked() {
-                    self.delete_logs = true;
-                }
+                delete = small_button(ui, tr!("logs.delete_old"), any).on_hover_text(tr!("logs.delete_old_hint")).clicked();
             });
         });
-        ui.add_space(2.0);
-        ui.label(egui::RichText::new(
-            tr!("logs.description"))
-            .color(MUTED));
-        ui.add_space(10.0);
+        self.delete_logs |= delete;
         // The list is as wide as its widest texts; the run pane takes the rest.
         let rows = self.history_rows();
         let columns = history_columns(ui, &rows);
@@ -1435,7 +1417,7 @@ impl App {
         // to the pane, so the pane keeps as much width as it can.
         let list_width = columns.iter().sum::<f32>() + HISTORY_GAP * 2.0 + 8.0;
         let pane_width = (ui.available_width() - list_width - 6.0).max(200.0);
-        let frame = egui::Frame::new().fill(SIDE).corner_radius(8).inner_margin(egui::Margin::same(14));
+        let frame = egui::Frame::new().fill(CARD).corner_radius(14).inner_margin(egui::Margin::same(14));
         egui::Panel::right("run_pane").exact_size(pane_width).resizable(false).show_separator_line(false)
             .frame(frame).show(ui, |ui| self.run_pane(ui));
         egui::ScrollArea::vertical().id_salt("history").auto_shrink([false, false]).show(ui, |ui| {
@@ -1564,7 +1546,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(path) = &path {
-                    if ui.add(egui::Button::new(egui::RichText::new(tr!("logs.reveal")).size(12.0)))
+                    if small_button(ui, tr!("logs.reveal"), true)
                         .on_hover_text(tr!("logs.reveal_hint")).clicked() {
                         let _ = path.parent().map(open_path);
                     }
@@ -2124,10 +2106,10 @@ pub(crate) fn truncated(ui: &egui::Ui, text: String, font: egui::FontId, color: 
 fn pill(ui: &mut egui::Ui, text: &str, fg: egui::Color32, bg: egui::Color32, click: bool) -> egui::Response {
     let font = egui::FontId::proportional(11.5);
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, fg));
-    let size = galley.size() + egui::vec2(16.0, 6.0);
+    let size = galley.size() + egui::vec2(20.0, 8.0);
     let sense = if click { egui::Sense::click() } else { egui::Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(size, sense);
-    ui.painter().rect(rect, 5.0, bg, egui::Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
+    ui.painter().rect(rect, rect.height() / 2.0, bg, egui::Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
     ui.painter().galley(rect.center() - galley.size() * 0.5, galley, fg);
     if click { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response }
 }
@@ -2217,9 +2199,9 @@ pub(crate) fn accent_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egu
 }
 
 fn accent_button_sized(ui: &mut egui::Ui, text: &str, enabled: bool, size: egui::Vec2) -> egui::Response {
-    let label = egui::RichText::new(text).size(14.0).color(if enabled { ON_ACCENT } else { ON_ACCENT.gamma_multiply(0.45) });
+    let label = egui::RichText::new(text).font(medium(14.0)).color(if enabled { ON_ACCENT } else { ON_ACCENT.gamma_multiply(0.45) });
     let fill = if enabled { ACCENT } else { ACCENT.gamma_multiply(0.5) };
-    ui.add_enabled(enabled, egui::Button::new(label).fill(fill).min_size(size))
+    ui.add_enabled(enabled, egui::Button::new(label).fill(fill).corner_radius((size.y / 2.0) as u8).min_size(size))
 }
 
 /// The texts under the progress bar: bytes done of the total (and the piece
@@ -2541,11 +2523,11 @@ mod tests {
             egui::epaint::Shape::Text(t) if t.galley.job.text == text => Some(t.galley.rect.translate(t.pos.to_vec2())),
             _ => None,
         }).unwrap_or_else(|| panic!("{text} is drawn"));
-        const BUTTON: f32 = 130.0;
-        let pane = rect("Select a backup");
+        // Each as wide as its words ask, from the page's left edge on.
+        let (pane, title) = (rect("Select a backup"), rect("NAND backups"));
         let (back_up, restore) = (rect("Back up unit"), rect("Restore from file"));
-        assert!((back_up.center().x - (rect("NAND backups").left() + BUTTON / 2.0)).abs() < 1.0, "{back_up:?}");
-        assert!((restore.center().x - back_up.center().x - (BUTTON + 8.0)).abs() < 1.0, "{back_up:?} {restore:?}");
+        assert!((0.0..40.0).contains(&(back_up.left() - title.left())), "{back_up:?} {title:?}");
+        assert!((0.0..60.0).contains(&(restore.left() - back_up.right())), "{back_up:?} {restore:?}");
         assert!((back_up.center().y - restore.center().y).abs() < 1.0 && back_up.top() > pane.bottom(), "{back_up:?} {restore:?} {pane:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -2990,7 +2972,7 @@ mod tests {
         }
         let output = render_frames(&mut app, WINDOW, 3);
         let pane = output.shapes.iter().find_map(|shape| match &shape.shape {
-            egui::epaint::Shape::Rect(r) if r.fill == SIDE && r.rect.left() > SIDEBAR_WIDTH => Some(r.rect),
+            egui::epaint::Shape::Rect(r) if r.fill == CARD && r.rect.left() > SIDEBAR_WIDTH => Some(r.rect),
             _ => None,
         }).expect("the run pane is drawn");
         let steps_end = output.shapes.iter().find_map(|shape| match &shape.shape {

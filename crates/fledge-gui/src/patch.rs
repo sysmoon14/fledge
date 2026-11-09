@@ -243,26 +243,27 @@ impl Form {
     pub fn home_assistant_ui(&mut self, ui: &mut egui::Ui) {
         self.drain_dialogs();
         let on = crate::option_card(ui, &mut self.mqtt.on, true, crate::tr!("setup.mqtt"), crate::tr!("setup.mqtt_about"), |ui| {
-            egui::Grid::new("mqtt_fields").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
-                ui.label(crate::tr!("patch.mqtt.broker"));
-                ui.add(egui::TextEdit::singleline(&mut self.mqtt.value).hint_text(crate::tr!("setup.mqtt_broker_example"))
-                    .desired_width(FIELD_WIDTH)).on_hover_text(crate::tr!("patch.mqtt.broker_hint"));
-                ui.end_row();
-                ui.label(crate::tr!("patch.mqtt.user"));
-                ui.add(egui::TextEdit::singleline(&mut self.mqtt_user).hint_text(crate::tr!("setup.optional")).desired_width(FIELD_WIDTH));
-                ui.end_row();
-                ui.label(crate::tr!("patch.mqtt.password"));
-                ui.add(egui::TextEdit::singleline(&mut self.mqtt_password).password(true).hint_text(crate::tr!("setup.optional"))
-                    .desired_width(FIELD_WIDTH));
-                ui.end_row();
-                ui.label(crate::tr!("patch.mqtt.tls"));
-                ui.horizontal(|ui| {
-                    crate::checkbox(ui, true, &mut self.mqtt_tls, "").on_hover_text(crate::tr!("patch.mqtt.tls_hint"));
-                    if self.mqtt_tls {
-                        self.mqtt_ca.ui(ui, crate::tr!("patch.mqtt.ca_certificate"), crate::tr!("patch.file.certificate"), &["pem", "crt"]);
-                    }
-                });
-                ui.end_row();
+            // The broker across the card, the sign-in side by side under it.
+            let width = ui.available_width();
+            let half = (width - 14.0) / 2.0;
+            crate::field(ui, crate::tr!("patch.mqtt.broker"),
+                         egui::TextEdit::singleline(&mut self.mqtt.value).hint_text(crate::tr!("setup.mqtt_broker_example")), width)
+                .on_hover_text(crate::tr!("patch.mqtt.broker_hint"));
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                crate::field(ui, crate::tr!("patch.mqtt.user"),
+                             egui::TextEdit::singleline(&mut self.mqtt_user).hint_text(crate::tr!("setup.optional")), half);
+                crate::field(ui, crate::tr!("patch.mqtt.password"),
+                             egui::TextEdit::singleline(&mut self.mqtt_password).password(true).hint_text(crate::tr!("setup.optional")), half);
+            });
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                crate::switch(ui, &mut self.mqtt_tls, true).on_hover_text(crate::tr!("patch.mqtt.tls_hint"));
+                ui.label(crate::tr!("setup.mqtt_tls"));
+                if self.mqtt_tls {
+                    self.mqtt_ca.ui(ui, crate::tr!("patch.mqtt.ca_certificate"), crate::tr!("patch.file.certificate"), &["pem", "crt"]);
+                }
             });
         });
         let off_note = |ui: &mut egui::Ui| crate::inset(ui, |ui| {

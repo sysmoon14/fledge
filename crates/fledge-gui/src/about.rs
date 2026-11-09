@@ -33,48 +33,60 @@ fn credits() -> [(&'static str, &'static str, &'static str); 10] {
 }
 
 pub fn page(ui: &mut egui::Ui) {
-    let frame = egui::Frame::new().fill(super::SIDE).corner_radius(8)
-        .inner_margin(egui::Margin::same(super::DETAIL_MARGIN as i8));
-    egui::Panel::right("about_libraries").exact_size(460.0).resizable(false)
+    // What the libraries leave, less a gap: the pane is 440 wide inside its
+    // margins of 18.
+    let column = ui.available_width() - 440.0 - 2.0 * 18.0 - 16.0;
+    let frame = egui::Frame::new().fill(super::CARD).corner_radius(14).inner_margin(egui::Margin::same(18));
+    egui::Panel::right("about_libraries").exact_size(440.0).resizable(false)
         .show_separator_line(false).frame(frame).show(ui, libraries);
 
-    super::name_heading(ui, &crate::tr!("about.heading", app = crate::NAME));
-    ui.add_space(2.0);
-    ui.label(super::BUILD_VERSION);
-    ui.hyperlink_to(PROJECT, PROJECT);
-    ui.add_space(12.0);
-    ui.strong(crate::tr!("about.licenses"));
-    for notice in licenses() {
-        ui.label(egui::RichText::new(notice).size(12.0).color(super::MUTED));
-    }
-    ui.add_space(12.0);
-    ui.strong(crate::tr!("about.credits"));
-    for (what, author, url) in credits() {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.label(egui::RichText::new(what).size(12.0).color(super::MUTED));
-            ui.hyperlink_to(egui::RichText::new(author).size(12.0), url);
+    egui::ScrollArea::vertical().id_salt("about").auto_shrink([false, false]).show(ui, |ui| {
+        ui.set_max_width(column);
+        super::name_heading(ui, &crate::tr!("about.heading", app = crate::NAME));
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(super::BUILD_VERSION).color(super::MUTED));
+        ui.hyperlink_to(PROJECT, PROJECT);
+        ui.add_space(14.0);
+        super::card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.label(egui::RichText::new(crate::tr!("about.licenses")).font(super::medium(15.0)));
+            for notice in licenses() {
+                ui.label(egui::RichText::new(notice).size(13.0).color(super::MUTED));
+            }
         });
-    }
+        ui.add_space(10.0);
+        super::card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.label(egui::RichText::new(crate::tr!("about.credits")).font(super::medium(15.0)));
+            for (what, author, url) in credits() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.label(egui::RichText::new(what).size(13.0).color(super::MUTED));
+                    ui.hyperlink_to(egui::RichText::new(author).size(13.0), url);
+                });
+            }
+        });
+    });
 }
 
 /// The open-source libraries the binary is built from, from the generated
 /// list: the crate name on the left, its license on the right, one per row.
 fn libraries(ui: &mut egui::Ui) {
-    ui.strong(crate::tr!("about.libraries", count = THIRD_PARTY.len()));
+    ui.label(egui::RichText::new(crate::tr!("about.libraries", count = THIRD_PARTY.len())).font(super::medium(15.0)));
     ui.label(egui::RichText::new(crate::tr!("about.libraries_hint"))
-        .size(11.0).color(super::MUTED));
+        .size(12.5).color(super::MUTED));
     ui.add_space(8.0);
-    let row = 17.0;
-    let name_font = egui::FontId::proportional(11.5);
-    let license_font = egui::FontId::proportional(10.5);
+    let row = 21.0;
+    let name_font = egui::FontId::proportional(13.0);
+    let license_font = egui::FontId::proportional(11.5);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row, THIRD_PARTY.len(), |ui, range| {
         let width = ui.available_width();
         let text_color = ui.visuals().text_color();
         for (name, license) in &THIRD_PARTY[range] {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row), egui::Sense::hover());
             let y = rect.center().y;
-            let license_galley = ui.painter().layout_no_wrap(license.to_string(), license_font.clone(), super::MUTED);
+            // A long license expression is cut, not run over the name.
+            let license_galley = super::truncated(ui, license.to_string(), license_font.clone(), super::MUTED, width * 0.6);
             let license_x = rect.right() - license_galley.size().x;
             ui.painter().galley(egui::pos2(license_x, y - license_galley.size().y / 2.0), license_galley, super::MUTED);
             let name_galley = super::truncated(ui, name.to_string(), name_font.clone(), text_color, license_x - rect.left() - 8.0);

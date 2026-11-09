@@ -521,6 +521,20 @@ fn heading(ui: &mut egui::Ui, title: &str, about: &str) {
     ui.add_space(14.0);
 }
 
+/// A page's heading as the set-up steps have theirs: its title large, what
+/// `beside` adds on the title's row (a folder to open, an action), and a
+/// line about the page under it.
+pub(crate) fn page_heading(ui: &mut egui::Ui, title: &str, about: &str, beside: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).font(display(34.0)));
+        ui.add_space(6.0);
+        beside(ui);
+    });
+    ui.add_space(2.0);
+    ui.add(egui::Label::new(egui::RichText::new(about).color(MUTED)).wrap());
+    ui.add_space(14.0);
+}
+
 fn separator(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 0.0, LINE);
@@ -545,6 +559,30 @@ pub(crate) fn inset(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
         ui.spacing_mut().item_spacing.y = 8.0;
         body(ui);
     });
+}
+
+/// A field's fill and edge: darker than the card it sits on with an edge
+/// that shows, so it reads as somewhere to type.
+const FIELD: egui::Color32 = egui::Color32::from_rgb(0x0b, 0x11, 0x1b);
+const FIELD_EDGE: egui::Color32 = egui::Color32::from_rgb(0x34, 0x41, 0x56);
+
+/// A text field with its label over it: a rounded box `width` wide whose
+/// edge lights while it is typed in.
+pub(crate) fn field(ui: &mut egui::Ui, label: &str, edit: egui::TextEdit<'_>, width: f32) -> egui::Response {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 5.0;
+        ui.label(egui::RichText::new(label).size(12.5).color(LABEL));
+        let frame = egui::Frame::new().fill(FIELD).stroke(egui::Stroke::new(1.0, FIELD_EDGE)).corner_radius(9)
+            .inner_margin(egui::Margin::symmetric(11, 8));
+        let mut prepared = frame.begin(ui);
+        let room = (width - 24.0).max(40.0);
+        let response = prepared.content_ui.add(edit.frame(egui::Frame::NONE).desired_width(room).font(medium(14.0)));
+        if response.has_focus() {
+            prepared.frame = prepared.frame.stroke(egui::Stroke::new(1.0, ACCENT_LIGHT));
+        }
+        prepared.end(ui);
+        response
+    }).inner
 }
 
 /// A group's heading among the cards.
@@ -679,6 +717,14 @@ pub(crate) fn pill_button(ui: &mut egui::Ui, text: &str, primary: bool, enabled:
     };
     let label = egui::RichText::new(text).font(medium(14.0)).color(color);
     ui.add_enabled(enabled, egui::Button::new(label).fill(fill).stroke(stroke).corner_radius(18).min_size(egui::vec2(96.0, 36.0)))
+}
+
+/// A small outlined button: an action beside something, not the page's own.
+pub(crate) fn small_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
+    let label = egui::RichText::new(text).font(medium(13.0)).color(if enabled { TEXT } else { DIM });
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x2c, 0x37, 0x48));
+    ui.add_enabled(enabled, egui::Button::new(label).fill(egui::Color32::TRANSPARENT).stroke(stroke).corner_radius(14)
+        .min_size(egui::vec2(0.0, 28.0)))
 }
 
 /// A small orange button inside a card.
