@@ -63,6 +63,8 @@ pub struct Bridge {
     time_ok: mpsc::Sender<()>,             // Home Assistant answered in time
     time_ok_rx: Mutex<Option<mpsc::Receiver<()>>>,
     sensors: std::sync::atomic::AtomicBool, // motion.rs follows nlclient's log
+    /// The ambient light sensor's last reading (visible, infrared) published.
+    light: Mutex<Option<(u32, u32)>>,
     /// Home Assistant's home screen cards (ui/).
     pub ui: Arc<crate::ui::Ui>,
     /// The releases the update entity offers, with -update-repo (update.rs).
@@ -90,6 +92,7 @@ impl Bridge {
             time_ok,
             time_ok_rx: Mutex::new(Some(time_ok_rx)),
             sensors: std::sync::atomic::AtomicBool::new(false),
+            light: Mutex::new(None),
             ui: Default::default(),
             updates: OnceLock::new(),
             me: me.clone(),
@@ -258,6 +261,16 @@ impl Bridge {
     /// back when it restarts.
     pub fn sensor_event(&self, sensor: crate::motion::Sensor) {
         self.publish(&format!("{}/{}", self.base, sensor.key()), false, b"ON");
+    }
+
+    /// The ambient light sensor's reading from motion.rs, on <base>/light
+    /// (retained: the unit reads it only while awake), as it changes.
+    pub fn light(&self, visible: u32, infrared: u32) {
+        if self.light.lock().unwrap().replace((visible, infrared)) == Some((visible, infrared)) {
+            return;
+        }
+        let payload = serde_json::json!({"visible": visible, "infrared": infrared}).to_string();
+        self.publish(&format!("{}/light", self.base), true, payload.as_bytes());
     }
 
     /// Connects to the broker, and from then on publishes every change and
@@ -613,6 +626,21 @@ impl Bridge {
                     "device_class" => sensor.device_class(),
                     "off_delay" => sensor.hold(),
                 });
+            }
+            // Raw counts, not lux: the sensor's own scale, for automations
+            // to compare (dark, dim, bright).
+            for (key, name, field, extra) in [
+                ("light_level", "Light level", "visible", Fields::new()),
+                ("infrared_light", "Infrared light", "infrared", fields!{"entity_category" => "diagnostic"}),
+            ] {
+                let mut c = fields!{
+                    "state_topic" => format!("{}/light", self.base),
+                    "value_template" => format!("{{{{ value_json.{field} }}}}"),
+                    "state_class" => "measurement",
+                    "icon" => "mdi:brightness-6",
+                };
+                c.extend(extra);
+                add("sensor", key, name, c);
             }
         }
 
@@ -1193,7 +1221,10 @@ pub mod tests {
         let [motion, near] = announced(&b).map(Option::unwrap);
         assert_eq!((&motion["device_class"], &motion["off_delay"], &motion["state_topic"]),
                    (&json!("motion"), &json!(30), &json!("nestlocal/S/motion")));
-        assert_eq!((&near["device_class"], &near["off_delay"]), (&json!("occupancy"), &json!(30)));
+        assert_eq!((&near["device_class"], &near["off_delay"]), (&json!("occupancy"), &json!(10)));
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let light = configs.iter().find(|(t, _)| t.ends_with("/light_level/config")).map(|(_, c)| serde_json::from_str::<Value>(c).unwrap()).unwrap();
+        assert_eq!((&light["state_topic"], &light["value_template"]), (&json!("nestlocal/S/light"), &json!("{{ value_json.visible }}")));
     }
 
     /// Equipment with everything discovery can announce.

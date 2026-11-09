@@ -49,7 +49,10 @@ use crate::logf;
 ///      presets (preset), previous and next, a light group's members, and
 ///      the glance
 ///   5  the thermostat anywhere among the cards (thermostat)
-pub const PROTOCOL: u32 = 5;
+///   6  what someone across the room and someone close bring (presence:
+///      far glance, wake or dark; near wake, glance or none), and how long
+///      the cards stay untouched (card_idle)
+pub const PROTOCOL: u32 = 6;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -58,6 +61,20 @@ static NEST_ALERTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// The Nest shows one of its own alerts.
 pub fn nest_alert() {
     NEST_ALERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What the thermostat's sensors have seen (motion.rs): someone across the
+/// room, and someone close, counted.
+static SEEN_FAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SEEN_NEAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The thermostat's sensors saw someone.
+pub fn sensed(sensor: crate::motion::Sensor) {
+    let seen = match sensor {
+        crate::motion::Sensor::Motion => &SEEN_FAR,
+        crate::motion::Sensor::Near => &SEEN_NEAR,
+    };
+    seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[derive(Default)]
@@ -231,8 +248,10 @@ struct Runtime {
     ran: Option<(usize, Instant)>,
     /// The minute the glance's clock last showed.
     glance_minute: i64,
-    /// The Nest's own alerts taken (NEST_ALERTS).
+    /// The Nest's own alerts taken (NEST_ALERTS), and what its sensors saw
+    /// (SEEN_FAR, SEEN_NEAR).
     nest_alerts: u64,
+    seen: (u64, u64),
     /// Whether nlclient was last told the display rests (device::rest), and
     /// the owner's heartbeat, last beaten when.
     rest: bool,
@@ -351,6 +370,7 @@ impl Runtime {
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             progress: Default::default(), progress_checked: Instant::now(), wakes: 0, kept_on: Instant::now(),
             alerts: 0, ran: None, glance_minute: 0, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
+            seen: (SEEN_FAR.load(std::sync::atomic::Ordering::Relaxed), SEEN_NEAR.load(std::sync::atomic::Ordering::Relaxed)),
             rest: false, black: false, beat: 0, last_beat: now,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
@@ -468,6 +488,14 @@ impl Runtime {
                 self.nest_alerts = nest_alerts;
                 self.machine.nest_alert(now, &mut effects);
             }
+            let seen = (SEEN_FAR.load(std::sync::atomic::Ordering::Relaxed), SEEN_NEAR.load(std::sync::atomic::Ordering::Relaxed));
+            if seen.0 != self.seen.0 {
+                self.machine.sensed(crate::motion::Sensor::Motion, now, lit, &mut effects);
+            }
+            if seen.1 != self.seen.1 {
+                self.machine.sensed(crate::motion::Sensor::Near, now, lit, &mut effects);
+            }
+            self.seen = seen;
             let wakes = self.ui.wakes.load(std::sync::atomic::Ordering::Relaxed);
             if wakes != self.wakes {
                 self.wakes = wakes;

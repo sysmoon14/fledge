@@ -3,9 +3,13 @@
 //! nestlocal follows that log.
 //!
 //! - "publishing pir msg true": the PIR, which sees motion across the room
-//!   (the far sensor that shows the clock).
-//! - "tp crossings": the near-field proximity sensor, which fires again and
-//!   again while someone stands in front of the unit.
+//!   (what lights Farsight). nlclient only looks while Farsight is on.
+//! - "publishing tp - maxl: .. maxud: N": the thermopile's approach reading,
+//!   about once a second while someone is close, N growing as they come
+//!   nearer (nlclient's wake on approach). Not "tp crossings": those come
+//!   with any movement, near or far.
+//! - "pir N; px1 ..; alv A, alir I": a reading every few seconds while
+//!   awake, with the ambient light sensor's visible (A) and infrared (I).
 //!
 //! Each event is published as ON; Home Assistant clears the sensor itself
 //! (off_delay) after its hold without another, so a sensor clears on time
@@ -60,22 +64,53 @@ impl Sensor {
         }
     }
 
-    /// Seconds a sensor stays on after its last event. Proximity events
-    /// come about every 15 seconds while someone stands in front of the
-    /// unit, so a shorter hold flickers off between them.
+    /// Seconds a sensor stays on after its last event. The PIR reports
+    /// motion every few seconds while someone moves about; the approach
+    /// reading every second while someone is close.
     pub fn hold(self) -> u64 {
-        30
+        match self {
+            Sensor::Motion => 30,
+            Sensor::Near => 10,
+        }
     }
 }
 
+/// What a line of nlclient's log reports, if anything.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Event {
+    Sensed(Sensor),
+    /// The approach reading: how strongly the thermopile sees someone.
+    Approach(u32),
+    /// The ambient light sensor: visible and infrared.
+    Light { visible: u32, infrared: u32 },
+}
+
 /// The sensor event a line of nlclient's log reports, if any.
-pub fn event(line: &str) -> Option<Sensor> {
-    if !line.contains("backplate controller:") {
-        None
-    } else if line.contains("publishing pir msg true") {
-        Some(Sensor::Motion)
-    } else if line.contains("tp crossings") {
-        Some(Sensor::Near)
+#[cfg(test)]
+fn event(line: &str) -> Option<Sensor> {
+    match reading(line)? {
+        Event::Sensed(sensor) => Some(sensor),
+        Event::Approach(_) => Some(Sensor::Near),
+        Event::Light { .. } => None,
+    }
+}
+
+/// The number after `key` in `line`.
+fn number(line: &str, key: &str) -> Option<u32> {
+    let rest = &line[line.find(key)? + key.len()..];
+    let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// What a line of nlclient's log reports.
+pub fn reading(line: &str) -> Option<Event> {
+    let (_, said) = line.split_once("backplate controller: ")?;
+    if said.starts_with("publishing pir msg true") {
+        Some(Event::Sensed(Sensor::Motion))
+    } else if said.starts_with("publishing tp - ") {
+        Some(Event::Approach(number(said, "maxud:")?))
+    } else if said.starts_with("pir ") && said.contains("alv ") {
+        Some(Event::Light { visible: number(said, "alv ")?, infrared: number(said, "alir ")? })
     } else {
         None
     }
@@ -145,13 +180,28 @@ pub fn start(bridge: Arc<Bridge>) {
                 logf!("motion: the Nest shows an alert");
                 crate::ui::nest_alert();
             }
-            for sensor in lines.iter().filter_map(|l| event(l)) {
+            let mut light = None;
+            for event in lines.iter().filter_map(|l| reading(l)) {
+                match event {
+                    Event::Light { visible, infrared } => light = Some((visible, infrared)),
+                    Event::Approach(level) => logf!("motion: approach {level}"),
+                    Event::Sensed(_) => {}
+                }
+                let sensor = match event {
+                    Event::Sensed(sensor) => sensor,
+                    Event::Approach(_) => Sensor::Near,
+                    Event::Light { .. } => continue,
+                };
                 if !seen.contains(&sensor) {
                     seen.push(sensor);
                 }
             }
             for sensor in seen {
                 bridge.sensor_event(sensor);
+                crate::ui::sensed(sensor);
+            }
+            if let Some((visible, infrared)) = light {
+                bridge.light(visible, infrared);
             }
         }
     });
@@ -163,13 +213,19 @@ mod tests {
 
     const PIR: &str = "2026-11-06 23:10:38.134457 09AB01AC36230301 nlclient[500:bckpla] (2) backplate controller: publishing pir msg true (0x0001 0x7c00), threshold 100";
     const TP: &str = "2026-11-06 23:12:07.146671 09AB01AC36230301 nlclient[500:bckpla] (2) backplate controller: tp crossings - 22";
+    const APPROACH: &str = "2026-11-09 13:21:28.998656 09AB01AC36230301 nlclient[16444:bckpla] (2) backplate controller: publishing tp - maxl: 377 minl: 0 maxr: 377 minr: 0 maxud: 435 minud: 0 lrmax: 100";
     const READING: &str = "2026-11-06 23:12:08.476949 09AB01AC36230301 nlclient[500:bckpla] (2) backplate controller: pir 7954; px1 65389/0, px2 65389/0; alv 0, alir 0";
 
     #[test]
-    fn the_pir_is_motion_and_proximity_crossings_are_near_presence() {
+    fn the_pir_is_motion_and_the_approach_reading_near_presence() {
         assert_eq!(event(PIR), Some(Sensor::Motion));
-        assert_eq!(event(TP), Some(Sensor::Near));
+        assert_eq!(event(APPROACH), Some(Sensor::Near));
+        assert_eq!(reading(APPROACH), Some(Event::Approach(435)));
+        assert_eq!(event(TP), None, "crossings come with any movement, near or far");
         assert_eq!(event(READING), None, "a raw reading is not an event");
+        assert_eq!(reading(READING), Some(Event::Light { visible: 0, infrared: 0 }));
+        assert_eq!(reading("2026-11-09 13:25:07.694777 S nlclient[16444:bckpla] (2) backplate controller: pir 8209; px1 65240/15, px2 65240/15; alv 12, alir 19"),
+                   Some(Event::Light { visible: 12, infrared: 19 }));
         assert_eq!(event("czcomms: promoting hot water schedule"), None);
     }
 

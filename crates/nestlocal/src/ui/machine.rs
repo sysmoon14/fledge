@@ -10,7 +10,8 @@
 
 use std::time::{Duration, Instant};
 
-use super::model::{Alert, Card, Cards, Command, Nest, Wake};
+use super::model::{Alert, Card, Cards, Command, Far, Near, Nest, Wake};
+use crate::motion::Sensor;
 use crate::logf;
 
 /// Ring counts per step, by what a step moves: a card, a list row, a value.
@@ -40,6 +41,12 @@ pub const CAMERA_EVERY: Duration = Duration::from_secs(3);
 pub const CAMERA_IDLE: Duration = Duration::from_secs(60);
 /// How long the glance shows with nothing touched.
 pub const GLANCE_IDLE: Duration = Duration::from_secs(20);
+/// Someone seen across the room this recently is still there: the cards,
+/// left alone, go back to the glance rather than dark.
+pub const FAR_STAY: Duration = Duration::from_secs(30);
+/// The display lit this soon after an approach reading lit it for someone
+/// close, not across the room.
+pub const NEAR_LIT: Duration = Duration::from_secs(2);
 /// How long a scene's card says it ran.
 pub const RAN_SHOWN: Duration = Duration::from_secs(2);
 /// A step of a light's warmth dial, in kelvin, and of its colour's, in degrees.
@@ -310,6 +317,9 @@ pub struct Machine {
     /// timing putting it out (keeper.rests): the UI never hands it back but
     /// to nlclient's own screens (holds_screen).
     pub rests: bool,
+    /// When the thermostat last saw someone across the room, and close.
+    far_at: Option<Instant>,
+    near_at: Option<Instant>,
 }
 
 impl Machine {
@@ -319,7 +329,7 @@ impl Machine {
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, dial_offset: 0.0, volume_at: None, fledge: false,
-            rests: false,
+            rests: false, far_at: None, near_at: None,
         }
     }
 
@@ -468,6 +478,49 @@ impl Machine {
     /// as nlclient keeps it lit for whoever's in the room.
     pub fn resting(&self) -> bool {
         self.holds_screen() && self.turn == 0 && matches!(self.mode, Mode::Home | Mode::Glance)
+    }
+
+    /// The thermostat saw someone: across the room (its PIR), or close (its
+    /// approach reading, about each second while they're there). Close, it
+    /// shows what Home Assistant asked for, lit if dark; the cards stay
+    /// while someone is close.
+    pub fn sensed(&mut self, sensor: Sensor, now: Instant, lit: bool, out: &mut Vec<Effect>) {
+        match sensor {
+            Sensor::Motion => {
+                self.far_at = Some(now);
+                return;
+            }
+            Sensor::Near => self.near_at = Some(now),
+        }
+        if !matches!(self.mode, Mode::Home | Mode::Glance) || self.turn != 0 {
+            return;
+        }
+        let near = self.cards.near();
+        if near == Near::None || (near == Near::Glance && self.mode == Mode::Glance) {
+            return;
+        }
+        if !lit {
+            out.push(Effect::WakeDisplay);
+            self.lighting = Some(now + LIGHTING);
+        }
+        self.last_input = now;
+        if near == Near::Glance {
+            self.go(Mode::Glance, out);
+        } else {
+            logf!("ui: someone close: waking");
+            self.wake(out);
+        }
+    }
+
+    /// Where the cards go, left alone: the glance while someone's still
+    /// about and Home Assistant shows one, else rest.
+    fn left_alone(&self, now: Instant) -> Mode {
+        let about = self.far_at.is_some_and(|at| now.duration_since(at) < FAR_STAY);
+        if about && self.cards.far() == Far::Glance && self.holds_screen() {
+            Mode::Glance
+        } else {
+            Mode::Home
+        }
     }
 
     /// Whether nlclient's screen patch lets the display rest held.
@@ -1341,13 +1394,15 @@ impl Machine {
         }
         let idle = now.duration_since(self.last_input);
         if self.was_lit.replace(lit) == Some(false) && lit && self.mode == Mode::Home {
-            // Lit by itself, as someone came near: the glance, if Home
-            // Assistant asks for one; else wake as a turn would.
+            // Lit by itself, as someone came near: for someone close, what
+            // Home Assistant asked for them; across the room, the glance,
+            // waking as a turn would, or nothing, as it asks.
             self.last_input = now;
-            if self.cards.glance.is_some() {
-                self.go(Mode::Glance, out);
-            } else {
-                self.wake(out);
+            let close = self.near_at.is_some_and(|at| now.duration_since(at) < NEAR_LIT) && self.cards.near() != Near::None;
+            match if close { if self.cards.near() == Near::Glance { Far::Glance } else { Far::Wake } } else { self.cards.far() } {
+                Far::Glance => self.go(Mode::Glance, out),
+                Far::Wake => self.wake(out),
+                Far::Dark => {}
             }
             return;
         }
@@ -1384,8 +1439,10 @@ impl Machine {
             self.last_keep = Some(now);
             out.push(Effect::KeepAwake);
         }
+        // Someone close keeps what shows, as a touch would.
+        let idle = self.near_at.map_or(idle, |at| idle.min(now.duration_since(at)));
         let back = match self.mode.clone() {
-            Mode::Chooser(_) if idle >= CARD_IDLE => Some(Mode::Home),
+            Mode::Chooser(_) if idle >= self.cards.card_idle().unwrap_or(CARD_IDLE) => Some(self.left_alone(now)),
             Mode::LightList { slot, .. } if idle >= LIST_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
             Mode::LightDim { slot, light, .. } if idle >= CONTROL_IDLE => Some(match self.card(slot) {
                 Some(Card::Lights(card)) if card.lights.len() > 1 => Mode::LightList { slot, selected: light },
@@ -1914,6 +1971,55 @@ mod tests {
         rig.machine.nest_alert(rig.now, &mut out);
         rig.machine.nest_alert(rig.now, &mut out);
         assert_eq!(out.iter().filter(|e| **e == Effect::Own(false)).count(), 1, "once");
+    }
+
+    fn presence(far: &str, near: &str) -> Cards {
+        Cards::parse(format!(r#"{{"cards":[{{"kind":"climate","id":"climate.k","name":"K"}}],
+            "glance":{{"offset":0}},"presence":{{"far":"{far}","near":"{near}"}},"card_idle":10}}"#).as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn across_the_room_the_glance_and_close_up_what_waking_shows() {
+        let (mut rig, _) = holding(presence("glance", "wake"));
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        let mut out = vec![];
+        rig.machine.sensed(Sensor::Motion, rig.now, false, &mut out);
+        assert!(out.is_empty() && rig.machine.mode == Mode::Home, "the PIR alone lights nothing: nlclient's Farsight does");
+        rig.lit = true;
+        rig.tick();
+        assert_eq!(rig.machine.mode, Mode::Glance, "lit across the room: the glance");
+        rig.machine.sensed(Sensor::Near, rig.now, true, &mut out);
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)), "close: the cards, untouched");
+        for _ in 0..30 {
+            rig.wait(Duration::from_secs(1));
+            rig.machine.sensed(Sensor::Near, rig.now, true, &mut out);
+        }
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)), "they stay while someone's close");
+        rig.machine.sensed(Sensor::Motion, rig.now, true, &mut out);
+        rig.wait(Duration::from_secs(11));
+        assert_eq!(rig.machine.mode, Mode::Glance, "left, still in the room: the glance (card_idle 10 s)");
+        rig.lit = false;
+        rig.wait(Duration::from_secs(1));
+        assert_eq!(rig.machine.mode, Mode::Home);
+    }
+
+    #[test]
+    fn close_up_lights_a_dark_display_and_across_the_room_can_stay_dark() {
+        let (mut rig, _) = holding(presence("dark", "wake"));
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        let mut out = vec![];
+        rig.machine.sensed(Sensor::Near, rig.now, false, &mut out);
+        assert!(out.contains(&Effect::WakeDisplay) && matches!(rig.machine.mode, Mode::Chooser(_)));
+        let (mut rig, _) = holding(presence("dark", "none"));
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        rig.lit = true;
+        rig.tick();
+        assert_eq!(rig.machine.mode, Mode::Home, "lit across the room: black, as asked");
+        rig.machine.sensed(Sensor::Near, rig.now, true, &mut out);
+        assert_eq!(rig.machine.mode, Mode::Home, "close: nothing, as asked");
     }
 
     #[test]

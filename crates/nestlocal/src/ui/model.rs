@@ -24,6 +24,45 @@ pub struct Cards {
     /// Assistant asks for it: the time, the weather, what's on.
     #[serde(default)]
     pub glance: Option<Glance>,
+    /// What someone across the room and someone coming up to the
+    /// thermostat do (protocol 6); without it, as before.
+    #[serde(default)]
+    presence: Option<Presence>,
+    /// Seconds the cards stay untouched before going back (protocol 6).
+    #[serde(default)]
+    card_idle: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+struct Presence {
+    #[serde(default)]
+    far: Option<Far>,
+    #[serde(default)]
+    near: Option<Near>,
+}
+
+/// Someone across the room (the display lit by Farsight).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Far {
+    /// The glance.
+    Glance,
+    /// What waking shows, as a turn would.
+    Wake,
+    /// Nothing: the display stays black until someone touches it.
+    Dark,
+}
+
+/// Someone coming up to the thermostat (its approach reading).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Near {
+    /// What waking shows, lit if it isn't.
+    Wake,
+    /// The glance, lit if it isn't.
+    Glance,
+    /// Nothing more than across the room.
+    None,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -61,6 +100,30 @@ impl Cards {
     /// The thermostat's place among the cards.
     pub fn thermostat(&self) -> usize {
         self.thermostat.unwrap_or(0)
+    }
+
+    /// What someone across the room brings: the glance if Home Assistant
+    /// sent one, else waking, unless it says.
+    pub fn far(&self) -> Far {
+        match self.presence.as_ref().and_then(|p| p.far) {
+            Some(Far::Glance) | None if self.glance.is_some() => Far::Glance,
+            Some(Far::Dark) => Far::Dark,
+            _ => Far::Wake,
+        }
+    }
+
+    /// What someone coming up to it brings: nothing more, unless it says.
+    pub fn near(&self) -> Near {
+        match self.presence.as_ref().and_then(|p| p.near) {
+            Some(Near::Glance) if self.glance.is_none() => Near::Wake,
+            Some(near) => near,
+            None => Near::None,
+        }
+    }
+
+    /// How long the cards stay untouched, if Home Assistant says.
+    pub fn card_idle(&self) -> Option<std::time::Duration> {
+        self.card_idle.map(|s| std::time::Duration::from_secs(s.clamp(5, 600)))
     }
 
     pub fn wake(&self) -> Wake {
@@ -597,6 +660,7 @@ mod tests {
         assert_eq!(climate.target, Some(19.0));
         assert_eq!(Cards::parse(b"").unwrap(), Cards::default());
         assert_eq!(cards.wake(), Wake::Chooser, "the chooser by default");
+        assert_eq!((cards.far(), cards.near(), cards.card_idle()), (Far::Wake, Near::None, None), "as before protocol 6");
         let wake = |w: &str| Cards::parse(format!(r#"{{"cards":[{{"kind":"climate","id":"climate.x"}}],"wake":{w}}}"#).as_bytes()).unwrap().wake();
         assert_eq!((wake(r#""thermostat""#), wake("0"), wake("5"), wake(r#""chooser""#)),
                    (Wake::Thermostat, Wake::Card(0), Wake::Chooser, Wake::Chooser));
