@@ -15,9 +15,10 @@ const CENTRE: f32 = SIZE as f32 / 2.0;
 pub const RING: f32 = 233.0;
 pub const TICK: f32 = 54.0;
 pub const MARK: f32 = 73.0;
-/// The ring's ticks span 300°, open at the bottom.
-pub const TICKS: usize = 150;
-const SPAN: f32 = 300.0;
+/// The ring's ticks span 292°, open at the bottom, 2° apart: as measured
+/// from nlclient's dial.
+pub const TICKS: usize = 147;
+const SPAN: f32 = 292.0;
 
 /// The unit's fonts.
 pub const FONT_DIR: &str = "/nestlabs/share/fonts";
@@ -236,6 +237,19 @@ impl Live {
     fn changed(&mut self, from: u32, to: u32) {
         let (a, b) = self.columns.unwrap_or((from, to));
         self.columns = Some((a.min(from), b.max(to)));
+    }
+
+    /// Puts the upright rectangle (x, y, w, h) of `canvas` back as the still
+    /// part has it, and has `ticks` drawn again over it: for what's drawn
+    /// over the ring each frame (the temperature now's number), as it fades.
+    pub fn clear(&mut self, canvas: &mut Canvas, (x, y, w, h): (i32, i32, usize, usize), ticks: std::ops::RangeInclusive<usize>) {
+        canvas.restore(&self.still, x, y, w, h);
+        self.changed(x.max(0) as u32, (x + w as i32).clamp(0, SIZE as i32) as u32);
+        for tick in ticks {
+            if let Some(drawn) = self.drawn.get_mut(tick) {
+                *drawn = [u16::MAX; 4];
+            }
+        }
     }
 }
 
