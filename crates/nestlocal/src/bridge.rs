@@ -749,8 +749,8 @@ impl Bridge {
                 update.insert("command_topic".into(), format!("{set}update").into());
                 update.insert("payload_install".into(), "install".into());
             }
-            add(UPDATE_ENTITIES[0].0, UPDATE_ENTITIES[0].1, "nestlocal", update);
-            add(UPDATE_ENTITIES[1].0, UPDATE_ENTITIES[1].1, "Check for nestlocal update", fields!{
+            add(UPDATE_ENTITIES[0].0, UPDATE_ENTITIES[0].1, "Fledge software", update);
+            add(UPDATE_ENTITIES[1].0, UPDATE_ENTITIES[1].1, "Check for Fledge update", fields!{
                 "command_topic" => format!("{set}check_update"),
                 "entity_category" => "config",
                 "icon" => "mdi:update",
