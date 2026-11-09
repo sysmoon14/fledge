@@ -28,9 +28,13 @@ pub struct Cards {
     /// thermostat do (protocol 6); without it, as before.
     #[serde(default)]
     presence: Option<Presence>,
-    /// Seconds the cards stay untouched before going back (protocol 6).
+    /// Seconds the screen stays untouched before it times out (protocol 6).
     #[serde(default)]
     card_idle: Option<u64>,
+    /// What this thermostat is called in Home Assistant, for its own card
+    /// (protocol 7); "Thermostat" without.
+    #[serde(default)]
+    thermostat_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -121,7 +125,12 @@ impl Cards {
         }
     }
 
-    /// How long the cards stay untouched, if Home Assistant says.
+    /// This thermostat's name in Home Assistant, if it sent one.
+    pub fn thermostat_name(&self) -> Option<&str> {
+        self.thermostat_name.as_deref().map(str::trim).filter(|n| !n.is_empty())
+    }
+
+    /// How long the screen stays untouched, if Home Assistant says.
     pub fn card_idle(&self) -> Option<std::time::Duration> {
         self.card_idle.map(|s| std::time::Duration::from_secs(s.clamp(5, 600)))
     }
@@ -661,6 +670,9 @@ mod tests {
         assert_eq!(Cards::parse(b"").unwrap(), Cards::default());
         assert_eq!(cards.wake(), Wake::Chooser, "the chooser by default");
         assert_eq!((cards.far(), cards.near(), cards.card_idle()), (Far::Wake, Near::None, None), "as before protocol 6");
+        assert_eq!(cards.thermostat_name(), None, "\"Thermostat\" before protocol 7");
+        let named = Cards::parse(br#"{"cards":[],"thermostat_name":" Hallway "}"#).unwrap();
+        assert_eq!(named.thermostat_name(), Some("Hallway"));
         let wake = |w: &str| Cards::parse(format!(r#"{{"cards":[{{"kind":"climate","id":"climate.x"}}],"wake":{w}}}"#).as_bytes()).unwrap().wake();
         assert_eq!((wake(r#""thermostat""#), wake("0"), wake("5"), wake(r#""chooser""#)),
                    (Wake::Thermostat, Wake::Card(0), Wake::Chooser, Wake::Chooser));
