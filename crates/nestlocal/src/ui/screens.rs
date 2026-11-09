@@ -168,14 +168,21 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
 }
 
 /// What still() draws a screen from, to know when it can be kept.
+/// Only what the still part shows: Home Assistant reporting a value back
+/// as the ring turns (a light's brightness, a speaker's volume) mustn't
+/// draw the whole screen again mid-turn.
 pub fn still_key(screen: &Screen) -> Option<String> {
     match screen {
-        Screen::LightDim { light, on, .. } => Some(format!("dim {light:?} {on}")),
+        Screen::LightDim { light, on, .. } => {
+            Some(format!("dim {} {} {} {:?} {} {on}", light.id, light.name, light.icon, light.rgb, light.dimmable))
+        }
         Screen::LightWarmth { light, .. } => Some(format!("warmth {}", light.id)),
         Screen::LightHue { light, .. } => Some(format!("hue {}", light.id)),
-        Screen::ClimateSet { card, target } => Some(format!("set {card:?} {}", card.current.is_some_and(|c| *target < c))),
-        Screen::Volume { card, .. } => Some(format!("volume {card:?}")),
-        Screen::CoverSet { card, .. } => Some(format!("cover {card:?}")),
+        Screen::ClimateSet { card, .. } => Some(format!("set {} {} {} {:?} {:?}", card.name, card.mode, card.action,
+                                                        card.current, card.presets.is_empty())),
+        Screen::Volume { card, .. } => Some(format!("volume {} {}", card.name, card.state)),
+        Screen::CoverSet { card, .. } => Some(format!("cover {} {} {} {} {}", card.id, card.name, card.icon, card.state,
+                                                     card.positionable)),
         Screen::NestSet { nest, target, setting, .. } => {
             let nest = predicted(nest, *target);
             // Turning only changes it in Eco (its leaf gives way).

@@ -256,6 +256,8 @@ struct Runtime {
     glide: Option<Glide>,
     /// Something changed that the machine doesn't know of: draw.
     force_draw: bool,
+    /// When the ring last clicked.
+    last_click: Instant,
     /// The cards drawn are out of date (a device changed on its own
     /// screen): drawn again when the cards next show.
     cards_stale: bool,
@@ -306,6 +308,9 @@ const RECOLOUR: Duration = Duration::from_millis(700);
 /// How long fading from one screen to the next takes.
 const FADE: Duration = Duration::from_millis(280);
 
+/// The least time between clicks.
+const CLICK_EVERY: Duration = Duration::from_millis(45);
+
 /// How long the button is held for a long press.
 const LONG_PRESS: Duration = Duration::from_millis(600);
 /// Looks in a row, 200 ms apart, that find nlclient's home dial after its
@@ -330,7 +335,7 @@ impl Runtime {
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(),
             pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
-            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, cards_stale: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
+            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
             recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
             dial: None, last_dial: now - Duration::from_secs(60),
         }
@@ -1035,7 +1040,11 @@ impl Runtime {
             }
             Effect::WakeDisplay => device::wake_display(),
             Effect::Click => {
-                if self.sender.clicks() {
+                // A fast turn steps faster than clicks can sound apart: at
+                // most one every CLICK_EVERY, as the Nest's ring clicks.
+                let now = Instant::now();
+                if self.sender.clicks() && now.duration_since(self.last_click) >= CLICK_EVERY {
+                    self.last_click = now;
                     self.beeper.click();
                 }
             }
