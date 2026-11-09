@@ -1,12 +1,12 @@
 blueprint:
-  name: Nest weather over Zigbee (unfr0zen)
+  name: Nest weather over Zigbee (Fledge)
   description: >-
     Sends the outdoor temperature and humidity, conditions and forecast to a
-    Nest thermostat running unfr0zen on Zigbee2MQTT, every 15 minutes.
+    Nest thermostat running Fledge on Zigbee2MQTT, every 15 minutes.
     Temperatures in °F are converted to °C. The thermostat sets its clock from
     Zigbee2MQTT by itself.
   domain: automation
-  source_url: https://github.com/unfr0zen/unfr0zen/blob/main/integrations/home-assistant/weather-zigbee.yaml
+  source_url: https://github.com/sysmoon14/fledge/blob/main/integrations/home-assistant/weather-zigbee.yaml
   input:
     thermostat:
       name: Thermostat

@@ -1,15 +1,15 @@
 blueprint:
-  name: Nest weather (unfr0zen)
+  name: Nest weather (Fledge)
   description: >-
     Sends the outdoor temperature and humidity, conditions and forecast to a
-    Nest thermostat running unfr0zen, every 15 minutes. Temperatures in °F are
+    Nest thermostat running Fledge, every 15 minutes. Temperatures in °F are
     converted to °C.
   domain: automation
-  source_url: https://github.com/unfr0zen/unfr0zen/blob/main/integrations/home-assistant/weather.yaml
+  source_url: https://github.com/sysmoon14/fledge/blob/main/integrations/home-assistant/weather.yaml
   input:
     thermostat:
       name: Thermostat
-      description: The Nest thermostat running unfr0zen's nestlocal.
+      description: The Nest thermostat running Fledge's nestlocal.
       selector:
         device:
           filter:

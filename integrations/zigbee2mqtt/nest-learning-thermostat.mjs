@@ -1,5 +1,5 @@
 // Zigbee2MQTT external converter for a Nest Learning Thermostat (2nd or 3rd gen)
-// set up with unfr0zen (https://github.com/unfr0zen/unfr0zen), Zigbee checked.
+// set up with Fledge (https://github.com/sysmoon14/fledge), Zigbee checked.
 //
 // The thermostat is endpoint 1, in standard clusters: Thermostat (eco is the
 // economy bit of its programming operation mode, the eco temperatures are the

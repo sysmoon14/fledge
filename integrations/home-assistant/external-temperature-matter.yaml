@@ -1,13 +1,13 @@
 blueprint:
-  name: Nest external temperature over Matter (unfr0zen)
+  name: Nest external temperature over Matter (Fledge)
   description: >-
     Sends a thermometer's reading to a Nest thermostat on Matter installed with
-    unfr0zen's external temperature option, which then regulates from it. Matter
+    Fledge's external temperature option, which then regulates from it. Matter
     takes readings from 5 to 35 °C by 0.5 °C, so each is rounded to the nearest.
     Temperatures in °F are converted to °C. If the thermometer stops reporting,
     the thermostat goes back to its own sensor by itself.
   domain: automation
-  source_url: https://github.com/unfr0zen/unfr0zen/blob/main/integrations/home-assistant/external-temperature-matter.yaml
+  source_url: https://github.com/sysmoon14/fledge/blob/main/integrations/home-assistant/external-temperature-matter.yaml
   input:
     external_temperature:
       name: Thermostat's External temperature

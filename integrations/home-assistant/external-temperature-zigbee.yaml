@@ -1,12 +1,12 @@
 blueprint:
-  name: Nest external temperature over Zigbee (unfr0zen)
+  name: Nest external temperature over Zigbee (Fledge)
   description: >-
     Sends a thermometer's reading to a Nest thermostat on Zigbee2MQTT installed
-    with unfr0zen's external temperature option, which then regulates from it.
+    with Fledge's external temperature option, which then regulates from it.
     Temperatures in °F are converted to °C. If the thermometer stops reporting,
     the thermostat goes back to its own sensor by itself.
   domain: automation
-  source_url: https://github.com/unfr0zen/unfr0zen/blob/main/integrations/home-assistant/external-temperature-zigbee.yaml
+  source_url: https://github.com/sysmoon14/fledge/blob/main/integrations/home-assistant/external-temperature-zigbee.yaml
   input:
     thermostat:
       name: Thermostat
