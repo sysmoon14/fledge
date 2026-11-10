@@ -97,7 +97,7 @@ pub const FACE: [u8; 3] = [9, 13, 21];
 pub const TRACK: [u8; 3] = [27, 35, 48];
 /// The lift in the middle of Fledge's face: a deep blue.
 const FACE_LIFT: [u8; 3] = [22, 31, 48];
-const FLEDGE_SELECT: [u8; 3] = [35, 40, 47];
+const FLEDGE_SELECT: [u8; 3] = [58, 68, 86];
 
 /// A list's highlight, in the theme's colour.
 pub fn select() -> [u8; 3] {

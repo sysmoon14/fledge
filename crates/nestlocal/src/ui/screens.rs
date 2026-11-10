@@ -103,7 +103,7 @@ fn dial_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]
 
 /// Words in a soft pill centred on `y`, tinted by `c`, an icon before them.
 fn pill_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3], icon_name: Option<&str>) {
-    pill_words_at(pixmap, fonts, y, text, c, icon_name, 18.0, 260.0);
+    pill_words_at(pixmap, fonts, y, text, c, icon_name, 20.0, 270.0);
 }
 
 /// pill_words at `size`, its words at most `room` wide.
@@ -170,7 +170,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
 /// other screen whole.
 pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
     match screen {
-        Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on),
+        Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on, true),
         Screen::LightWarmth { light, .. } => light_dial_still(fonts, light, "Warmth"),
         Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour"),
         Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), true),
@@ -248,8 +248,8 @@ fn label(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
 }
 
 fn line(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
-    let text = paint::fit(fonts.regular(), 20.0, text, 0.0, 320.0);
-    paint::text(pixmap, fonts.regular(), 20.0, HALF, y, &text, 0.0, c);
+    let text = paint::fit(fonts.regular(), 22.0, text, 0.0, 320.0);
+    paint::text(pixmap, fonts.regular(), 22.0, HALF, y, &text, 0.0, c);
 }
 
 /// A large number as the Nest's dial shows a temperature: 21, or 21 with a
@@ -352,7 +352,8 @@ fn light_card(fonts: &Fonts, card: &LightsCard, light: &Light) -> Canvas {
         light.icon = card.icon.clone();
     }
     let value = light.brightness.unwrap_or(100);
-    let mut p = light_dim_still(fonts, &light, light.on);
+    // Among the cards, no hold hint: a hold there goes back.
+    let mut p = light_dim_still(fonts, &light, light.on, false);
     if light.dimmable {
         light_dim_moving(&mut p, None, fonts, &light, light.on, value, None);
     } else {
@@ -927,7 +928,7 @@ fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial
         let update = rows[row] == Setting::Software && nest.is_some_and(|n| n.update.is_some());
         let value_tint = if chosen { WHITE } else if update || value == "On" { ON } else { GREY };
         icon(&mut p, icon_name, "setting", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
-        let value_width = paint::measure(fonts.regular(), 20.0, &value, 0.0);
+        let value_width = paint::measure(fonts.regular(), 22.0, &value, 0.0);
         let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
         paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
         paint::text_at(&mut p, fonts.regular(), 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
@@ -1103,14 +1104,14 @@ fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, l
                     (false, _) => "Off".to_owned(),
                 };
                 let tint = if light.on { light.colour() } else { DIM };
-                (light.name.as_str(), value, tint, if light.on { light.colour() } else { [107, 112, 121] },
+                (light.name.as_str(), value, tint, if light.on { light.colour() } else { GREY },
                  light.icon.as_str(), light.id.as_str())
             }
             None => ("Back", String::new(), GREY, GREY, "mdi:arrow-left", "back"),
         };
         let (tint, value_tint, text_tint) = if chosen { (WHITE, WHITE, WHITE) } else { (tint, value_tint, WHITE) };
         icon(&mut p, icon_name, entity, x + 34.0, y + h / 2.0, 28.0, tint);
-        let value_width = paint::measure(fonts.regular(), 20.0, &value, 0.0);
+        let value_width = paint::measure(fonts.regular(), 22.0, &value, 0.0);
         let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
         paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, text_tint, 1.0);
         paint::text_at(&mut p, fonts.regular(), 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
@@ -1121,7 +1122,7 @@ fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, l
 /// A light's dimmer (and its card) without the ring and number: its icon
 /// and name, Off, and what holding (a press, for one that only switches)
 /// does.
-fn light_dim_still(fonts: &Fonts, light: &Light, on: bool) -> Canvas {
+fn light_dim_still(fonts: &Fonts, light: &Light, on: bool, opened: bool) -> Canvas {
     let mut p = paint::face(BLACK);
     let accent = if on { light.colour() } else { GREY };
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, accent);
@@ -1136,7 +1137,9 @@ fn light_dim_still(fonts: &Fonts, light: &Light, on: bool) -> Canvas {
         (false, true) => "Hold to turn off",
         (false, false) => "Hold to turn on",
     };
-    line(&mut p, fonts, 366.0, hint, GREY);
+    if opened {
+        line(&mut p, fonts, 366.0, hint, GREY);
+    }
     p
 }
 
@@ -1500,7 +1503,7 @@ fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer)
             icon(&mut p, "mdi:arrow-left", "back", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
         }
         let value = if now { "Now" } else { "" };
-        let value_width = paint::measure(fonts.regular(), 20.0, value, 0.0);
+        let value_width = paint::measure(fonts.regular(), 22.0, value, 0.0);
         let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
         paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
         if now {
@@ -1819,7 +1822,7 @@ pub fn options(fonts: &Fonts, title: &str, items: &[Opt], selected: usize, accen
     paint::text(&mut p, fonts.medium(), 42.0, HALF, 300.0, &name, 0.0, WHITE);
     line(&mut p, fonts, 340.0, chosen.under, GREY);
     let label = paint::fit(fonts.medium(), 18.0, title, 0.0, 200.0);
-    paint::text(&mut p, fonts.medium(), 18.0, HALF, 404.0, &label, 0.0, DIM);
+    paint::text(&mut p, fonts.medium(), 18.0, HALF, 404.0, &label, 0.0, GREY);
     p
 }
 
