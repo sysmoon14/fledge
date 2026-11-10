@@ -23,6 +23,7 @@ mod film;
 mod icons;
 mod machine;
 mod model;
+mod motion;
 mod nlstate;
 use nlstate::Shows;
 mod paint;
@@ -59,7 +60,9 @@ use crate::logf;
 ///      the screen stays untouched (card_idle)
 ///   7  the thermostat's own name (thermostat_name); the screen stays on
 ///      whatever was opened until it times out
-pub const PROTOCOL: u32 = 7;
+///   8  turning a dimmer down past its lowest turns the light off, a
+///      switch's ring turns it off and on (dim_off, default on)
+pub const PROTOCOL: u32 = 8;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -348,6 +351,10 @@ struct Runtime {
     /// card when the display wakes, its own page dark until nlclient draws.
     dial: Option<device::Frame>,
     last_dial: Instant,
+    /// A value shown on its way to where it is: a light swept to Off or
+    /// back on (held, or from a menu), or a number Home Assistant changed,
+    /// counting to it.
+    count: Option<Count>,
     /// Frames of the animation under way: how many, how long all told, the
     /// longest.
     frames: (u32, Duration, Duration),
@@ -432,6 +439,18 @@ struct Glide {
     drawn: Instant,
 }
 
+/// A value screen's number and ring on their way from `from` to `to`
+/// (as the mode holds them), for the screen keyed `key`; a light switched
+/// off shows on until it reaches nothing.
+struct Count {
+    key: SweepKey,
+    from: f64,
+    to: f64,
+    since: Instant,
+    length: Duration,
+    lit: bool,
+}
+
 /// How long the thermostat's pulse runs, and how often.
 const PULSE: Duration = Duration::from_millis(1800);
 const PULSE_EVERY: Duration = Duration::from_secs(30);
@@ -441,9 +460,7 @@ const GLIDE: f32 = 0.05;
 const KEPT_WINDOWS: usize = 4;
 /// How long the thermostat's dial takes to change colour: slow enough to
 /// read as the heating lighting, not a switch.
-const RECOLOUR: Duration = Duration::from_millis(700);
-/// How long fading from one screen to the next takes.
-const FADE: Duration = Duration::from_millis(280);
+const RECOLOUR: Duration = motion::SLOW;
 
 /// The least time between clicks.
 const CLICK_EVERY: Duration = Duration::from_millis(45);
@@ -485,7 +502,7 @@ impl Runtime {
             pressed: None, back_chosen: None, back_since: None, native_input: now, settings_checked: now, settings_seen: 0, native_settings: false,
             nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
             recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
-            dial: None, last_dial: now - Duration::from_secs(60),
+            dial: None, last_dial: now - Duration::from_secs(60), count: None,
         }
     }
 
@@ -704,12 +721,16 @@ impl Runtime {
                     self.force_draw = true;
                 }
             }
-            self.transition = transition(&before, &self.machine.mode, turned && lit);
+            self.transition = transition(&before, &self.machine.mode, turned && lit, &self.machine);
             if std::mem::take(&mut self.machine.woke) {
-                // Woken: the thermostat as it lit, zooming out to the cards.
+                // Woken: the thermostat as it lit, zooming out to the cards;
+                // from the glance, faded through to it first.
                 self.zoom = 1.0;
-                self.transition = Transition::Cut;
+                if before != Mode::Glance {
+                    self.transition = Transition::Cut;
+                }
             }
+            self.start_count(&before, turned, now);
             if matches!(before, Mode::Chooser(_)) && !matches!(self.machine.mode, Mode::Chooser(_) | Mode::Home) {
                 // Opened: into the card before what it opens shows.
                 self.zoom_in();
@@ -737,8 +758,14 @@ impl Runtime {
             if self.machine.mode != Mode::Glance {
                 self.ticker = None;
             }
+            let counted = self.count.is_some();
+            if self.count.as_ref().is_some_and(|c| c.since.elapsed() >= c.length) {
+                // There: the screen as it is now, faded to if it went out.
+                let lit = self.count.take().is_some_and(|c| c.lit);
+                self.fade_next |= !lit && !matches!(self.machine.mode, Mode::LightDim { on: true, .. });
+            }
             let mut dirty = self.machine.take_dirty() | std::mem::take(&mut self.force_draw) || self.pulse.is_some()
-                || self.gliding() || self.recolour.is_some() || self.ticker_due();
+                || self.gliding() || self.recolour.is_some() || self.ticker_due() || counted;
             if self.machine.mode == Mode::Glance && unix_now() as i64 / 60 != self.glance_minute {
                 // The glance's clock, as the minute turns.
                 self.glance_minute = unix_now() as i64 / 60;
@@ -899,7 +926,51 @@ impl Runtime {
     /// Whether something on the display is on its way somewhere.
     fn animating(&self) -> bool {
         self.moving() || self.sweeping() || self.pulse.is_some() || self.gliding() || self.ticker.is_some()
-            || (self.now_shown.0 - self.now_shown.1).abs() > 0.01 || self.recolour.is_some()
+            || (self.now_shown.0 - self.now_shown.1).abs() > 0.01 || self.recolour.is_some() || self.count.is_some()
+    }
+
+    /// A light switched off or on sweeps its ring and number down to
+    /// nothing or up to its brightness (B1); a number Home Assistant
+    /// changed, not the ring, counts to it (D3).
+    fn start_count(&mut self, before: &Mode, turned: bool, now: Instant) {
+        let after = &self.machine.mode;
+        let (Some(key), Some(was), Some(is)) = (sweep_key(before), number(before), number(after)) else {
+            if sweep_key(after).is_none() {
+                self.count = None;
+            }
+            return;
+        };
+        if sweep_key(after) != Some(key) {
+            self.count = None;
+            return;
+        }
+        // From where it shows now, if it was on its way already.
+        let shown = self.count.as_ref().map_or(was, |c| c.from + (c.to - c.from) * motion::curve(c.since.elapsed().as_secs_f32() / c.length.as_secs_f32()) as f64);
+        let switched = match (before, after) {
+            (Mode::LightDim { on: a, .. }, Mode::LightDim { on: b, .. }) => (a != b).then_some(*b),
+            _ => None,
+        };
+        if let Some(on) = switched {
+            let from = if on { 0.0 } else { shown };
+            self.count = Some(Count { key, from, to: if on { is } else { 0.0 }, since: now, length: motion::SLOW, lit: on });
+        } else if !turned && (is - was).abs() > f64::EPSILON && self.count.as_ref().is_none_or(|c| c.lit) {
+            self.count = Some(Count { key, from: shown, to: is, since: now, length: motion::STANDARD, lit: true });
+        } else if turned {
+            // The hand has it: the ring follows the hand.
+            self.count = None;
+        }
+    }
+
+    /// The mode as it shows: with its number where its count has got to.
+    fn shown_mode(&self) -> Mode {
+        let mode = self.machine.mode.clone();
+        let Some(count) = &self.count else { return mode };
+        if sweep_key(&mode) != Some(count.key) {
+            return mode;
+        }
+        let t = (count.since.elapsed().as_secs_f32() / count.length.as_secs_f32()).min(1.0);
+        let at = count.from + (count.to - count.from) * motion::curve(t) as f64;
+        with_number(mode, at)
     }
 
     /// The dial's temperature now fades out where it is as the target comes
@@ -1018,12 +1089,11 @@ impl Runtime {
         let Some(view) = self.view else {
             // Onto the cards: from a turn on the thermostat, where it is;
             // back from a card's own screens, faded in.
-            let start = if self.transition == Transition::Fade { target } else { target.round() };
+            let start = if self.transition != Transition::Cut { target } else { target.round() };
             self.view = Some(start);
-            if self.transition == Transition::Fade {
-                let from = self.display.save();
+            if self.transition != Transition::Cut {
                 let to = self.card_frame(start.round() as i64);
-                self.animate(&from, &to, Transition::Fade);
+                self.transit(&to, self.transition);
             }
             self.show_cards(start);
             return true;
@@ -1270,7 +1340,8 @@ impl Runtime {
     /// How far the ring of the mode's value should show (0..1), if it has one.
     fn value(&self) -> Option<f32> {
         let card = |slot: usize| self.machine.cards.cards.get(slot);
-        match &self.machine.mode {
+        let mode = self.shown_mode();
+        match &mode {
             Mode::LightDim { on: true, value, .. } | Mode::Volume { value, .. } => Some(*value as f32 / 100.0),
             Mode::ClimateSet { slot, target } => match card(*slot) {
                 Some(Card::Climate(c)) => Some(((target - c.min) / (c.max - c.min).max(0.5)) as f32),
@@ -1366,10 +1437,7 @@ impl Runtime {
                 if let Some(saved) = self.saved.clone() {
                     match (self.transition, self.view) {
                         _ if self.machine.mode == Mode::Native => {}
-                        (Transition::Fade, _) => {
-                            let from = self.display.save();
-                            self.animate(&from, &saved, Transition::Fade);
-                        }
+                        (kind, _) if kind != Transition::Cut => self.transit(&saved, kind),
                         (_, Some(_)) => self.settle(),
                         _ => {}
                     }
@@ -1400,6 +1468,12 @@ impl Runtime {
                 if self.sender.clicks() && now.duration_since(self.last_click) >= CLICK_EVERY {
                     self.last_click = now;
                     self.beeper.click();
+                }
+            }
+            Effect::ClickLow => {
+                if self.sender.clicks() {
+                    self.last_click = Instant::now();
+                    self.beeper.click_low();
                 }
             }
             Effect::Chime => {
@@ -1667,10 +1741,8 @@ impl Runtime {
         let frame = device::frame(canvas);
         // The device's screen redraws whole when the menu closes.
         self.live = None;
-        if std::mem::replace(&mut self.transition, Transition::Cut) == Transition::Fade {
-            let from = self.display.save();
-            self.animate(&from, &frame, Transition::Fade);
-        }
+        let kind = std::mem::replace(&mut self.transition, Transition::Cut);
+        self.transit(&frame, kind);
         self.display.show(&frame);
     }
 
@@ -1680,21 +1752,19 @@ impl Runtime {
         }
         if self.machine.mode == Mode::Home {
             // Held at rest: nothing, as the display goes out by itself.
-            if self.black && self.transition != Transition::Fade && !self.display.lost() {
+            if self.black && self.transition == Transition::Cut && !self.display.lost() {
                 return;
             }
             self.black = true;
             let black = vec![0; (paint::SIZE * paint::SIZE * 4) as usize];
-            if std::mem::replace(&mut self.transition, Transition::Cut) == Transition::Fade {
-                let from = self.display.save();
-                self.animate(&from, &black, Transition::Fade);
-            }
+            let kind = std::mem::replace(&mut self.transition, Transition::Cut);
+            self.transit(&black, kind);
             self.live = None;
             self.glide = None;
             self.display.show(&black);
             return;
         }
-        let mode = self.machine.mode.clone();
+        let mode = self.shown_mode();
         let Some(mut screen) = Self::screen(&self.machine, &mode) else { return };
         if let Screen::NestSet { pulse, shown, .. } = &mut screen {
             *pulse = self.pulse.map(|at| at.elapsed().as_secs_f32() / PULSE.as_secs_f32());
@@ -1702,8 +1772,11 @@ impl Runtime {
             *shown = Some((self.now_shown.0, now - self.now_side));
         }
         let sweep = self.sweep.as_ref().map(|(_, shown)| *shown);
-        let fade = self.transition == Transition::Fade || std::mem::take(&mut self.fade_next);
-        self.transition = Transition::Cut;
+        let kind = match (std::mem::replace(&mut self.transition, Transition::Cut), std::mem::take(&mut self.fade_next)) {
+            (Transition::Cut, true) => Transition::Fade,
+            (kind, _) => kind,
+        };
+        let fade = kind != Transition::Cut;
         if let Screen::Glance { glance, cards, now } = &screen {
             if let Some(round) = screens::glance_scroll(&self.fonts, cards) {
                 // A line too long for its place scrolls: the glance drawn
@@ -1725,10 +1798,7 @@ impl Runtime {
                 (self.live, self.glide) = (None, None);
                 if fresh || fade {
                     let frame = ticker.canvas.pixmap.data().to_vec();
-                    if fade {
-                        let from = self.display.save();
-                        self.animate(&from, &frame, Transition::Fade);
-                    }
+                    self.transit(&frame, kind);
                     self.display.show(&frame);
                 } else if let Some((first, last)) = columns {
                     // An upright column is a framebuffer row.
@@ -1741,10 +1811,7 @@ impl Runtime {
         self.ticker = None;
         if let Some((selected, first)) = screens::list_place(&screen) {
             let frame = Self::draw_list(&mut self.glide, &self.fonts, &screen, selected - first, fade);
-            if fade {
-                let from = self.display.save();
-                self.animate(&from, &frame, Transition::Fade);
-            }
+            self.transit(&frame, kind);
             self.live = None;
             self.display.show(&frame);
             return;
@@ -1764,7 +1831,7 @@ impl Runtime {
                 let from = match (&self.recolour, &self.live) {
                     (Some((from, _)), _) => from.clone(),
                     (None, Some((_, canvas, _))) => canvas.pixmap.data().to_vec(),
-                    (None, None) => self.display.save(),
+                    (None, None) => self.display.current(),
                 };
                 self.recolour = Some((from, Instant::now()));
             }
@@ -1797,16 +1864,13 @@ impl Runtime {
                     let frame = canvas.pixmap.data().to_vec();
                     self.display.show(&frame);
                 } else {
-                    self.display.fade(from, canvas.pixmap.data(), (ease(t) * 256.0) as u16);
+                    self.display.fade(from, canvas.pixmap.data(), (motion::curve(t) * 256.0) as u16);
                 }
                 return;
             }
             if fresh || fade {
                 let frame = canvas.pixmap.data().to_vec();
-                if fade {
-                    let from = self.display.save();
-                    self.animate(&from, &frame, Transition::Fade);
-                }
+                self.transit(&frame, kind);
                 self.display.show(&frame);
             } else if let Some((first, last)) = live.columns {
                 // An upright column is a framebuffer row.
@@ -1816,10 +1880,7 @@ impl Runtime {
         }
         self.live = None;
         let frame = device::frame(screens::draw(&self.fonts, &screen, sweep));
-        if fade {
-            let from = self.display.save();
-            self.animate(&from, &frame, Transition::Fade);
-        }
+        self.transit(&frame, kind);
         self.display.show(&frame);
     }
 
@@ -1887,19 +1948,22 @@ impl Runtime {
         device::frame(canvas)
     }
 
-    /// Fades the display from `from` to `to`.
-    fn animate(&mut self, from: &[u8], to: &[u8], transition: Transition) {
-        if transition == Transition::Cut {
+    /// Moves the display from what shows to `to` by `kind`, a frame at a
+    /// time as the display takes them (blocking: a transition is short).
+    fn transit(&mut self, to: &[u8], kind: Transition) {
+        if kind == Transition::Cut {
             return;
         }
-        let started = Instant::now();
-        let length = FADE;
+        let from = self.display.current();
+        let mut out = vec![0; from.len()];
+        let (started, length) = (Instant::now(), kind.length().as_secs_f32());
         loop {
-            let t = started.elapsed().as_secs_f32() / length.as_secs_f32();
+            let t = started.elapsed().as_secs_f32() / length;
             if t >= 1.0 {
                 return;
             }
-            self.display.fade(from, to, (ease(t) * 256.0) as u16);
+            motion::frame(kind, &from, to, t, &mut out);
+            self.display.show(&out);
         }
     }
 }
@@ -1921,17 +1985,62 @@ fn sweep_key(mode: &Mode) -> Option<SweepKey> {
     }
 }
 
-/// How the display moves from one screen to the next. Turning between the
-/// cards isn't one: the cards follow the ring (Runtime::follow).
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Transition {
-    Cut,
-    Fade,
+/// The number a value screen shows, as its mode holds it (a light off: none).
+fn number(mode: &Mode) -> Option<f64> {
+    Some(match *mode {
+        Mode::LightDim { on, value, .. } => if on { value as f64 } else { 0.0 },
+        Mode::Volume { value, .. } | Mode::CoverSet { value, .. } => value as f64,
+        Mode::ClimateSet { target, .. } => target,
+        _ => return None,
+    })
 }
 
-/// Going into a card or back out of one fades, as does going back when left
-/// alone; handing nlclient its menus, and anything within one view, cuts.
-fn transition(before: &Mode, after: &Mode, turned: bool) -> Transition {
+/// `mode` showing `at` as its number: a light on, for as long as it shows one.
+fn with_number(mode: Mode, at: f64) -> Mode {
+    let percent = at.round().clamp(0.0, 100.0) as u8;
+    match mode {
+        Mode::LightDim { slot, light, .. } => Mode::LightDim { slot, light, on: true, value: percent },
+        Mode::Volume { slot, .. } => Mode::Volume { slot, value: percent },
+        Mode::CoverSet { slot, .. } => Mode::CoverSet { slot, value: percent },
+        // A temperature in its own steps: tenths, as it would show.
+        Mode::ClimateSet { slot, .. } => Mode::ClimateSet { slot, target: (at * 10.0).round() / 10.0 },
+        other => other,
+    }
+}
+
+/// How the display moves from one screen to the next (motion::Kind).
+/// Turning between the cards isn't one: the cards follow the ring
+/// (Runtime::follow).
+type Transition = motion::Kind;
+
+/// How deep a screen is: the cards 0, what a card opens 1, what that opens
+/// 2, and so on; a menu one deeper than its screen.
+fn depth(mode: &Mode, machine: &Machine) -> u8 {
+    match mode {
+        Mode::LightList { .. } | Mode::ClimateSet { .. } | Mode::Volume { .. } | Mode::Camera { .. }
+        | Mode::OptionList { .. } | Mode::CoverSet { .. } | Mode::Thermostat { .. } | Mode::Settings { .. } => 1,
+        // A lamp's own card opens straight to its dimmer; a room's, from its list.
+        Mode::LightDim { slot, .. } => match machine.cards.cards.get(*slot) {
+            Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
+            _ => 1,
+        },
+        Mode::Members { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. } => 2,
+        Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => {
+            depth(&Mode::LightDim { slot: *slot, light: *light, on: true, value: 0 }, machine) + 1
+        }
+        Mode::Menu { view, .. } => depth(view, machine) + 1,
+        Mode::Alert { back, .. } => depth(back, machine),
+        _ => 0,
+    }
+}
+
+/// How the display goes from `before` to `after` (`turned`: by the ring).
+/// The glance gives way by fading through; a notification drops in and
+/// lifts away; a menu arrives over its screen and leaves it; deeper in a
+/// card pushes, back pops; onto the cards and off them, and the screen
+/// going out, fade (the cards zoom as well). Handing nlclient its menus,
+/// and anything within one view, cuts.
+fn transition(before: &Mode, after: &Mode, turned: bool, machine: &Machine) -> Transition {
     let cards = |mode: &Mode| matches!(mode, Mode::Home | Mode::Chooser(_));
     let same_view = std::mem::discriminant(before) == std::mem::discriminant(after) && !cards(before);
     if before == after || same_view || !(before.owning() || after.owning()) || *after == Mode::Native {
@@ -1940,7 +2049,25 @@ fn transition(before: &Mode, after: &Mode, turned: bool) -> Transition {
     if cards(before) && cards(after) && turned {
         return Transition::Cut;
     }
-    Transition::Fade
+    match (before, after) {
+        (_, Mode::Alert { .. }) => Transition::Drop,
+        (Mode::Alert { .. }, _) => Transition::Lift,
+        (Mode::Glance, _) => Transition::Through,
+        // A camera opens from its card, zoomed in, as a photo does.
+        (Mode::Chooser(_), Mode::Camera { .. }) => Transition::Through,
+        (_, Mode::Menu { view, .. }) if **view == *before => Transition::MenuIn,
+        (Mode::Menu { view, .. }, _) if **view == *after => Transition::MenuOut,
+        _ => {
+            let (from, to) = (depth(before, machine), depth(after, machine));
+            if from == 0 || to == 0 || from == to {
+                Transition::Fade
+            } else if to > from {
+                Transition::Push
+            } else {
+                Transition::Pop
+            }
+        }
+    }
 }
 
 /// The wall clock, in Unix seconds.
@@ -1948,9 +2075,6 @@ fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
-fn ease(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
-}
 
 #[cfg(test)]
 mod tests {
@@ -2022,16 +2146,53 @@ mod tests {
         assert_eq!(ticker_offset(period + 0.5, round), 0.0, "and at its start again");
     }
 
+    /// A machine with a room of two lamps (slot 0) and a lamp of its own (slot 1).
+    fn machine_with_rooms() -> Machine {
+        let mut machine = Machine::new(Instant::now());
+        let cards = Cards::parse(br#"{"cards":[
+            {"kind":"lights","name":"Bedroom","icon":"","lights":[
+                {"id":"light.lamp","name":"Lamp","on":true,"dimmable":true,"brightness":60},
+                {"id":"light.desk","name":"Desk","on":false,"dimmable":true}]},
+            {"kind":"lights","name":"Reading","icon":"","lights":[
+                {"id":"light.reading","name":"Reading","on":true,"dimmable":true,"brightness":40}]}]}"#).unwrap();
+        machine.set_cards(cards, &mut vec![]);
+        machine
+    }
+
     #[test]
     fn going_in_and_out_fades_and_the_rest_cuts() {
-        assert_eq!(transition(&Mode::Home, &Mode::Chooser(1), true), Transition::Cut, "the cards follow the ring");
-        assert_eq!(transition(&Mode::Chooser(4), &Mode::Home, true), Transition::Cut);
-        assert_eq!(transition(&Mode::Chooser(2), &Mode::Home, false), Transition::Fade, "left alone");
+        let m = &machine_with_rooms();
+        assert_eq!(transition(&Mode::Home, &Mode::Chooser(1), true, m), Transition::Cut, "the cards follow the ring");
+        assert_eq!(transition(&Mode::Chooser(4), &Mode::Home, true, m), Transition::Cut);
+        assert_eq!(transition(&Mode::Chooser(2), &Mode::Home, false, m), Transition::Fade, "left alone");
         let list = Mode::LightList { slot: 0, selected: 0 };
-        assert_eq!(transition(&Mode::Chooser(1), &list, true), Transition::Fade);
-        assert_eq!(transition(&list, &Mode::Chooser(1), false), Transition::Fade);
-        assert_eq!(transition(&Mode::Chooser(4), &Mode::Native, true), Transition::Cut, "nlclient's menu");
-        assert_eq!(transition(&list, &Mode::LightList { slot: 0, selected: 1 }, true), Transition::Cut);
+        assert_eq!(transition(&Mode::Chooser(1), &list, true, m), Transition::Fade, "onto a card's own screens");
+        assert_eq!(transition(&list, &Mode::Chooser(1), false, m), Transition::Fade);
+        assert_eq!(transition(&Mode::Chooser(4), &Mode::Native, true, m), Transition::Cut, "nlclient's menu");
+        assert_eq!(transition(&list, &Mode::LightList { slot: 0, selected: 1 }, true, m), Transition::Cut);
+    }
+
+    #[test]
+    fn deeper_pushes_back_pops_and_overlays_arrive_over() {
+        let m = &machine_with_rooms();
+        let list = Mode::LightList { slot: 0, selected: 0 };
+        let dim = Mode::LightDim { slot: 0, light: 0, on: true, value: 60 };
+        assert_eq!(transition(&list, &dim, false, m), Transition::Push, "a room's lamp, from its list");
+        assert_eq!(transition(&dim, &list, false, m), Transition::Pop);
+        let lamp = Mode::LightDim { slot: 1, light: 0, on: true, value: 40 };
+        assert_eq!(transition(&Mode::Chooser(2), &lamp, false, m), Transition::Fade, "a lamp's own card opens to it");
+        let menu = Mode::Menu { view: Box::new(dim.clone()), actions: vec![Action::Back], selected: 0 };
+        assert_eq!(transition(&dim, &menu, false, m), Transition::MenuIn);
+        assert_eq!(transition(&menu, &dim, false, m), Transition::MenuOut);
+        let warmth = Mode::LightWarmth { slot: 0, light: 0, value: 3000 };
+        assert_eq!(transition(&menu, &warmth, false, m), Transition::Fade, "from the menu, beside the dimmer");
+        assert_eq!(transition(&warmth, &dim, false, m), Transition::Pop, "back to the dimmer");
+        assert_eq!(transition(&menu, &list, false, m), Transition::Pop, "the menu's Back");
+        assert_eq!(transition(&Mode::Glance, &Mode::Chooser(0), true, m), Transition::Through, "the glance gives way");
+        let alert = Mode::Alert { id: "door".into(), back: Box::new(Mode::Chooser(0)) };
+        assert_eq!(transition(&Mode::Chooser(0), &alert, false, m), Transition::Drop);
+        assert_eq!(transition(&alert, &Mode::Chooser(0), false, m), Transition::Lift);
+        assert_eq!(transition(&Mode::Chooser(0), &Mode::Camera { slot: 0 }, false, m), Transition::Through);
     }
 
     fn png(size: u32, colour: png::ColorType, pixel: &[u8]) -> Vec<u8> {

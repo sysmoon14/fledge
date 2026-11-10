@@ -62,6 +62,9 @@ pub const KELVIN_STEP: i32 = 50;
 pub const HUE_STEP: i32 = 4;
 /// The colour dial's far end, a step short of where it began (red).
 pub const HUE_MAX: u16 = 356;
+/// How long a dimmer turned down holds at its lowest before turning on
+/// down turns the light off: a quick spin that only meant to dim stops there.
+const DETENT: Duration = Duration::from_millis(250);
 /// How far the cards follow a turn past either end, in counts.
 pub const END_GIVE: i32 = CARD_STEP / 6;
 pub const SNAP: Duration = Duration::from_millis(250);
@@ -268,6 +271,8 @@ pub enum Effect {
     WakeDisplay,
     /// The Nest's click, for a step of the ring or a press.
     Click,
+    /// A lower click: a light turned off by turning past its lowest.
+    ClickLow,
     /// Holds the unit awake while a card shows.
     KeepAwake,
     /// nlclient's Settings, from its menu: opened, Back checked as chosen,
@@ -298,6 +303,9 @@ pub struct Machine {
     turn: i32,
     movement: i32,
     pending: Option<Command>,
+    /// A dimmer that reached its lowest turning down, and when: turning on
+    /// down from there after DETENT turns it off (B2).
+    floor: Option<(usize, usize, Instant)>,
     last_sent: Instant,
     /// What was last said of the display and the ring (Effect::Own, Hold).
     owned: bool,
@@ -350,7 +358,7 @@ impl Machine {
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
-            rests: false, near_at: None,
+            rests: false, near_at: None, floor: None,
         }
     }
 
@@ -842,14 +850,41 @@ impl Machine {
             }
             return;
         }
-        // Nothing to turn: a switch has no dimmer, and the colour dial stops
-        // at either end, as the white one does.
+        // Nothing to turn: a switch has no dimmer (but turns off left and
+        // on right, if Home Assistant says so), and the colour dial stops at
+        // either end, as the white one does.
         match self.mode {
-            Mode::LightDim { slot, light, .. } => {
-                if let Some(Card::Lights(card)) = self.card(slot) {
-                    if !card.lights[light].dimmable {
-                        return;
+            Mode::LightDim { slot, light, on, value } => {
+                let Some(Card::Lights(card)) = self.card(slot) else { return };
+                let dim_off = self.cards.dim_off();
+                if !card.lights[light].dimmable {
+                    if dim_off && (steps < 0) == on {
+                        out.push(if on { Effect::ClickLow } else { Effect::Click });
+                        self.switch_light(slot, light, !on, out);
+                        self.mode = Mode::LightDim { slot, light, on: !on, value };
                     }
+                    return;
+                }
+                let start = if on { value as i32 } else { 0 };
+                if dim_off && on && steps < 0 && start + steps < 1 {
+                    // Past the lowest: it holds there for a moment, then
+                    // turning on down turns it off.
+                    let now = self.last_input;
+                    match self.floor {
+                        Some((s, l, at)) if (s, l) == (slot, light) && start <= 1 => {
+                            if now.duration_since(at) >= DETENT {
+                                self.floor = None;
+                                self.pending = None;
+                                out.push(Effect::ClickLow);
+                                self.switch_light(slot, light, false, out);
+                                self.mode = Mode::LightDim { slot, light, on: false, value: 1 };
+                            }
+                            return;
+                        }
+                        _ => self.floor = Some((slot, light, now)),
+                    }
+                } else if !(on && start <= 1 && steps < 0) {
+                    self.floor = None;
                 }
             }
             Mode::LightHue { value, .. } if (steps < 0 && value == 0) || (steps > 0 && value >= HUE_MAX) => return,
@@ -1737,7 +1772,7 @@ mod tests {
         rig.turn(CARD_STEP);
         assert!(Rig::sends(&rig.press()).is_empty(), "pressed: not switched");
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: false, value: 100 }, "its own screen");
-        assert!(!rig.turn(VALUE_STEP * 3).contains(&Effect::Click), "no dimmer to turn, no click");
+        assert!(Rig::sends(&rig.turn(-VALUE_STEP * 3)).is_empty(), "off already: turning left does nothing");
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: false, value: 100 });
         rig.press();
         let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!("pressed: its menu") };
@@ -1746,6 +1781,78 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: false, value: 100 }, "held in the menu: out of it");
         assert_eq!(Rig::sends(&rig.input(Input::LongPress)), vec![Command::On("switch.fan".into())], "held: switched");
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: true, value: 100 });
+    }
+
+    fn lamp_and_fan(dim_off: &str) -> Rig {
+        let mut rig = Rig::with(Cards::parse(format!(r#"{{"cards":[
+            {{"kind":"lights","name":"Lamp","icon":"","lights":[
+                {{"id":"light.lamp","name":"Lamp","on":true,"dimmable":true,"brightness":60}}]}},
+            {{"kind":"lights","name":"Fan","icon":"","lights":[
+                {{"id":"switch.fan","name":"Fan","on":false,"dimmable":false}}]}}]{dim_off}}}"#).as_bytes()).unwrap());
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 60 });
+        rig
+    }
+
+    #[test]
+    fn turning_a_dimmer_down_past_its_lowest_turns_the_light_off() {
+        let mut rig = lamp_and_fan("");
+        rig.turn(-VALUE_STEP * 80);
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 1 }, "a spin stops at the lowest");
+        let held = rig.input_with_clicks(Input::Turn(-VALUE_STEP));
+        assert!(Rig::sends(&held).is_empty() && !held.contains(&Effect::Click), "held there a moment, quietly: {held:?}");
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 1 });
+        rig.now += DETENT;
+        let off = rig.input_with_clicks(Input::Turn(-VALUE_STEP));
+        assert_eq!(Rig::sends(&off), vec![Command::Off("light.lamp".into())]);
+        assert!(off.contains(&Effect::ClickLow), "a lower click: {off:?}");
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: false, value: 1 });
+        rig.turn(VALUE_STEP);
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 1 }, "right from Off: on at the lowest");
+    }
+
+    #[test]
+    fn coming_back_up_from_the_lowest_starts_the_hold_again() {
+        let mut rig = lamp_and_fan("");
+        rig.turn(-VALUE_STEP * 80);
+        rig.turn(VALUE_STEP * 2);
+        rig.now += DETENT;
+        rig.turn(-VALUE_STEP * 5);
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 1 }, "down to it again: held");
+    }
+
+    #[test]
+    fn home_assistant_can_keep_the_lowest_on() {
+        let mut rig = lamp_and_fan(r#","dim_off":false"#);
+        rig.turn(-VALUE_STEP * 80);
+        rig.now += DETENT;
+        assert!(Rig::sends(&rig.turn(-VALUE_STEP * 3)).is_empty());
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 1 });
+        rig.press();
+        rig.press();
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert!(Rig::sends(&rig.turn(VALUE_STEP * 3)).is_empty(), "a switch's ring does nothing");
+    }
+
+    #[test]
+    fn a_switch_s_ring_turns_it_on_and_off() {
+        let mut rig = lamp_and_fan("");
+        rig.press();
+        rig.press();
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: false, value: 100 });
+        assert_eq!(Rig::sends(&rig.turn(VALUE_STEP)), vec![Command::On("switch.fan".into())], "right: on");
+        assert!(Rig::sends(&rig.turn(VALUE_STEP)).is_empty(), "on already");
+        let off = rig.input_with_clicks(Input::Turn(-VALUE_STEP));
+        assert_eq!(Rig::sends(&off), vec![Command::Off("switch.fan".into())], "left: off");
+        assert!(off.contains(&Effect::ClickLow));
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: false, value: 100 });
     }
 
     #[test]

@@ -35,6 +35,10 @@ pub struct Cards {
     /// (protocol 7); "Thermostat" without.
     #[serde(default)]
     thermostat_name: Option<String>,
+    /// Whether turning a dimmer down past its lowest turns the light off,
+    /// and a switch's ring turns it off and on (protocol 8); on without.
+    #[serde(default)]
+    dim_off: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -101,6 +105,11 @@ pub enum Wake {
 }
 
 impl Cards {
+    /// Whether turning down past a dimmer's lowest turns the light off.
+    pub fn dim_off(&self) -> bool {
+        self.dim_off.unwrap_or(true)
+    }
+
     /// The thermostat's place among the cards.
     pub fn thermostat(&self) -> usize {
         self.thermostat.unwrap_or(0)

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use super::model::{self, Art, Card, Cards, Nest};
 use super::screens::{self, Screen};
-use super::{device, ease, paint, zoom, FOLLOW, ZOOM_EASE};
+use super::{device, motion, paint, zoom, FOLLOW, ZOOM_EASE};
 
 const SIDE: usize = paint::SIZE as usize;
 /// A frame's length, and how far a follower gets in one.
@@ -107,7 +107,7 @@ impl Film {
     fn fade(&mut self, to: &[u8]) {
         let from = self.last.clone();
         for i in 1..=17 {
-            let t = ease(i as f32 / 17.0);
+            let t = motion::curve(i as f32 / 17.0);
             let frame: Vec<u8> = from.iter().zip(to).map(|(&a, &b)| (a as f32 + (b as f32 - a as f32) * t).round() as u8).collect();
             self.show(&frame);
         }
@@ -182,7 +182,7 @@ impl Film {
             match &mut recolour {
                 Some((before, step)) if *step < RECOLOUR => {
                     *step += 1;
-                    let t = ease(*step as f32 / RECOLOUR as f32);
+                    let t = motion::curve(*step as f32 / RECOLOUR as f32);
                     let mixed: Vec<u8> = before.iter().zip(&drawn).map(|(&a, &b)| (a as f32 + (b as f32 - a as f32) * t).round() as u8).collect();
                     self.show(&mixed);
                 }

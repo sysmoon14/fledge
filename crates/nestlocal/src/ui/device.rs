@@ -118,9 +118,18 @@ impl Beeper {
     }
 
     pub fn click(&mut self) {
+        self.tick(2000, 3);
+    }
+
+    /// A softer, lower click: a light turned off by the ring.
+    pub fn click_low(&mut self) {
+        self.tick(900, 5);
+    }
+
+    fn tick(&mut self, hertz: i32, ms: u64) {
         let Some(file) = &mut self.0 else { return };
-        let _ = file.write_all(&[encode(EV_SND, SND_TONE, 2000), encode(0, 0, 0)].concat());
-        std::thread::sleep(Duration::from_millis(3));
+        let _ = file.write_all(&[encode(EV_SND, SND_TONE, hertz), encode(0, 0, 0)].concat());
+        std::thread::sleep(Duration::from_millis(ms));
         let _ = file.write_all(&[encode(EV_SND, SND_TONE, 0), encode(0, 0, 0)].concat());
     }
 }
@@ -142,6 +151,9 @@ pub struct Display {
     /// While the UI owns the display, it draws into the page that isn't
     /// shown and then pans to it, so no frame shows half drawn.
     flip: Option<Flip>,
+    /// The UI's last frame, as it went to the display: a transition starts
+    /// from it, as reading the display back is slow (its memory isn't cached).
+    shown: Frame,
 }
 
 /// The two pages, as nlclient's EGL flips between them: which one shows,
@@ -190,7 +202,7 @@ impl Display {
         if map == libc::MAP_FAILED {
             return Err(format!("/dev/fb0: mmap: {}", std::io::Error::last_os_error()));
         }
-        Ok(Display { file, map: map.cast(), len, stride, flip: None })
+        Ok(Display { file, map: map.cast(), len, stride, flip: None, shown: vec![0; SIDE * ROW] })
     }
 
     /// The panning offset's row: the page shown.
@@ -280,10 +292,14 @@ impl Display {
         flip.front = back;
         let y = flip.pages[back];
         let start = y * stride;
-        let page = &mut self.bytes()[start..];
+        // SAFETY: map is len bytes, mapped for this Display's life; shown is a separate field.
+        let page = unsafe { std::slice::from_raw_parts_mut(self.map.add(start), self.len - start) };
+        let shown = &mut self.shown;
         prof::time(prof::Part::Copy, || {
             for row in first..=last.min(SIDE - 1) {
-                each(row, &mut page[row * stride..row * stride + ROW]);
+                let line = &mut shown[row * ROW..(row + 1) * ROW];
+                each(row, line);
+                page[row * stride..row * stride + ROW].copy_from_slice(line);
             }
         });
         // For tools (utils/nest-screen.py): the frame about to show, whole,
@@ -313,6 +329,15 @@ impl Display {
             }
         });
         frame
+    }
+
+    /// What shows: the UI's own last frame while it has the display (and
+    /// it wasn't panned away), else the display read back.
+    pub fn current(&mut self) -> Frame {
+        if self.flip.is_some() && !self.lost() {
+            return self.shown.clone();
+        }
+        self.save()
     }
 
     /// Shows a Frame.
