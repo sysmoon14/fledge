@@ -448,6 +448,9 @@ const LONG_PRESS: Duration = Duration::from_millis(600);
 /// Looks in a row, 200 ms apart, that find nlclient's home dial after its
 /// Settings: it was left.
 const SETTINGS_LEFT: u32 = 4;
+/// The most items nlclient's menu has (Mode, Eco, Hot water or Fan,
+/// Schedule, History, Settings, Back, and one to spare): a lap of it.
+const MENU_ITEMS: usize = 8;
 
 /// A frame this long after the one before came late: the display, at 60 Hz,
 /// showed the one before twice. And a gap this long is no movement at all.
@@ -1426,11 +1429,32 @@ impl Runtime {
                     std::thread::sleep(Duration::from_millis(40));
                 }
                 // Once the menu has finished opening (it takes no turn while
-                // it animates), Settings is the next item anticlockwise.
+                // it animates), Settings is the next item anticlockwise from
+                // Back, where it opens heating or cooling; off, it opens on
+                // Mode, two items away. Its items are a ring with no ends
+                // (at most eight), so one item at a time anticlockwise, at
+                // most a lap, until Settings is chosen (only the chosen
+                // item's icon lights, the cog white). As nlclient tells it,
+                // its menu is checked before every turn, so a turn never
+                // reaches its dial. A patch that doesn't tell opened on Back
+                // (checked above by its pixels): one item, as before.
                 std::thread::sleep(Duration::from_millis(600));
-                self.input.hand_turn(40, 13);
-                std::thread::sleep(Duration::from_millis(450));
-                if settings_chosen(&self.display.save()) {
+                let told = nlstate::read().is_some();
+                let steps: &[i32] = if told { &[40; MENU_ITEMS] } else { &[40] };
+                let mut chosen = settings_chosen(&self.display.save());
+                for (n, &step) in steps.iter().enumerate() {
+                    if chosen {
+                        break;
+                    }
+                    if told && !menu_shows(&mut self.display) {
+                        logf!("ui: nlclient's menu went, {n} items turned: left as it is");
+                        return;
+                    }
+                    self.input.hand_turn(step, 13);
+                    std::thread::sleep(Duration::from_millis(450));
+                    chosen = settings_chosen(&self.display.save());
+                }
+                if chosen && (!told || menu_shows(&mut self.display)) {
                     self.input.press();
                     self.native_input = Instant::now();
                     self.settings_seen = 0;
@@ -1911,6 +1935,24 @@ mod tests {
             px[..3].copy_from_slice(&[255, 255, 255]);
         }
         assert!(!off_dial(&busy), "white elsewhere (a menu's icons): not the off dial");
+    }
+
+    #[test]
+    fn of_nlclient_s_menu_only_settings_lights_its_cog() {
+        // Ben's unit, 2026-11-10, heating: the item chosen lights its icon.
+        let settings = frame_from_png(include_bytes!("../testdata/nest-menu-settings.png"));
+        assert!(settings_chosen(&settings) && !back_chosen(&settings));
+        for (name, other) in [
+            ("back", &include_bytes!("../testdata/nest-menu-back.png")[..]),
+            ("mode", include_bytes!("../testdata/nest-menu-mode.png")),
+            ("eco", include_bytes!("../testdata/nest-menu-eco.png")),
+            ("hot water", include_bytes!("../testdata/nest-menu-hot-water.png")),
+        ] {
+            let other = frame_from_png(other);
+            assert!(!settings_chosen(&other), "{name} is not Settings");
+            assert_eq!(back_chosen(&other), name == "back", "{name}");
+            assert!(!dial(&other), "{name}: a menu, not the dial");
+        }
     }
 
     #[test]
