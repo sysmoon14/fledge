@@ -894,9 +894,8 @@ fn setting_row(setting: Setting, nest: Option<&Nest>, nest_dial: bool) -> (&'sta
 /// Settings, listed as a device's lights are, with what each is set to.
 fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial: bool, selected: usize,
                  layer: Layer) -> Canvas {
-    let mut p = paint::face(BLACK);
     let first = first_row(selected, rows.len());
-    list_backdrop(&mut p, layer, selected.checked_sub(first));
+    let mut p = list_backdrop(layer, selected.checked_sub(first));
     label(&mut p, fonts, LIST_TITLE, "Settings", GREY);
     for (slot, row) in (first..rows.len().min(first + ROWS)).enumerate() {
         let y = LIST_TOP + slot as f32 * ROW_PITCH;
@@ -971,15 +970,20 @@ fn first_row(selected: usize, rows: usize) -> usize {
     selected.saturating_sub(ROWS - 1).min(rows.saturating_sub(ROWS))
 }
 
-/// Under a list's rows: the highlight on the chosen one (Whole), or across
-/// them all (Chosen), for its pill to be cut from as it glides.
-fn list_backdrop(p: &mut Canvas, layer: Layer, slot: Option<usize>) {
+/// What a list's rows are drawn on: the face with the highlight on the
+/// chosen row (Whole) or none (Plain), or the highlight's colour across it
+/// all (Chosen), for its pill to be cut from as it glides.
+fn list_backdrop(layer: Layer, slot: Option<usize>) -> Canvas {
     let (x, w, h) = PILL;
     match (layer, slot) {
-        (Layer::Whole, Some(slot)) => paint::pill(p, x, LIST_TOP + slot as f32 * ROW_PITCH, w, h, colour(paint::select())),
-        // All the highlight's blue: only its pill is cut from it.
-        (Layer::Chosen, _) => *p = paint::canvas(paint::select()),
-        _ => {}
+        // Only its pill is cut from it: no face under it to make.
+        (Layer::Chosen, _) => paint::canvas(paint::select()),
+        (Layer::Whole, Some(slot)) => {
+            let mut p = paint::face(BLACK);
+            paint::pill(&mut p, x, LIST_TOP + slot as f32 * ROW_PITCH, w, h, colour(paint::select()));
+            p
+        }
+        _ => paint::face(BLACK),
     }
 }
 
@@ -1009,6 +1013,33 @@ pub fn list_layer(fonts: &Fonts, screen: &Screen, layer: Layer) -> Option<Canvas
     })
 }
 
+/// The windows a list scrolls to next from where it is: its first row one
+/// or two on, or back. As the same list with a row chosen that shows them.
+pub fn list_neighbours<'a>(screen: &Screen<'a>) -> Vec<Screen<'a>> {
+    let Some((_, first)) = list_place(screen) else { return Vec::new() };
+    let rows = match screen {
+        Screen::LightList { card, .. } => card.lights.len() + 1,
+        Screen::Members { card, .. } => card.members.len() + 1,
+        Screen::OptionList { card, .. } => card.options.len() + 1,
+        Screen::Settings { rows, .. } => rows.len(),
+        _ => return Vec::new(),
+    };
+    // The last row of the window one on, two on; the first of one back, two back.
+    let chosen = [Some(first + ROWS), Some(first + ROWS + 1), first.checked_sub(1), first.checked_sub(2)];
+    chosen.into_iter().flatten().filter(|&row| row < rows).filter_map(|row| list_with(screen, row)).collect()
+}
+
+/// The same list with `selected` chosen.
+fn list_with<'a>(screen: &Screen<'a>, selected: usize) -> Option<Screen<'a>> {
+    Some(match screen {
+        Screen::LightList { card, .. } => Screen::LightList { card, selected },
+        Screen::Members { card, .. } => Screen::Members { card, selected },
+        Screen::OptionList { card, .. } => Screen::OptionList { card, selected },
+        Screen::Settings { rows, nest, nest_dial, .. } => Screen::Settings { rows: rows.clone(), nest: *nest, nest_dial: *nest_dial, selected },
+        _ => return None,
+    })
+}
+
 pub fn list_key(screen: &Screen) -> Option<String> {
     let (_, first) = list_place(screen)?;
     Some(match screen {
@@ -1027,10 +1058,9 @@ fn light_list(fonts: &Fonts, card: &LightsCard, selected: usize) -> Canvas {
 
 /// Lights listed under `name`, each with its state, then Back.
 fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, layer: Layer) -> Canvas {
-    let mut p = paint::face(BLACK);
     let rows = lights.len() + 1;
     let first = first_row(selected, rows);
-    list_backdrop(&mut p, layer, selected.checked_sub(first));
+    let mut p = list_backdrop(layer, selected.checked_sub(first));
     let accent = lights.iter().find(|l| l.on).map_or(GREY, |l| l.colour());
     label(&mut p, fonts, LIST_TITLE, name, accent);
     for (slot, row) in (first..rows.min(first + ROWS)).enumerate() {
@@ -1437,8 +1467,7 @@ fn options_card(fonts: &Fonts, card: &OptionsCard) -> Canvas {
 const PROMPT_ROWS: usize = 4;
 
 fn mode_prompt(fonts: &Fonts, nest: &Nest, selected: usize, layer: Layer) -> Canvas {
-    let mut p = paint::face(BLACK);
-    list_backdrop(&mut p, layer, Some(selected));
+    let mut p = list_backdrop(layer, Some(selected));
     for (i, line) in crate::ui::machine::MODE_PROMPT.split('\n').enumerate() {
         let line = paint::fit(fonts.regular(), 22.0, line, 0.0, 330.0);
         paint::text(&mut p, fonts.regular(), 22.0, HALF, 118.0 + 30.0 * i as f32, &line, 0.0, WHITE);
@@ -1461,10 +1490,9 @@ fn mode_prompt(fonts: &Fonts, nest: &Nest, selected: usize, layer: Layer) -> Can
 }
 
 fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer) -> Canvas {
-    let mut p = paint::face(BLACK);
     let rows = card.options.len() + 1;
     let first = first_row(selected, rows);
-    list_backdrop(&mut p, layer, selected.checked_sub(first));
+    let mut p = list_backdrop(layer, selected.checked_sub(first));
     label(&mut p, fonts, LIST_TITLE, &card.name, GREY);
     for (slot, row) in (first..rows.min(first + ROWS)).enumerate() {
         let y = LIST_TOP + slot as f32 * ROW_PITCH;

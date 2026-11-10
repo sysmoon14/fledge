@@ -106,9 +106,20 @@ pub fn select() -> [u8; 3] {
 
 /// A screen's face: `background` whole (the Nest's), or Fledge's dark face
 /// glowing from within with it (heating's amber strongest).
+///
+/// Fledge's glow is worked out pixel by pixel, which on the unit's one slow
+/// core costs most of what drawing a list or a card does: each face is made
+/// once (per background, theme and layout) and copied after.
 pub fn face(background: [u8; 3]) -> Canvas {
     if !fledge() {
         return canvas(background);
+    }
+    type Key = ([u8; 3], bool);
+    static FACES: std::sync::Mutex<Vec<(Key, Canvas)>> = std::sync::Mutex::new(Vec::new());
+    let key = (background, PANEL.load(std::sync::atomic::Ordering::Relaxed));
+    let mut faces = FACES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, face)) = faces.iter().find(|(k, _)| *k == key) {
+        return face.clone();
     }
     let mut p = canvas(FACE);
     glow(&mut p, FACE_LIFT, 240.0, 210.0, 330.0, 0.7);
@@ -116,6 +127,12 @@ pub fn face(background: [u8; 3]) -> Canvas {
         let strength = if background == HEAT { 0.62 } else { 0.42 };
         glow(&mut p, background, 240.0, 272.0, 300.0, strength);
     }
+    // A few backgrounds in all (black, heating, cooling): the oldest goes
+    // once there are more.
+    if faces.len() >= 4 {
+        faces.remove(0);
+    }
+    faces.push((key, p.clone()));
     p
 }
 

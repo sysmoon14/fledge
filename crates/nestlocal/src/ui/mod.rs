@@ -423,6 +423,9 @@ struct Glide {
     key: String,
     plain: paint::Canvas,
     chosen: paint::Canvas,
+    /// The same list's other windows, drawn while it rested (a list's two
+    /// layers cost a few frames to draw on the unit): by their keys.
+    kept: Vec<(String, paint::Canvas, paint::Canvas)>,
     /// The highlight's top, and where it's going.
     y: f32,
     target: f32,
@@ -434,6 +437,8 @@ const PULSE: Duration = Duration::from_millis(1800);
 const PULSE_EVERY: Duration = Duration::from_secs(30);
 /// How fast a list's highlight glides to its row: most of the way in this.
 const GLIDE: f32 = 0.05;
+/// A list's windows kept drawn besides the one showing: two on, two back.
+const KEPT_WINDOWS: usize = 4;
 /// How long the thermostat's dial takes to change colour: slow enough to
 /// read as the heating lighting, not a switch.
 const RECOLOUR: Duration = Duration::from_millis(700);
@@ -817,7 +822,8 @@ impl Runtime {
                     }
                 }
             }
-            if !self.animating() && self.machine.mode != Mode::Idle && !self.cards_stale {
+            let warmed = !self.animating() && self.warm_list();
+            if !warmed && !self.animating() && self.machine.mode != Mode::Idle && !self.cards_stale {
                 // One card at a time while nothing moves, so the first turn
                 // finds them all drawn and up to date: those nearest what
                 // shows first.
@@ -848,6 +854,30 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    /// A list at rest: the windows it scrolls to next drawn, one a call, so
+    /// the ring finds them ready (and those it won't go to let go). Whether
+    /// one was drawn.
+    fn warm_list(&mut self) -> bool {
+        let Some(g) = self.glide.as_mut() else { return false };
+        let Some(screen) = Self::screen(&self.machine, &self.machine.mode) else { return false };
+        if screens::list_key(&screen).as_deref() != Some(g.key.as_str()) {
+            return false;
+        }
+        let next: Vec<(String, Screen)> = screens::list_neighbours(&screen).into_iter()
+            .filter_map(|s| Some((screens::list_key(&s)?, s))).collect();
+        g.kept.retain(|(key, ..)| next.iter().any(|(k, _)| k == key));
+        let Some((key, screen)) = next.into_iter().find(|(k, _)| g.kept.iter().all(|(kept, ..)| kept != k)) else {
+            return false;
+        };
+        // Not counted as a frame's drawing: nothing shows for it.
+        let plain = screens::list_layer(&self.fonts, &screen, screens::Layer::Plain);
+        let chosen = screens::list_layer(&self.fonts, &screen, screens::Layer::Chosen);
+        if let (Some(plain), Some(chosen)) = (plain, chosen) {
+            g.kept.push((key, plain, chosen));
+        }
+        true
     }
 
     /// Whether the cards are on their way somewhere: following the ring,
@@ -1816,19 +1846,30 @@ impl Runtime {
         let target = screens::LIST_TOP + slot as f32 * screens::ROW_PITCH;
         // The same list (its kind and its first row), only what it shows changed: kept where it is.
         let same = |g: &Glide| g.key.split(' ').take(2).eq(key.split(' ').take(2));
+        let layers = |kept: &mut Vec<(String, paint::Canvas, paint::Canvas)>| match kept.iter().position(|(k, ..)| *k == key) {
+            Some(at) => {
+                let (_, plain, chosen) = kept.swap_remove(at);
+                (plain, chosen)
+            }
+            None => (screens::list_layer(fonts, screen, screens::Layer::Plain).expect("a list"),
+                     screens::list_layer(fonts, screen, screens::Layer::Chosen).expect("a list")),
+        };
         match glide {
             Some(g) if g.key == key => {}
             Some(g) if same(g) && !fresh => {
-                g.plain = screens::list_layer(fonts, screen, screens::Layer::Plain).expect("a list");
-                g.chosen = screens::list_layer(fonts, screen, screens::Layer::Chosen).expect("a list");
-                g.key = key;
+                let (plain, chosen) = layers(&mut g.kept);
+                let old = (std::mem::replace(&mut g.key, key.clone()), std::mem::replace(&mut g.plain, plain),
+                           std::mem::replace(&mut g.chosen, chosen));
+                // Scrolled: where it was is a window it may go back to.
+                g.kept.push(old);
+                if g.kept.len() > KEPT_WINDOWS {
+                    g.kept.remove(0);
+                }
             }
             _ => {
-                *glide = Some(Glide {
-                    plain: screens::list_layer(fonts, screen, screens::Layer::Plain).expect("a list"),
-                    chosen: screens::list_layer(fonts, screen, screens::Layer::Chosen).expect("a list"),
-                    key, y: target, target, drawn: Instant::now(),
-                });
+                let mut kept = glide.take().map(|g| g.kept).unwrap_or_default();
+                let (plain, chosen) = layers(&mut kept);
+                *glide = Some(Glide { plain, chosen, kept, key, y: target, target, drawn: Instant::now() });
             }
         }
         let g = glide.as_mut().expect("just made");
