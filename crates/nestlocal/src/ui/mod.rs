@@ -2532,6 +2532,61 @@ mod shots {
         assert!(!fledge_theme(Some("nest\n")));
     }
 
+    /// Frames from the middle of each transition, from the screens ui_shots
+    /// wrote (run it first, into the same UNFR0ZEN_UI_SHOTS): m-<kind>-<t>.png.
+    #[test]
+    #[ignore]
+    fn ui_motion_shots() {
+        let out = std::env::var("UNFR0ZEN_UI_SHOTS").expect("set UNFR0ZEN_UI_SHOTS");
+        const S: usize = 480;
+        let load = |name: &str| -> Vec<u8> {
+            let mut reader = png::Decoder::new(std::fs::File::open(format!("{out}/{name}.png")).unwrap()).read_info().unwrap();
+            let mut rgba = vec![0; reader.output_buffer_size()];
+            reader.next_frame(&mut rgba).unwrap();
+            // Upright to the framebuffer's layout (upright x a row, y run back).
+            let mut panel = vec![0; S * S * 4];
+            for y in 0..S {
+                for x in 0..S {
+                    let (a, b) = (4 * (x * S + (S - 1 - y)), 4 * (y * S + x));
+                    panel[a..a + 4].copy_from_slice(&rgba[b..b + 4]);
+                }
+            }
+            panel
+        };
+        let save_panel = |frame: &[u8], name: &str| {
+            let mut upright = vec![0; S * S * 4];
+            for y in 0..S {
+                for x in 0..S {
+                    let (a, b) = (4 * (x * S + (S - 1 - y)), 4 * (y * S + x));
+                    upright[b..b + 4].copy_from_slice(&frame[a..a + 4]);
+                    upright[b + 3] = 255;
+                }
+            }
+            save(&paint::Canvas::from_frame(upright), &format!("{out}/{name}.png"));
+        };
+        let pairs = [
+            (motion::Kind::Through, "b6-glance", "t1-nest-idle"),
+            (motion::Kind::Push, "5-list", "6-dim"),
+            (motion::Kind::Pop, "6-dim", "5-list"),
+            (motion::Kind::MenuIn, "6-dim", "9-menu"),
+            (motion::Kind::MenuOut, "9-menu", "6-dim"),
+            (motion::Kind::Drop, "1-lights", "a4-alert"),
+            (motion::Kind::Lift, "a4-alert", "1-lights"),
+        ];
+        let mut frame = vec![0; S * S * 4];
+        for (kind, from, to) in pairs {
+            let (from, to) = (load(from), load(to));
+            for t in [0.25, 0.5, 0.75] {
+                motion::frame(kind, &from, &to, t, &mut frame);
+                save_panel(&frame, &format!("m-{kind:?}-{}", (t * 100.0) as u32).to_lowercase());
+            }
+        }
+        let mut list = load("5-list");
+        let (x, w, h) = screens::PILL;
+        motion::press(&mut list, motion::Pressed::Row(x, screens::LIST_TOP, w, h));
+        save_panel(&list, "m-press-row");
+    }
+
     #[test]
     #[ignore]
     fn ui_shots() {
