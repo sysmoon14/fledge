@@ -249,7 +249,13 @@ pub struct AlarmCard {
     /// Whether it can be armed with a door open (Alarmo's force).
     #[serde(default)]
     pub can_force: bool,
+    /// Whether it takes the screen when the entry delay starts or it goes
+    /// off (the default), or waits on its card.
+    #[serde(default = "takes_over")]
+    pub takeover: bool,
 }
+
+fn takes_over() -> bool { true }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct AlarmMode {

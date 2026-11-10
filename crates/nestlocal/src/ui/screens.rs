@@ -14,8 +14,9 @@ pub enum Screen<'a> {
     /// `progress`: how far through its track (0..1), for its bar.
     MediaCard { card: &'a MediaCard, volume: Option<u8>, progress: Option<f32> },
     SettingsCard,
-    /// A scene, script or button; `done` just after it ran.
-    ActionCard { card: &'a ActionCard, done: bool },
+    /// A scene, script or button; `done` just after it ran; `opened`, its
+    /// own screen (pressed from the cards), saying how to run it.
+    ActionCard { card: &'a ActionCard, done: bool, opened: bool },
     CameraCard { card: &'a CameraCard },
     /// A camera opened: its picture full screen, its name over it.
     CameraView { card: &'a CameraCard },
@@ -132,7 +133,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         }
         Screen::MediaCard { card, volume, progress } => media_card(fonts, card, volume.or(card.volume), *progress),
         Screen::SettingsCard => settings_card(fonts),
-        Screen::ActionCard { card, done } => action_card(fonts, card, *done),
+        Screen::ActionCard { card, done, opened } => action_card(fonts, card, *done, *opened),
         Screen::CameraCard { card } => camera_card(fonts, card),
         Screen::CameraView { card } => camera_view(fonts, card),
         Screen::Alert { alert } => alert_screen(fonts, alert),
@@ -590,7 +591,8 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, progress: Opt
 const ACTION: [u8; 3] = [255, 196, 87];
 
 /// No ring: there's nothing to turn. Done, its icon and words turn gold.
-fn action_card(fonts: &Fonts, card: &ActionCard, done: bool) -> Canvas {
+/// Among the cards it only says what it is; opened, how to run it.
+fn action_card(fonts: &Fonts, card: &ActionCard, done: bool, opened: bool) -> Canvas {
     let mut p = paint::face(BLACK);
     // Its own icon if the thermostat has it, else a play button.
     let found = icons::lookup(&card.icon, &card.id).or_else(|| icons::lookup("mdi:play-circle-outline", ""));
@@ -599,7 +601,8 @@ fn action_card(fonts: &Fonts, card: &ActionCard, done: bool) -> Canvas {
     }
     let name = paint::fit(fonts.regular(), 40.0, &card.name, 0.0, 330.0);
     paint::text(&mut p, fonts.regular(), 40.0, HALF, 288.0, &name, 0.0, WHITE);
-    line(&mut p, fonts, 330.0, if done { "Done" } else { "Press to run" }, if done { ACTION } else { GREY });
+    let hint = if done { "Done" } else if opened { "Hold to run · press for more" } else { "" };
+    line(&mut p, fonts, 330.0, hint, if done { ACTION } else { GREY });
     p
 }
 
@@ -1662,7 +1665,7 @@ fn alarm_screen(fonts: &Fonts, card: &AlarmCard, now: Option<f64>, note: Option<
                     icon(&mut p, "mdi:shield-lock", &card.id, HALF, 246.0, 96.0, WHITE);
                 }
             }
-            if !alarm_note(&mut p, fonts, note, 346.0) {
+            if !alarm_note(&mut p, fonts, note, 346.0) && now.is_some() {
                 let hint = match (arming, wants_code) {
                     (true, _) => "Press to cancel",
                     (false, true) => "Press to enter the code",
@@ -1682,7 +1685,7 @@ fn alarm_screen(fonts: &Fonts, card: &AlarmCard, now: Option<f64>, note: Option<
             if let Some(sensor) = card.sensors.first() {
                 line(&mut p, fonts, 310.0, sensor, WHITE);
             }
-            if !alarm_note(&mut p, fonts, note, 352.0) {
+            if !alarm_note(&mut p, fonts, note, 352.0) && now.is_some() {
                 line(&mut p, fonts, 352.0, "Press to disarm", WHITE);
             }
             p
@@ -1712,7 +1715,8 @@ fn alarm_screen(fonts: &Fonts, card: &AlarmCard, now: Option<f64>, note: Option<
             paint::text(&mut p, fonts.regular(), 40.0, HALF, 284.0, &title, 0.0, WHITE);
             let status = paint::fit(fonts.medium(), 21.0, &status, 0.0, 320.0);
             paint::text(&mut p, fonts.medium(), 21.0, HALF, 324.0, &status, 0.0, accent);
-            if !alarm_note(&mut p, fonts, note, 360.0) {
+            // How to use it once it's open; among the cards, what it is.
+            if !alarm_note(&mut p, fonts, note, 360.0) && now.is_some() {
                 line(&mut p, fonts, 360.0, hint, GREY);
             }
             p

@@ -2,7 +2,8 @@
 //! takes turns, presses and time, and says what should happen (Effect).
 //!
 //! One rule throughout: zoomed out on the cards (the chooser), the ring
-//! moves between devices; opened, it works the device. Waking shows the
+//! moves between devices; opened, it works the device: nothing is done to
+//! a device from the cards themselves, a press only opens it. Waking shows the
 //! chooser on the thermostat, or what Home Assistant chose (Wake). A press
 //! opens the card; inside, a press acts, or opens a ring of actions whose
 //! first is Back. A long press goes back a level. Going back is the hand's
@@ -185,6 +186,8 @@ pub enum Action {
     NestDial,
     /// An alarm armed to one of its modes, by its place in its card's.
     Arm(u8),
+    /// A scene, script or button run.
+    Run,
 }
 
 /// The off thermostat's prompt, as the Nest's words, and its choices: on
@@ -239,6 +242,8 @@ pub enum Mode {
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
     Menu { view: Box<Mode>, actions: Vec<Action>, selected: usize },
+    /// A scene, script or button opened: a press its menu, a hold runs it.
+    ActionView { slot: usize },
     /// An alarm opened: its state, a countdown while one runs.
     AlarmView { slot: usize },
     /// Its code pad: to arm to its mode `arm` (by place), else to disarm;
@@ -264,7 +269,7 @@ impl Mode {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
             | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
-            | Mode::CoverSet { slot, .. } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
+            | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
             | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
             Mode::Thermostat { .. } | Mode::ModePrompt { .. } => Some(Slot::Thermostat),
             Mode::Menu { view, .. } => view.card_slot(),
@@ -501,6 +506,7 @@ impl Machine {
             Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. } | Mode::AlarmOpen { slot, .. } => {
                 matches!(cards.cards.get(*slot), Some(Card::Alarm(_)))
             }
+            Mode::ActionView { slot } => matches!(cards.cards.get(*slot), Some(Card::Action(_))),
             Mode::Members { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(c)) if !c.members.is_empty()),
             Mode::LightDim { slot, light, .. } | Mode::LightWarmth { slot, light, .. }
             | Mode::LightHue { slot, light, .. } => match cards.cards.get(*slot) {
@@ -951,7 +957,7 @@ impl Machine {
                     return;
                 }
             }
-            Mode::AlarmView { .. } | Mode::AlarmOpen { .. } => return,
+            Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } => return,
             _ => {}
         }
         out.push(Effect::Click);
@@ -1049,7 +1055,7 @@ impl Machine {
                 self.mode = Mode::AlarmPad { slot, arm, at, entered };
             }
             Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance
-            | Mode::AlarmView { .. } | Mode::AlarmOpen { .. } => {}
+            | Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } => {}
         }
         self.dirty = true;
     }
@@ -1076,13 +1082,8 @@ impl Machine {
                         Mode::ClimateSet { slot, target: card.target.unwrap_or((card.min + card.max) / 2.0) }
                     }
                     Some(Card::Media(card)) => Mode::Volume { slot, value: card.volume.unwrap_or(30) },
-                    // A scene, script or button runs, staying on the cards.
-                    Some(Card::Action(card)) => {
-                        out.push(Effect::Send(Command::Run(card.id.clone())));
-                        self.ran = Some((slot, self.last_input));
-                        self.dirty = true;
-                        return;
-                    }
+                    // A scene, script or button: its own screen, to run from.
+                    Some(Card::Action(_)) => Mode::ActionView { slot },
                     Some(Card::Camera(card)) => {
                         // Full screen, with a fresh picture on its way.
                         out.push(Effect::Send(Command::Snapshot(card.id.clone())));
@@ -1097,8 +1098,7 @@ impl Machine {
                         let open = if card.state == "open" { 100 } else { 0 };
                         Mode::CoverSet { slot, value: card.position.unwrap_or(open) }
                     }
-                    // An alarm does what its state asks: arms, cancels, disarms.
-                    Some(Card::Alarm(_)) => return self.alarm_press(slot, out),
+                    Some(Card::Alarm(_)) => Mode::AlarmView { slot },
                     Some(Card::Unknown) | None => return,
                 };
                 self.go(mode, out);
@@ -1192,6 +1192,9 @@ impl Machine {
             }
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
             Mode::AlarmView { slot } => self.alarm_press(slot, out),
+            view @ Mode::ActionView { .. } => {
+                self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Run], selected: 0 };
+            }
             Mode::AlarmPad { slot, arm, at, mut entered } => {
                 if self.alarm_wait.is_some() || self.locked(self.last_input) {
                     return;
@@ -1476,6 +1479,10 @@ impl Machine {
                 self.mode = view;
             }
             (Action::NestDial, _) => self.go(Mode::Native, out),
+            (Action::Run, view @ Mode::ActionView { slot }) => {
+                self.run(slot, out);
+                self.mode = view;
+            }
             (Action::Arm(arm), view @ Mode::AlarmView { slot }) => {
                 let Some(Card::Alarm(card)) = self.card(slot) else { return };
                 if card.wants_digits() {
@@ -1534,15 +1541,17 @@ impl Machine {
         }
     }
 
-    /// A long press: a device's on/off or play/pause, from its card or its
-    /// own screen. Otherwise back: out of a ring of actions to its device,
-    /// out of a device to the cards, and from the cards to the thermostat.
+    /// A long press: a device's on/off or play/pause, or a scene run, on its
+    /// own screen (never from the cards). Otherwise back: out of a ring of
+    /// actions to its device, out of a device to the cards, and from the
+    /// cards to the thermostat.
     fn back(&mut self, out: &mut Vec<Effect>) {
         let toggled = match self.mode.clone() {
-            Mode::Chooser(index) => match self.deck().get(index) {
-                Some(&Slot::Card(slot)) => self.toggle(slot, None, out),
-                _ => false,
-            },
+            // Held on a scene's own screen: it runs.
+            Mode::ActionView { slot } => {
+                self.run(slot, out);
+                true
+            }
             Mode::LightList { slot, selected } => self.toggle(slot, Some(selected), out),
             Mode::LightDim { slot, light, value, .. } => {
                 let toggled = self.toggle(slot, Some(light), out);
@@ -1603,6 +1612,15 @@ impl Machine {
         };
         out.push(Effect::Click);
         self.go(back, out);
+    }
+
+    /// Runs a scene, script or button: its screen says so for a moment.
+    fn run(&mut self, slot: usize, out: &mut Vec<Effect>) {
+        if let Some(Card::Action(card)) = self.card(slot) {
+            out.push(Effect::Send(Command::Run(card.id.clone())));
+            self.ran = Some((slot, self.last_input));
+            self.dirty = true;
+        }
     }
 
     /// A light's dimmer, as it is now.
@@ -1779,7 +1797,7 @@ impl Machine {
             }).collect();
         for (slot, card) in alarms {
             let before = self.alarm_states.get(&card.id);
-            if before != Some(&card.state) && card.urgent() {
+            if before != Some(&card.state) && card.urgent() && card.takeover {
                 self.alarm_takeover = Some(slot);
             }
             if before.is_some_and(|b| b == "arming") && card.state != "arming"
@@ -2335,11 +2353,20 @@ mod tests {
         rig.press();
         rig.lit = true;
         assert_eq!(rig.machine.mode, Mode::Chooser(1), "woken to a scene: shown, not run");
-        assert_eq!(Rig::sends(&rig.press()), vec![Command::Run("scene.goodnight".into())]);
-        assert_eq!(rig.machine.mode, Mode::Chooser(1), "it stays on the cards");
-        assert!(rig.machine.ran.is_some_and(|(slot, _)| slot == 0), "its card says so");
+        assert!(Rig::sends(&rig.press()).is_empty(), "pressed on the cards: opened, not run");
+        assert_eq!(rig.machine.mode, Mode::ActionView { slot: 0 });
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::Run("scene.goodnight".into())], "held on its screen: run");
+        assert_eq!(rig.machine.mode, Mode::ActionView { slot: 0 }, "it stays open");
+        assert!(rig.machine.ran.is_some_and(|(slot, _)| slot == 0), "its screen says so");
         rig.wait(RAN_SHOWN);
         assert_eq!(rig.machine.ran, None, "for a moment");
+        rig.press();
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if *actions == vec![Action::Back, Action::Run]));
+        rig.rows(1);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Run("scene.goodnight".into())], "its menu's Run");
+        rig.press();
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "the menu's Back");
         rig.turn(CARD_STEP);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Snapshot("camera.front_door".into())]);
         assert_eq!(rig.machine.mode, Mode::Camera { slot: 1 }, "a camera opens full screen");
@@ -2413,8 +2440,7 @@ mod tests {
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Close("cover.blind".into())], "its menu: Close");
         rig.long();
         assert_eq!(rig.machine.mode, Mode::Chooser(1));
-        assert_eq!(Rig::sends(&rig.long()), vec![Command::Open("cover.blind".into())],
-                   "long press on its card: open again, as it's closing");
+        assert!(Rig::sends(&rig.long()).is_empty(), "held on its card: back, nothing opened or closed");
     }
 
     /// An alarm card (Alarmo's, wanting a code only to disarm, as the
@@ -2430,11 +2456,13 @@ mod tests {
         Cards::parse(alarm_json(state, extra).as_bytes()).unwrap()
     }
 
-    /// On the alarm's card, among the cards.
+    /// The alarm opened from its card: a press on the cards only opens it.
     fn alarm_rig(state: &str, extra: &str) -> Rig {
         let mut rig = deck_of(alarm_json(state, extra).as_bytes());
         rig.turn(CARD_STEP);
         assert_eq!(rig.machine.mode, Mode::Chooser(1));
+        assert!(Rig::sends(&rig.press()).is_empty(), "nothing done from the cards");
+        assert_eq!(rig.machine.mode, Mode::AlarmView { slot: 0 });
         rig
     }
 
@@ -2522,6 +2550,7 @@ mod tests {
         let mut rig = deck_of(json.as_bytes());
         rig.turn(CARD_STEP);
         rig.press();
+        rig.press();
         rig.enter("12345");
         assert_eq!(rig.machine.pad_positions(0), 11);
         rig.now += TURN_KEPT;
@@ -2556,6 +2585,7 @@ mod tests {
         let mut rig = deck_of(json.as_bytes());
         rig.turn(CARD_STEP);
         rig.press();
+        rig.press();
         rig.rows(1);
         rig.press();
         assert_eq!(rig.machine.mode, pad(Some(0), PAD_START, ""), "a code to arm: the pad");
@@ -2566,6 +2596,18 @@ mod tests {
         let sent = Rig::sends(&rig.press());
         assert_eq!(sent, vec![Command::AlarmArm { id: "alarm_control_panel.house".into(), mode: "home".into(),
                                                    code: Some(Code("1234".into())), force: true }]);
+    }
+
+    #[test]
+    fn an_alarm_can_wait_on_its_card_rather_than_take_the_screen() {
+        let mut rig = Rig::with(alarm("armed_away", r#","takeover":false"#));
+        rig.machine.set_cards(alarm("triggered", r#","takeover":false"#), &mut vec![]);
+        let out = rig.tick();
+        assert!(!out.contains(&Effect::WakeDisplay) && rig.machine.mode == Mode::Home, "left as it was");
+        let mut rig = Rig::with(alarm("armed_away", ""));
+        rig.machine.set_cards(alarm("triggered", ""), &mut vec![]);
+        rig.tick();
+        assert_eq!(rig.machine.mode, Mode::AlarmView { slot: 0 }, "by default, going off takes the screen");
     }
 
     #[test]
@@ -3252,10 +3294,10 @@ mod tests {
         assert!(rig.long().is_empty(), "nothing above the thermostat");
         let mut rig = Rig::woken();
         rig.turn(CARD_STEP);
-        assert_eq!(Rig::sends(&rig.long()), vec![Command::Off("light.lamp".into())], "a card: off, as one is on");
-        assert_eq!(Rig::sends(&rig.long()), vec![Command::On("light.lamp".into()), Command::On("switch.fan".into())],
-                   "then all on");
-        assert_eq!(rig.machine.mode, Mode::Chooser(1), "still on the cards");
+        assert!(Rig::sends(&rig.long()).is_empty(), "nothing is switched from the cards");
+        assert_eq!(rig.machine.mode, Mode::Home, "held on the cards: back");
+        rig.turn(CARD_STEP);
+        assert_eq!(rig.machine.mode, Mode::Chooser(1));
         rig.press();
         rig.press();
         rig.turn(VALUE_STEP * 3);
@@ -3277,11 +3319,10 @@ mod tests {
         rig.press();
         rig.lit = true;
         rig.turn(CARD_STEP * 3);
-        assert_eq!(Rig::sends(&rig.long()), vec![Command::PlayPause("media_player.speaker".into())]);
         rig.press();
         assert_eq!(Rig::sends(&rig.long()), vec![Command::PlayPause("media_player.speaker".into())],
-                   "and on its own screen");
-        assert!(matches!(&rig.machine.cards.cards[2], Card::Media(m) if m.state == "playing"));
+                   "on its own screen");
+        assert!(matches!(&rig.machine.cards.cards[2], Card::Media(m) if m.state == "paused"));
     }
 
     #[test]

@@ -1407,7 +1407,7 @@ impl Runtime {
                 let progress = source.progress.map(|pixels| pixels as f32 / screens::PROGRESS_WIDTH);
                 Screen::MediaCard { card, volume: None, progress }
             }
-            Some(Card::Action(card)) => Screen::ActionCard { card, done: source.done },
+            Some(Card::Action(card)) => Screen::ActionCard { card, done: source.done, opened: false },
             Some(Card::Camera(card)) => Screen::CameraCard { card },
             Some(Card::Options(card)) => Screen::OptionsCard { card },
             Some(Card::Cover(card)) => Screen::CoverCard { card },
@@ -1768,6 +1768,11 @@ impl Runtime {
                 Card::Camera(card) => Screen::CameraView { card },
                 _ => return None,
             },
+            Mode::ActionView { slot } => match card(*slot)? {
+                Card::Action(card) => Screen::ActionCard { card, done: machine.ran.is_some_and(|(s, _)| s == *slot),
+                                                           opened: true },
+                _ => return None,
+            },
             Mode::AlarmView { slot } => match card(*slot)? {
                 Card::Alarm(card) => Screen::AlarmView { card, now: unix_now(), note: alarm_note(machine) },
                 _ => return None,
@@ -1815,6 +1820,7 @@ impl Runtime {
             Screen::CoverSet { card, .. } => card.name.clone(),
             Screen::NestSet { nest, .. } => nest.card.name.clone(),
             Screen::AlarmView { card, .. } => card.name.clone(),
+            Screen::ActionCard { card, .. } => card.name.clone(),
             _ => String::new(),
         };
         let alarm = match &screen {
@@ -1847,6 +1853,7 @@ impl Runtime {
                 Action::Boost(true) => ("mdi:water-boiler", "Boost hot water, 1 hour"),
                 Action::Boost(false) => ("mdi:water-boiler", "Stop the boost"),
                 Action::NestDial => ("mdi:thermometer", "Nest's own dial"),
+                Action::Run => ("mdi:play", "Run"),
                 Action::Arm(i) => {
                     let mode = alarm.and_then(|card| card.modes.get(*i as usize).map(|m| (card, m)));
                     let (icon, name) = mode.map_or(("mdi:shield-lock", String::new()), |(card, m)| {
@@ -2165,7 +2172,7 @@ fn depth(mode: &Mode, machine: &Machine) -> u8 {
     match mode {
         Mode::LightList { .. } | Mode::ClimateSet { .. } | Mode::Volume { .. } | Mode::Camera { .. }
         | Mode::OptionList { .. } | Mode::CoverSet { .. } | Mode::Thermostat { .. } | Mode::Settings { .. }
-        | Mode::AlarmView { .. } => 1,
+        | Mode::AlarmView { .. } | Mode::ActionView { .. } => 1,
         // A lamp's own card opens straight to its dimmer; a room's, from its list.
         Mode::LightDim { slot, .. } => match machine.cards.cards.get(*slot) {
             Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
@@ -2692,8 +2699,9 @@ mod shots {
         let lamp = model::LightsCard { name: "Reading Lamp".into(), icon: String::new(), lights: vec![lights.lights[0].clone()], members: vec![] };
         save(&screens::draw(&fonts, &Screen::LightsCard { card: &lamp }, None), &format!("{out}/1b-lamp.png"));
         let scene = model::ActionCard { id: "scene.goodnight".into(), name: "Goodnight".into(), icon: "mdi:weather-night".into() };
-        save(&screens::draw(&fonts, &Screen::ActionCard { card: &scene, done: false }, None), &format!("{out}/a1-scene.png"));
-        save(&screens::draw(&fonts, &Screen::ActionCard { card: &scene, done: true }, None), &format!("{out}/a2-scene-done.png"));
+        save(&screens::draw(&fonts, &Screen::ActionCard { card: &scene, done: false, opened: false }, None), &format!("{out}/a1-scene.png"));
+        save(&screens::draw(&fonts, &Screen::ActionCard { card: &scene, done: false, opened: true }, None), &format!("{out}/a1-scene-opened.png"));
+        save(&screens::draw(&fonts, &Screen::ActionCard { card: &scene, done: true, opened: true }, None), &format!("{out}/a2-scene-done.png"));
         let size = 480;
         let still = Arc::new(Art { size, rgb: (0..size * size).flat_map(|i| {
             let (x, y) = (i % size, i / size);
@@ -2727,7 +2735,7 @@ mod shots {
             modes: vec![model::AlarmMode { mode: "home".into(), name: String::new() },
                         model::AlarmMode { mode: "away".into(), name: "Going out".into() },
                         model::AlarmMode { mode: "night".into(), name: "Bedtime".into() }],
-            code: code.map(str::to_owned), code_length: Some(4), delay, sensors: vec!["Front door".into()], can_force: true };
+            code: code.map(str::to_owned), code_length: Some(4), delay, sensors: vec!["Front door".into()], can_force: true, takeover: true };
         let now = 1_794_172_380.0;
         let delay = Some(model::AlarmDelay { ends: now + 14.2, seconds: 30.0 });
         let disarmed = alarm("disarmed", None, None);
@@ -2841,7 +2849,7 @@ mod shots {
              &format!("{out}/n7-fading.png"));
         let mut zoomed = vec![0u8; (paint::SIZE * paint::SIZE * 4) as usize];
         let frames: Vec<device::Frame> = [Screen::NestCard { nest: &cold, now }, Screen::SettingsCard,
-            Screen::ActionCard { card: &scene, done: false }].iter().map(|screen| {
+            Screen::ActionCard { card: &scene, done: false, opened: false }].iter().map(|screen| {
                 let mut frame = screens::draw(&fonts, screen, None).pixmap.data().to_vec();
                 zoom::round(&mut frame);
                 zoom::shrink(&frame)

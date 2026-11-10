@@ -282,7 +282,7 @@ fn ui_film() {
             ("Reading Lamp", Screen::LightsCard { card: lamp }),
             ("Kitchen", Screen::ClimateCard { card: kitchen, target: None }),
             ("Kitchen speaker", Screen::MediaCard { card: speaker, volume: None, progress: Some(0.4) }),
-            ("Goodnight", Screen::ActionCard { card: &scene, done: false }),
+            ("Goodnight", Screen::ActionCard { card: &scene, done: false, opened: false }),
             ("Bedroom blind", Screen::CoverCard { card: &blind }),
             ("Settings", Screen::SettingsCard),
         ])
