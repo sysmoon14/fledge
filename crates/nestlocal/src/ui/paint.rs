@@ -951,6 +951,29 @@ pub fn pill_window(out: &mut Canvas, chosen: &Canvas, x: f32, y: f32, w: f32, h:
     }
 }
 
+/// Between `top` and `bottom` (as it stands), `new` moved down by
+/// `offset` (up, if negative), and where that leaves a gap, `old` moved by
+/// a row less: a list's rows sliding a row as it scrolls, into `out`.
+/// `offset` runs from a row (`old` showing) to nothing (`new` in place).
+pub fn slide_band(out: &mut Canvas, old: &Canvas, new: &Canvas, top: f32, bottom: f32, offset: f32) {
+    let pitch = if offset >= 0.0 { offset - crate::ui::screens::ROW_PITCH } else { offset + crate::ui::screens::ROW_PITCH };
+    let (top, bottom) = (top.max(0.0) as i32, (bottom as i32).min(SIZE as i32));
+    let (shift, back) = (offset.round() as i32, pitch.round() as i32);
+    let (from_new, from_old) = (new.pixmap.data(), old.pixmap.data());
+    for x in 0..SIZE {
+        for y in top..bottom {
+            // Where this pixel comes from: the new rows if that's on the
+            // band, else the old ones, which have moved on as far.
+            let (source, sy) = if (top..bottom).contains(&(y - shift)) { (from_new, y - shift) } else { (from_old, y - back) };
+            if !(top..bottom).contains(&sy) {
+                continue;
+            }
+            let (at, from) = (out.at(x, y as u32), out.at(x, sy as u32));
+            out.pixmap.data_mut()[at..at + 4].copy_from_slice(&source[from..from + 4]);
+        }
+    }
+}
+
 /// `text`'s width at `size`, `spacing` added between letters.
 pub fn measure(font: &FontArc, size: f32, text: &str, spacing: f32) -> f32 {
     let scaled = font.as_scaled(PxScale::from(size));
@@ -1289,6 +1312,34 @@ pub fn around_cards(frame: &mut Vec<u8>, fonts: &Fonts, name: &str, title: f32, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A canvas whose every row (as it stands) holds its own y in red.
+    fn rows_numbered() -> Canvas {
+        let mut c = canvas_for(BLACK, false);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let at = c.at(x, y);
+                c.pixmap.data_mut()[at] = y as u8;
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn a_list_s_rows_slide_a_row_and_land_in_place() {
+        let (old, new) = (rows_numbered(), canvas_for(WHITE, false));
+        let pitch = crate::ui::screens::ROW_PITCH;
+        let red = |c: &Canvas, y: u32| c.pixmap.data()[c.at(100, y)];
+        let mut out = canvas_for(BLACK, false);
+        slide_band(&mut out, &old, &new, 120.0, 412.0, pitch);
+        assert_eq!((red(&out, 130), red(&out, 177)), (130, 177), "at the start the old rows, in place");
+        slide_band(&mut out, &old, &new, 120.0, 412.0, 0.0);
+        assert_eq!(red(&out, 200), 255, "at the end the new ones");
+        slide_band(&mut out, &old, &new, 120.0, 412.0, pitch / 2.0);
+        assert_eq!(red(&out, 130), 159, "half way on: the old rows half a row up");
+        assert_eq!(red(&out, 300), 255, "and the new ones coming up under them");
+        assert_eq!(red(&out, 50), 0, "the title untouched");
+    }
 
     /// Draws the same things on both canvases: the panel's must be the
     /// upright one turned, in BGR.

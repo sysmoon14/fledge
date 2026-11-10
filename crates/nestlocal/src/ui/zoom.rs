@@ -11,15 +11,10 @@ const SIDE: usize = 480;
 const ROW: usize = SIDE * 4;
 const CENTRE: f32 = SIDE as f32 / 2.0;
 
-/// What's round and between the cards: black, or Fledge's face, as the
-/// framebuffer holds it (BGR).
+/// What's round and between the cards: black, so the cards (Fledge's
+/// navy faces among them) stand out from it.
 fn backdrop() -> [u8; 3] {
-    if super::paint::fledge() {
-        let [r, g, b] = super::paint::FACE;
-        [b, g, r]
-    } else {
-        [0, 0, 0]
-    }
+    [0, 0, 0]
 }
 
 /// A frame of nothing but the backdrop.
@@ -220,6 +215,80 @@ pub fn compose<'a>(out: &mut [u8], at: f32, z: f32, scale: f32, card: impl Fn(i6
         }
     }
 }
+
+/// The chosen card's light rim, in its colour (`accent`, RGB) or a cool
+/// light one, with a soft halo outside it, and the cards beside it dimmed:
+/// over cards composed around `at` at zoom `z`. All of it fades in as the
+/// cards zoom out, and the rim goes as a card leaves the middle.
+pub fn focus(out: &mut [u8], at: f32, z: f32, accent: Option<[u8; 3]>) {
+    let zoomed_out = ((1.0 - z) / (1.0 - zoomed())).clamp(0.0, 1.0);
+    if zoomed_out <= 0.0 {
+        return;
+    }
+    let gap = spacing(z);
+    let half = CENTRE * z;
+    // The cards beside the middle: darker the further they are, to 55%.
+    for r in 0..SIDE {
+        let along = (r as f32 + 0.5 - CENTRE) / gap + at;
+        let k = along.round();
+        let shade = 1.0 - 0.45 * zoomed_out * (k - at).abs().min(1.0);
+        if shade >= 0.999 {
+            continue;
+        }
+        let w = (shade * 256.0) as u32;
+        for pixel in out[r * ROW..(r + 1) * ROW].as_chunks_mut::<4>().0 {
+            let p = u32::from_le_bytes(*pixel);
+            let even = ((p & 0x00ff_00ff) * w) >> 8 & 0x00ff_00ff;
+            let odd = (((p >> 8) & 0x00ff_00ff) * w) & 0xff00_ff00;
+            *pixel = (even | odd).to_le_bytes();
+        }
+    }
+    // The rim and halo on the card nearest the middle.
+    let k = at.round();
+    let strength = zoomed_out * (1.0 - 2.0 * (k - at).abs()).clamp(0.0, 1.0);
+    if strength <= 0.01 {
+        return;
+    }
+    let [red, green, blue] = accent.unwrap_or(RIM);
+    let colour = [blue as f32, green as f32, red as f32];
+    let centre = CENTRE + (k - at) * gap;
+    let radius = half - 1.0;
+    let reach = radius + HALO;
+    let (low, high) = (((centre - reach).floor().max(0.0)) as usize, ((centre + reach).ceil() as usize).min(SIDE));
+    let pixels = out.as_chunks_mut::<4>().0;
+    for r in low..high {
+        let dx = r as f32 + 0.5 - centre;
+        // Only the columns within the halo's reach and outside the rim's
+        // inside: two bands either side of the card in this row.
+        let outer = (reach * reach - dx * dx).max(0.0).sqrt();
+        let inner = ((radius - 2.5).max(0.0).powi(2) - dx * dx).max(0.0).sqrt();
+        let bands = [(CENTRE - outer, CENTRE - inner), (CENTRE + inner, CENTRE + outer)];
+        for (a, b) in bands {
+            let (a, b) = ((a.floor().max(0.0)) as usize, (b.ceil() as usize).min(SIDE));
+            for c in a..b {
+                let dy = c as f32 + 0.5 - CENTRE;
+                let d = (dx * dx + dy * dy).sqrt();
+                let rim = (1.0 - (d - radius).abs() / 1.6).clamp(0.0, 1.0) * 0.85;
+                let glow = if d > radius { (1.0 - (d - radius) / HALO).clamp(0.0, 1.0).powi(2) * 0.38 } else { 0.0 };
+                let (rim, glow) = (rim * strength, glow * strength);
+                if rim <= 0.0 && glow <= 0.0 {
+                    continue;
+                }
+                let pixel = &mut pixels[r * SIDE + c];
+                for (channel, &value) in pixel[..3].iter_mut().zip(&colour) {
+                    let old = *channel as f32;
+                    let lit = old + (value - old) * rim;
+                    *channel = (lit + value * glow).min(255.0) as u8;
+                }
+            }
+        }
+    }
+}
+
+/// The rim's light when the card isn't on (RGB): a cool, pale blue.
+const RIM: [u8; 3] = [150, 168, 196];
+/// How far the halo reaches outside a card.
+const HALO: f32 = 22.0;
 
 #[cfg(test)]
 mod tests {

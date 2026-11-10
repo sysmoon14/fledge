@@ -355,6 +355,9 @@ struct Runtime {
     /// back on (held, or from a menu), or a number Home Assistant changed,
     /// counting to it.
     count: Option<Count>,
+    /// The screen lit while the button is down (D2): drawn whole again as
+    /// it comes up.
+    press_lit: bool,
     /// Frames of the animation under way: how many, how long all told, the
     /// longest.
     frames: (u32, Duration, Duration),
@@ -437,6 +440,9 @@ struct Glide {
     y: f32,
     target: f32,
     drawn: Instant,
+    /// Scrolled a row: the window it left (its two layers), which way
+    /// (1: on, the rows moving up), and since when, for the rows to slide.
+    scroll: Option<(paint::Canvas, paint::Canvas, f32, Instant)>,
 }
 
 /// A value screen's number and ring on their way from `from` to `to`
@@ -502,7 +508,7 @@ impl Runtime {
             pressed: None, back_chosen: None, back_since: None, native_input: now, settings_checked: now, settings_seen: 0, native_settings: false,
             nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
             recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
-            dial: None, last_dial: now - Duration::from_secs(60), count: None,
+            dial: None, last_dial: now - Duration::from_secs(60), count: None, press_lit: false,
         }
     }
 
@@ -576,6 +582,9 @@ impl Runtime {
                     // down: pressing it lights the display before it comes up.
                     (device::EV_KEY, device::KEY_ENTER, 1) => {
                         self.pressed = Some((now, false, lit));
+                        if lit {
+                            self.light_press();
+                        }
                         if self.machine.mode == Mode::Native {
                             // Its menu shows: choosing Back leaves it for the
                             // dial at once, with no other screen between.
@@ -586,7 +595,7 @@ impl Runtime {
                         }
                         continue;
                     }
-                    (device::EV_KEY, device::KEY_ENTER, 0) => match self.pressed.take() {
+                    (device::EV_KEY, device::KEY_ENTER, 0) => match (self.unlight_press(), self.pressed.take()).1 {
                         Some((_, false, was_lit)) => {
                             if let Some(told) = self.back_chosen.take().filter(|_| self.machine.mode == Mode::Native) {
                                 self.back_since = Some((now, told));
@@ -929,6 +938,37 @@ impl Runtime {
             || (self.now_shown.0 - self.now_shown.1).abs() > 0.01 || self.recolour.is_some() || self.count.is_some()
     }
 
+    /// The button down: what it will press lit a little, at once, before
+    /// whatever it does shows.
+    fn light_press(&mut self) {
+        if !self.machine.owns() || matches!(self.machine.mode, Mode::Home | Mode::Glance | Mode::Native | Mode::Idle) {
+            return;
+        }
+        let pressed = match &self.machine.mode {
+            Mode::Chooser(_) => motion::Pressed::Card(paint::SIZE as f32 / 2.0 * self.zoom),
+            _ => match &self.glide {
+                Some(g) if Self::screen(&self.machine, &self.machine.mode).is_some_and(|s| screens::list_place(&s).is_some()) => {
+                    let (x, w, h) = screens::PILL;
+                    motion::Pressed::Row(x, g.y, w, h)
+                }
+                _ => motion::Pressed::Screen,
+            },
+        };
+        let mut frame = self.display.current();
+        motion::press(&mut frame, pressed);
+        self.display.show(&frame);
+        self.press_lit = true;
+    }
+
+    /// The button up: the screen drawn whole again, unlit.
+    fn unlight_press(&mut self) {
+        if std::mem::take(&mut self.press_lit) {
+            self.live = None;
+            self.ticker = None;
+            self.force_draw = true;
+        }
+    }
+
     /// A light switched off or on sweeps its ring and number down to
     /// nothing or up to its brightness (B1); a number Home Assistant
     /// changed, not the ring, counts to it (D3).
@@ -1008,7 +1048,7 @@ impl Runtime {
 
     /// Whether a list's highlight is on its way to its row.
     fn gliding(&self) -> bool {
-        self.glide.as_ref().is_some_and(|g| (g.y - g.target).abs() > 0.3)
+        self.glide.as_ref().is_some_and(|g| (g.y - g.target).abs() > 0.3 || g.scroll.is_some())
             && screens::list_place(&match Self::screen(&self.machine, &self.machine.mode) {
                 Some(screen) => screen,
                 None => return false,
@@ -1192,6 +1232,8 @@ impl Runtime {
         };
         let scale = if shrunk { zoom::zoomed() } else { 1.0 };
         prof::time(prof::Part::Compose, || zoom::compose(&mut self.scratch, at, z, scale, get));
+        let accent = self.accent(at.round().clamp(0.0, count as f32 - 1.0) as usize);
+        prof::time(prof::Part::Overlay, || zoom::focus(&mut self.scratch, at, z, accent));
         // The chosen card's name above and the dots under, as they zoom
         // out; the name fades out and in between cards.
         let fade = ((1.0 - self.zoom) / (1.0 - zoom::zoomed())).clamp(0.0, 1.0);
@@ -1205,6 +1247,26 @@ impl Runtime {
             }
         });
         self.display.show(&self.scratch);
+    }
+
+    /// The colour the card at `index` in the deck is on in, for its rim in
+    /// the chooser: a room's lights' colour, a thermostat heating or
+    /// cooling; None when it isn't on.
+    fn accent(&self, index: usize) -> Option<[u8; 3]> {
+        let climate = |card: &model::ClimateCard| {
+            let (colour, active) = screens::climate_colours(card);
+            (active && colour != paint::BLACK).then_some(colour)
+        };
+        match self.machine.deck().get(index)? {
+            Slot::Thermostat => climate(&self.machine.nest.as_ref()?.card),
+            Slot::Settings => None,
+            &Slot::Card(slot) => match self.machine.cards.cards.get(slot)? {
+                Card::Lights(card) => screens::room(&card.lights).map(|(_, colour)| colour),
+                Card::Climate(card) => climate(card),
+                Card::Media(card) if card.state == "playing" => Some(paint::MEDIA),
+                _ => None,
+            },
+        }
     }
 
     /// What the card at `index` in the deck is called, above it.
@@ -1921,6 +1983,12 @@ impl Runtime {
                 let (plain, chosen) = layers(&mut g.kept);
                 let old = (std::mem::replace(&mut g.key, key.clone()), std::mem::replace(&mut g.plain, plain),
                            std::mem::replace(&mut g.chosen, chosen));
+                // One row on or back: the rows slide (D1); further, they're there.
+                let first = |key: &str| key.split(' ').nth(1).and_then(|f| f.parse::<i64>().ok());
+                g.scroll = match (first(&old.0), first(&key)) {
+                    (Some(a), Some(b)) if (b - a).abs() == 1 => Some((old.1.clone(), old.2.clone(), (b - a) as f32, Instant::now())),
+                    _ => None,
+                };
                 // Scrolled: where it was is a window it may go back to.
                 g.kept.push(old);
                 if g.kept.len() > KEPT_WINDOWS {
@@ -1930,7 +1998,7 @@ impl Runtime {
             _ => {
                 let mut kept = glide.take().map(|g| g.kept).unwrap_or_default();
                 let (plain, chosen) = layers(&mut kept);
-                *glide = Some(Glide { plain, chosen, kept, key, y: target, target, drawn: Instant::now() });
+                *glide = Some(Glide { plain, chosen, kept, key, y: target, target, drawn: Instant::now(), scroll: None });
             }
         }
         let g = glide.as_mut().expect("just made");
@@ -1944,7 +2012,22 @@ impl Runtime {
         g.y = next;
         let mut canvas = g.plain.clone();
         let (x, w, h) = screens::PILL;
-        paint::pill_window(&mut canvas, &g.chosen, x, g.y, w, h);
+        let t = g.scroll.as_ref().map_or(1.0, |(.., since)| since.elapsed().as_secs_f32() / motion::STANDARD.as_secs_f32());
+        match &g.scroll {
+            Some((plain, chosen, way, _)) if t < 1.0 => {
+                // The rows between the title and the list's foot slide a row.
+                let offset = (1.0 - motion::curve(t)) * screens::ROW_PITCH * way;
+                let (top, bottom) = screens::list_band();
+                paint::slide_band(&mut canvas, plain, &g.plain, top, bottom, offset);
+                let mut lit = g.chosen.clone();
+                paint::slide_band(&mut lit, chosen, &g.chosen, top, bottom, offset);
+                paint::pill_window(&mut canvas, &lit, x, g.y, w, h);
+            }
+            _ => {
+                g.scroll = None;
+                paint::pill_window(&mut canvas, &g.chosen, x, g.y, w, h);
+            }
+        }
         device::frame(canvas)
     }
 
@@ -2600,7 +2683,14 @@ mod shots {
                 zoom::shrink(&frame)
             }).collect();
         zoom::compose(&mut zoomed, 1.0, zoom::zoomed(), zoom::zoomed(), |k| frames.get(k as usize).map(Vec::as_slice));
-        let canvas = paint::Canvas::from_frame(zoomed);
-        save(&canvas, &format!("{out}/z1-zoomed.png"));
+        let plain = zoomed.clone();
+        zoom::focus(&mut zoomed, 1.0, zoom::zoomed(), None);
+        save(&paint::Canvas::from_frame(zoomed), &format!("{out}/z1-zoomed.png"));
+        // The rim in a card's colour: given as the framebuffer would (BGR),
+        // as this preview is upright RGBA.
+        let mut lit = plain;
+        let [r, g, b] = paint::HEAT;
+        zoom::focus(&mut lit, 1.0, zoom::zoomed(), Some([b, g, r]));
+        save(&paint::Canvas::from_frame(lit), &format!("{out}/z2-zoomed-on.png"));
     }
 }

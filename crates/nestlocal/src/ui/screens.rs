@@ -339,7 +339,7 @@ fn light_card(fonts: &Fonts, card: &LightsCard, light: &Light) -> Canvas {
     p
 }
 
-fn climate_colours(card: &ClimateCard) -> ([u8; 3], bool) {
+pub fn climate_colours(card: &ClimateCard) -> ([u8; 3], bool) {
     match card.action.as_str() {
         "heating" | "preheating" => (HEAT, true),
         "cooling" => (COOL, true),
@@ -944,6 +944,12 @@ pub const ROW_PITCH: f32 = 58.0;
 pub const PILL: (f32, f32, f32) = (62.0, 356.0, 54.0);
 /// A list's title, over its rows.
 const LIST_TITLE: f32 = 96.0;
+
+/// Where a list's rows are, top and bottom as it stands: what slides as
+/// it scrolls a row, under its title.
+pub fn list_band() -> (f32, f32) {
+    (LIST_TOP - (ROW_PITCH - PILL.2) / 2.0 - 2.0, LIST_TOP + ROWS as f32 * ROW_PITCH)
+}
 
 /// How a list is drawn: whole, its highlight on the chosen row; or in two
 /// layers for the highlight to glide between rows (Runtime): every row as

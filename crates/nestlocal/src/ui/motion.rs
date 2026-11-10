@@ -73,7 +73,8 @@ impl Kind {
         match self {
             Kind::Cut => Duration::ZERO,
             Kind::Fade | Kind::Push | Kind::Pop | Kind::MenuIn | Kind::Drop => STANDARD,
-            Kind::MenuOut | Kind::Lift => Duration::from_millis(240),
+            // Things leaving go quickly.
+            Kind::MenuOut | Kind::Lift => FAST,
             Kind::Through => SLOW,
         }
     }
@@ -238,6 +239,46 @@ pub fn shift_y(frame: &[u8], dy: f32, out: &mut [u8]) {
         } else {
             to[n * 4..].copy_from_slice(&from[..(SIDE - n) * 4]);
             to[..n * 4].fill(0);
+        }
+    }
+}
+
+/// Where a press lights the screen while the button is down (D2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pressed {
+    /// The card in the middle of the chooser, of this radius.
+    Card(f32),
+    /// A list's highlighted row: its pill (x, y, w, h) as it stands.
+    Row(f32, f32, f32, f32),
+    /// The whole screen, a little.
+    Screen,
+}
+
+/// `frame` with `pressed` lit a little towards white.
+pub fn press(frame: &mut [u8], pressed: Pressed) {
+    let lift = |pixel: &mut [u8; 4], amount: u32| {
+        for channel in &mut pixel[..3] {
+            *channel += (((255 - *channel as u32) * amount) >> 8) as u8;
+        }
+    };
+    let pixels = frame.as_chunks_mut::<4>().0;
+    match pressed {
+        Pressed::Screen => pixels.iter_mut().for_each(|p| lift(p, 14)),
+        Pressed::Card(radius) => {
+            for r in 0..SIDE {
+                let dx = r as f32 + 0.5 - CENTRE;
+                let half = (radius * radius - dx * dx).max(0.0).sqrt();
+                let (a, b) = ((CENTRE - half).max(0.0) as usize, ((CENTRE + half) as usize).min(SIDE));
+                pixels[r * SIDE + a..r * SIDE + b].iter_mut().for_each(|p| lift(p, 30));
+            }
+        }
+        Pressed::Row(x, y, w, h) => {
+            // Upright x is a framebuffer row; upright y runs back along it.
+            let (r0, r1) = (x.max(0.0) as usize, ((x + w) as usize).min(SIDE));
+            let (c0, c1) = ((SIDE as f32 - (y + h)).max(0.0) as usize, ((SIDE as f32 - y) as usize).min(SIDE));
+            for r in r0..r1 {
+                pixels[r * SIDE + c0..r * SIDE + c1].iter_mut().for_each(|p| lift(p, 40));
+            }
         }
     }
 }
