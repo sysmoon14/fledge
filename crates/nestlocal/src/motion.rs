@@ -10,6 +10,13 @@
 //!   with any movement, near or far.
 //! - "pir N; px1 ..; alv A, alir I": a reading every few seconds while
 //!   awake, with the ambient light sensor's visible (A) and infrared (I).
+//! - "msg: *HVAC power [init]  vusb U vin I vout O" and "state .., vi IV, vo
+//!   OV; ..": the backplate's power, on each wake and every ~30 s, and an
+//!   "init" one at once when power comes back to its terminals. vin is in
+//!   10 mV, vout in mV. Measured on Ben's unit with an 11 V supply on the
+//!   terminals: on, vi 10.97 V and vo 4.64 V; off, vi 0.24-0.33 V and vo
+//!   0.001-0.002 V. vo is the backplate powering the display: all or
+//!   nothing, so it says whether the unit has external power.
 //!
 //! Each event is published as ON; Home Assistant clears the sensor itself
 //! (off_delay) after its hold without another, so a sensor clears on time
@@ -83,7 +90,15 @@ pub enum Event {
     Approach(u32),
     /// The ambient light sensor: visible and infrared.
     Light { visible: u32, infrared: u32 },
+    /// The backplate's power: the voltage on its terminals and what it
+    /// supplies the display, in volts.
+    Power { input: f32, output: f32 },
 }
+
+/// The display's supply from the backplate above which the unit has
+/// external power: it reads 4.6 V with power on the terminals, 0.002 V
+/// without.
+pub const EXTERNAL_V: f32 = 1.0;
 
 /// The sensor event a line of nlclient's log reports, if any.
 #[cfg(test)]
@@ -91,7 +106,7 @@ fn event(line: &str) -> Option<Sensor> {
     match reading(line)? {
         Event::Sensed(sensor) => Some(sensor),
         Event::Approach(_) => Some(Sensor::Near),
-        Event::Light { .. } => None,
+        Event::Light { .. } | Event::Power { .. } => None,
     }
 }
 
@@ -100,6 +115,14 @@ fn number(line: &str, key: &str) -> Option<u32> {
     let rest = &line[line.find(key)? + key.len()..];
     let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
+}
+
+/// The volts after `key` in `line`, written like "11.09V".
+fn volts(line: &str, key: &str) -> Option<f32> {
+    let rest = &line[line.find(key)? + key.len()..];
+    let n: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    rest.trim_start()[n.len()..].starts_with('V').then_some(())?;
+    n.parse().ok()
 }
 
 /// What a line of nlclient's log reports.
@@ -111,6 +134,10 @@ pub fn reading(line: &str) -> Option<Event> {
         Some(Event::Approach(number(said, "maxud:")?))
     } else if said.starts_with("pir ") && said.contains("alv ") {
         Some(Event::Light { visible: number(said, "alv ")?, infrared: number(said, "alir ")? })
+    } else if said.starts_with("msg: *HVAC power") {
+        Some(Event::Power { input: number(said, " vin ")? as f32 / 100.0, output: number(said, " vout ")? as f32 / 1000.0 })
+    } else if said.starts_with("state ") {
+        Some(Event::Power { input: volts(said, " vi ")?, output: volts(said, " vo ")? })
     } else {
         None
     }
@@ -181,16 +208,18 @@ pub fn start(bridge: Arc<Bridge>) {
                 crate::ui::nest_alert();
             }
             let mut light = None;
+            let mut power = None;
             for event in lines.iter().filter_map(|l| reading(l)) {
                 match event {
                     Event::Light { visible, infrared } => light = Some((visible, infrared)),
+                    Event::Power { input, output } => power = Some((input, output)),
                     Event::Approach(level) => logf!("motion: approach {level}"),
                     Event::Sensed(_) => {}
                 }
                 let sensor = match event {
                     Event::Sensed(sensor) => sensor,
                     Event::Approach(_) => Sensor::Near,
-                    Event::Light { .. } => continue,
+                    Event::Light { .. } | Event::Power { .. } => continue,
                 };
                 if !seen.contains(&sensor) {
                     seen.push(sensor);
@@ -202,6 +231,9 @@ pub fn start(bridge: Arc<Bridge>) {
             }
             if let Some((visible, infrared)) = light {
                 bridge.light(visible, infrared);
+            }
+            if let Some((input, output)) = power {
+                bridge.power(input, output);
             }
         }
     });
@@ -227,6 +259,25 @@ mod tests {
         assert_eq!(reading("2026-11-09 13:25:07.694777 S nlclient[16444:bckpla] (2) backplate controller: pir 8209; px1 65240/15, px2 65240/15; alv 12, alir 19"),
                    Some(Event::Light { visible: 12, infrared: 19 }));
         assert_eq!(event("czcomms: promoting hot water schedule"), None);
+    }
+
+    #[test]
+    fn the_backplate_power_from_both_of_its_lines() {
+        let on = reading("2026-11-10 11:56:09.893029 09AB01AC36230301 nlclient[31184:bckpla] (2) backplate controller: msg: *HVAC power  vusb 10 vin 1097 vout 4647");
+        assert_eq!(on, Some(Event::Power { input: 10.97, output: 4.647 }));
+        let back = reading("2026-11-10 12:02:39.861540 09AB01AC36230301 nlclient[31184:bckpla] (2) backplate controller: msg: *HVAC power init  vusb 5 vin 1095 vout 4642");
+        assert_eq!(back, Some(Event::Power { input: 10.95, output: 4.642 }));
+        let off = reading("2026-11-10 11:58:51.207836 09AB01AC36230301 nlclient[31184:bckpla] (2) backplate controller: msg: *HVAC power  vusb 14 vin 33 vout 1");
+        assert_eq!(off, Some(Event::Power { input: 0.33, output: 0.001 }));
+        let state = reading("2026-11-10 11:58:24.600037 09AB01AC36230301 nlclient[31184:bckpla] (2) backplate controller: state 1, flags 14, vi 11.09V, vo 4.636V; px0 0a, vb 3.92V; sw 00/00, p2 00; voc 0.17V; pins 15, wires 15");
+        assert_eq!(state, Some(Event::Power { input: 11.09, output: 4.636 }));
+        let state_off = reading("2026-11-10 11:58:54.685756 09AB01AC36230301 nlclient[31184:bckpla] (2) backplate controller: state 1, flags 14, vi 0.24V, vo 0.002V; px0 0a, vb 3.848V; sw 00/00, p2 00; voc 0.13V; pins 15, wires 15");
+        assert_eq!(state_off, Some(Event::Power { input: 0.24, output: 0.002 }));
+        for (event, external) in [(on, true), (back, true), (state, true), (off, false), (state_off, false)] {
+            let Some(Event::Power { output, .. }) = event else { unreachable!() };
+            assert_eq!(output >= EXTERNAL_V, external);
+        }
+        assert_eq!(reading("backplate controller: got power message detect: 1 wire: 2 current: 30mA"), None);
     }
 
     #[test]

@@ -67,6 +67,8 @@ pub struct Bridge {
     sensors: std::sync::atomic::AtomicBool, // motion.rs follows nlclient's log
     /// The ambient light sensor's last reading (visible, infrared) published.
     light: Mutex<Option<(u32, u32)>>,
+    /// The backplate power last published: external power, input in 0.1 V.
+    power: Mutex<Option<(bool, i32)>>,
     /// Home Assistant's home screen cards (ui/).
     pub ui: Arc<crate::ui::Ui>,
     /// The releases the update entity offers, with -update-repo (update.rs).
@@ -95,6 +97,7 @@ impl Bridge {
             time_ok_rx: Mutex::new(Some(time_ok_rx)),
             sensors: std::sync::atomic::AtomicBool::new(false),
             light: Mutex::new(None),
+            power: Mutex::new(None),
             ui: Default::default(),
             updates: OnceLock::new(),
             me: me.clone(),
@@ -282,6 +285,19 @@ impl Bridge {
         }
         let payload = serde_json::json!({"visible": visible, "infrared": infrared}).to_string();
         self.publish(&format!("{}/light", self.base), true, payload.as_bytes());
+    }
+
+    /// The backplate's power from motion.rs, on <base>/power (retained: the
+    /// unit reads it only while awake), as it changes: whether the unit
+    /// has external power, and the voltage on the terminals to 0.1 V.
+    pub fn power(&self, input: f32, output: f32) {
+        let external = output >= crate::motion::EXTERNAL_V;
+        let tenths = (input * 10.0).round() as i32;
+        if self.power.lock().unwrap().replace((external, tenths)) == Some((external, tenths)) {
+            return;
+        }
+        let payload = serde_json::json!({"external": external, "input": tenths as f64 / 10.0}).to_string();
+        self.publish(&format!("{}/power", self.base), true, payload.as_bytes());
     }
 
     /// Connects to the broker, and from then on publishes every change and
@@ -656,6 +672,19 @@ impl Bridge {
                 c.extend(extra);
                 add("sensor", key, name, c);
             }
+            add("binary_sensor", "external_power", "External power", fields!{
+                "state_topic" => format!("{}/power", self.base),
+                "value_template" => "{{ 'ON' if value_json.external else 'OFF' }}",
+                "device_class" => "power",
+            });
+            add("sensor", "backplate_input_voltage", "Backplate input voltage", fields!{
+                "state_topic" => format!("{}/power", self.base),
+                "value_template" => "{{ value_json.input }}",
+                "unit_of_measurement" => "V",
+                "device_class" => "voltage",
+                "state_class" => "measurement",
+                "entity_category" => "diagnostic",
+            });
         }
 
         let sw = |add: &mut dyn FnMut(&str, &str, &str, Fields), key: &str, name: &str, icon: &str| {
@@ -1277,6 +1306,23 @@ pub mod tests {
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let light = configs.iter().find(|(t, _)| t.ends_with("/light_level/config")).map(|(_, c)| serde_json::from_str::<Value>(c).unwrap()).unwrap();
         assert_eq!((&light["state_topic"], &light["value_template"]), (&json!("nestlocal/S/light"), &json!("{{ value_json.visible }}")));
+        let find = |suffix: &str| configs.iter().find(|(t, _)| t.ends_with(suffix)).map(|(_, c)| serde_json::from_str::<Value>(c).unwrap()).unwrap();
+        let power = find("binary_sensor/nestlocal_s/external_power/config");
+        assert_eq!((&power["state_topic"], &power["device_class"]), (&json!("nestlocal/S/power"), &json!("power")));
+        let input = find("/backplate_input_voltage/config");
+        assert_eq!((&input["unit_of_measurement"], &input["value_template"]), (&json!("V"), &json!("{{ value_json.input }}")));
+    }
+
+    #[test]
+    fn the_backplate_power_is_published_as_it_changes() {
+        let b = test_bridge();
+        assert_eq!(*b.power.lock().unwrap(), None);
+        b.power(10.97, 4.647);
+        assert_eq!(*b.power.lock().unwrap(), Some((true, 110)));
+        b.power(11.01, 4.64);
+        assert_eq!(*b.power.lock().unwrap(), Some((true, 110)), "the same to 0.1 V");
+        b.power(0.33, 0.001);
+        assert_eq!(*b.power.lock().unwrap(), Some((false, 3)));
     }
 
     /// Equipment with everything discovery can announce.
