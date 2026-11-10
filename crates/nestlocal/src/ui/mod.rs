@@ -455,6 +455,8 @@ struct Count {
     since: Instant,
     length: Duration,
     lit: bool,
+    /// A light switched off or on (not a number Home Assistant changed).
+    switch: bool,
 }
 
 /// How long the thermostat's pulse runs, and how often.
@@ -568,6 +570,8 @@ impl Runtime {
             let lit = device::lit();
             let before = self.machine.mode.clone();
             let turned = !events.is_empty();
+            // The ring itself, not the button: a count gives way only to the hand.
+            let rotated = events.iter().any(|e| e.kind == device::EV_REL);
             if turned && self.machine.mode == Mode::Native {
                 self.native_input = now;
                 self.settings_seen = 0;
@@ -739,7 +743,7 @@ impl Runtime {
                     self.transition = Transition::Cut;
                 }
             }
-            self.start_count(&before, turned, now);
+            self.start_count(&before, rotated, now);
             if matches!(before, Mode::Chooser(_)) && !matches!(self.machine.mode, Mode::Chooser(_) | Mode::Home) {
                 // Opened: into the card before what it opens shows.
                 self.zoom_in();
@@ -992,9 +996,12 @@ impl Runtime {
         };
         if let Some(on) = switched {
             let from = if on { 0.0 } else { shown };
-            self.count = Some(Count { key, from, to: if on { is } else { 0.0 }, since: now, length: motion::SWEEP, lit: on });
+            self.count = Some(Count { key, from, to: if on { is } else { 0.0 }, since: now, length: motion::SWEEP, lit: on, switch: true });
+        } else if let Some(c) = self.count.as_mut().filter(|c| c.switch && c.lit && !turned) {
+            // Home Assistant's own brightness for a light sweeping on: where it ends.
+            c.to = is;
         } else if !turned && (is - was).abs() > f64::EPSILON && self.count.as_ref().is_none_or(|c| c.lit) {
-            self.count = Some(Count { key, from: shown, to: is, since: now, length: motion::STANDARD, lit: true });
+            self.count = Some(Count { key, from: shown, to: is, since: now, length: motion::STANDARD, lit: true, switch: false });
         } else if turned {
             // The hand has it: the ring follows the hand.
             self.count = None;
