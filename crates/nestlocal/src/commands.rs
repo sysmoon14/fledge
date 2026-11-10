@@ -106,6 +106,10 @@ impl Bridge {
             }
             return;
         }
+        if name == "external_temperature_option" {
+            self.set_external_temperature_option(&String::from_utf8_lossy(payload));
+            return;
+        }
         if name == "screen_wake" {
             self.ui.wake();
             return;
@@ -173,6 +177,29 @@ impl Bridge {
                 name != "target_change_pending" && current.value.get(name) != Some(&crate::json::canonical(value.clone()))
             }
         })
+    }
+
+    /// set/external_temperature_option ON/OFF: the unit's start options
+    /// changed, and a reboot into them (nlclient takes the BLE chip, or
+    /// nestlocal's stand-in for it, only as it starts).
+    fn set_external_temperature_option(&self, arg: &str) {
+        let on = match on_off(arg.trim()) {
+            Ok(on) => on,
+            Err(e) => return logf!("mqtt: external_temperature_option {arg:?}: {e}"),
+        };
+        if crate::device::current().ble.is_none() {
+            return logf!("mqtt: external_temperature_option: this unit has no BLE chip to stand in for");
+        }
+        let file = crate::unit_options::path();
+        match crate::unit_options::set(&file, crate::unit_options::EXTERNAL_TEMPERATURE, on) {
+            Ok(false) => logf!("mqtt: external_temperature_option: already {}", if on { "on" } else { "off" }),
+            Ok(true) => {
+                logf!("mqtt: external_temperature_option: {} in {}", if on { "on" } else { "off" }, file.display());
+                self.publish_state();
+                crate::unit_options::reboot_soon("the external temperature option");
+            }
+            Err(e) => logf!("mqtt: external_temperature_option: {}: {e}", file.display()),
+        }
     }
 
     pub fn fields(&self, name: &str, arg: &str) -> Result<Change, String> {

@@ -29,6 +29,7 @@ mod settings_ui;
 mod structure;
 mod thread_sleep;
 mod ui;
+mod unit_options;
 mod update;
 mod wake;
 mod weather;

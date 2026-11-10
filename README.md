@@ -225,7 +225,9 @@ shows in place, and Done says what to do next. The sidebar's other pages are
 Backups (the whole-NAND images the app keeps, with back up, restore and delete),
 Logs (every run's steps and log), About and, under Tools, the 3rd generation's
 application boot and a serial console on a patched unit's USB root shell. The
-external temperature is the command line's only (`--external-temperature`).
+external temperature option isn't in the app: on a 3rd generation unit, turn it
+on from Home Assistant with the Nest's **External temperature** switch (the unit
+reboots into it), or patch with `--external-temperature`.
 
 **CLI (Linux and macOS):** the same executable, run with arguments, works from a
 terminal, over SSH or headless, with a few things the app doesn't have

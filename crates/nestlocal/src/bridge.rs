@@ -44,6 +44,8 @@ use crate::weather::Outdoor;
 /// The update entity's discovery components and keys (update.rs): the
 /// update itself, and its check button.
 const UPDATE_ENTITIES: [(&str, &str); 2] = [("update", "nestlocal"), ("button", "check_update")];
+/// What -external-temperature adds (announce).
+const SENSOR_ENTITIES: [(&str, &str); 2] = [("sensor", "external_temperature"), ("sensor", "temperature_source")];
 
 pub struct Bridge {
     pub serial: String,
@@ -238,6 +240,15 @@ impl Bridge {
             .chain([format!("{}/update", self.base)]).collect()
     }
 
+    /// The stand-in sensor's entities, from a run with -external-temperature,
+    /// on a start without it: retained, they would outlive the option.
+    fn stale_sensor_topics(&self, id: &str) -> Vec<String> {
+        if self.sensor.get().is_some() {
+            return Vec::new();
+        }
+        SENSOR_ENTITIES.iter().map(|(component, key)| format!("{}/{component}/{id}/{key}/config", self.discovery)).collect()
+    }
+
     pub fn updates(&self) -> Option<&crate::update::Updates> {
         self.updates.get()
     }
@@ -426,13 +437,16 @@ impl Bridge {
     }
 
     /// What nlclient runs with since heatlink.rs restarted it.
-    fn publish_state(&self) {
+    pub(crate) fn publish_state(&self) {
         let buckets = self.buckets();
         let (Some(dev), Some(sh)) = (buckets.get("device"), buckets.get("shared")) else {
             return; // the unit has not reported yet
         };
         self.announce(dev, sh);
         let mut shown = state(dev, sh);
+        if crate::device::current().ble.is_some() {
+            shown.insert("external_temperature_option".into(), crate::unit_options::external_temperature().into());
+        }
         if let Some(sensor) = self.sensor.get() {
             shown.insert("external_temperature".into(), sensor.reading().map_or(Value::Null, Value::from));
             shown.insert("temperature_source".into(), self.temperature_source().map_or(Value::Null, Value::from));
@@ -656,6 +670,16 @@ impl Bridge {
         sw(&mut add, "auto_away_enable", "Home/Away Assist", "mdi:home-account");
         sw(&mut add, "sunlight_correction_enabled", "Sunblock", "mdi:weather-sunny");
         sw(&mut add, "preconditioning_enabled", "Early-On", "mdi:clock-fast");
+        // Regulating from Home Assistant's thermometer (set/external_temperature):
+        // a stand-in for the BLE chip, so only on a unit that has one.
+        if crate::device::current().ble.is_some() {
+            add("switch", "external_temperature_option", "External temperature", fields!{
+                "value_template" => on_off("external_temperature_option"),
+                "command_topic" => format!("{set}external_temperature_option"),
+                "entity_category" => "config",
+                "icon" => "mdi:thermometer-bluetooth",
+            });
+        }
         if truthy(dev.get("has_hot_water_control")) {
             add("switch", "hot_water_schedule", "Hot water schedule", fields!{
                 "value_template" => on_off("hot_water_schedule"),
@@ -768,6 +792,7 @@ impl Bridge {
         let mut gone: Vec<String> = old.keys().filter(|t| !configs.contains_key(*t)).cloned().collect();
         if first {
             gone.extend(self.stale_update_topics(&id));
+            gone.extend(self.stale_sensor_topics(&id));
         }
         for topic in &gone {
             self.publish(topic, true, b"");
@@ -1167,6 +1192,33 @@ pub mod tests {
     }
 
     #[test]
+    fn without_the_external_temperature_option_its_retained_entities_are_cleared() {
+        let b = test_bridge();
+        assert_eq!(b.stale_sensor_topics("nestlocal_s"), vec![
+            "homeassistant/sensor/nestlocal_s/external_temperature/config".to_string(),
+            "homeassistant/sensor/nestlocal_s/temperature_source/config".to_string(),
+        ]);
+        // And they are what announce adds with the option.
+        let (dev, sh) = everything();
+        let dir = std::env::temp_dir().join(format!("nestlocal-stale-sensor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sensor = crate::sensor::Sensor::open(&dir.join("identity.json"), "S", &dir.join("settings"),
+                                                 std::time::Duration::from_secs(60));
+        {
+            let _ = b.sensor.set(sensor.expect("a sensor from a new identity"));
+            b.announce(&dev, &sh);
+            let configs = b.announced.lock().unwrap().clone().unwrap();
+            for topic in ["homeassistant/sensor/nestlocal_s/external_temperature/config",
+                          "homeassistant/sensor/nestlocal_s/temperature_source/config"] {
+                assert!(configs.contains_key(topic), "{topic}");
+            }
+            assert!(b.stale_sensor_topics("nestlocal_s").is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_wwn_boiler_unit_heats_without_can_heat() {
         let b = Bridge::new("nestlocal", "homeassistant", "S", temp_store(), Arc::new(Outdoor::default()), None, true);
         b.store.merge("shared.S", &obj(json!({"can_heat": false, "can_cool": false})), 0, 0, true);
@@ -1244,7 +1296,9 @@ pub mod tests {
         b.store.merge("device.S", &dev, 0, 0, true);
         b.announce(&dev, &sh);
         let configs = b.announced.lock().unwrap().clone().unwrap();
-        let s = state(&dev, &sh);
+        let mut s = state(&dev, &sh);
+        // What publish_state adds on a unit with a BLE chip.
+        s.insert("external_temperature_option".into(), false.into());
         let schedule_keys = match crate::schedule::simple(&Fields::new(), "C") {
             Value::Object(o) => o,
             _ => unreachable!(),
@@ -1281,6 +1335,10 @@ pub mod tests {
                 // entity would send).
                 if k.ends_with("command_topic") {
                     let name = v.strip_prefix("nestlocal/S/set/").unwrap_or_else(|| panic!("{topic}: {k} {v}"));
+                    // Not a bucket's: commands.rs takes it before fields.
+                    if name == "external_temperature_option" {
+                        continue;
+                    }
                     let arg = match name {
                         "mode" => "heat",
                         "preset" => "eco",
