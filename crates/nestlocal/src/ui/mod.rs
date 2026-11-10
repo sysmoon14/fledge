@@ -1069,7 +1069,8 @@ impl Runtime {
     /// What the card at `index` in the deck is called, above it.
     fn name(&self, index: usize) -> String {
         match self.machine.deck().get(index) {
-            Some(Slot::Thermostat) => "Thermostat".into(),
+            // Its name from Home Assistant, as its own screens show it.
+            Some(Slot::Thermostat) => self.machine.cards.thermostat_name().unwrap_or("Thermostat").to_owned(),
             Some(Slot::Settings) => "Settings".into(),
             Some(&Slot::Card(slot)) => match self.machine.cards.cards.get(slot) {
                 Some(Card::Lights(card)) => card.name.clone(),
@@ -1305,7 +1306,15 @@ impl Runtime {
                 self.saved = None;
                 self.home = None;
                 self.view = None;
+                let native = self.machine.mode == Mode::Native;
                 device::own(false);
+                if native {
+                    // nlclient's frame as it was when we took the display: it
+                    // drew since, unseen, and draws again only as something
+                    // changes. Woken as Home Assistant wakes it (no input), it
+                    // draws what it shows now.
+                    device::wake_display();
+                }
             }
             Effect::Hold(hold) => {
                 self.input.grab(hold);
@@ -1506,6 +1515,7 @@ impl Runtime {
                 target: machine::on_step(*target, machine.nest.as_ref()?.card.step),
                 setting: machine.set_at.is_some_and(|at| at.elapsed() < machine::SET_SHOWN), shown: None,
             },
+            Mode::ModePrompt { selected, .. } => Screen::ModePrompt { nest: machine.nest.as_ref()?, selected: *selected },
             Mode::Settings { selected } => Screen::Settings { rows: machine.settings(), nest: machine.nest.as_ref(),
                                                               nest_dial: machine.nest_dial, selected: *selected },
             Mode::SettingSet { setting, value } => Screen::SettingSet { setting: *setting, nest: machine.nest.as_ref()?,
@@ -1842,6 +1852,28 @@ fn ease(t: f32) -> f32 {
 mod tests {
     use super::*;
 
+    /// A frame as Display::save gives it (BGRX), from a picture of one.
+    fn frame_from_png(bytes: &[u8]) -> Vec<u8> {
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+        let mut rgb = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut rgb).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (480, 480, png::ColorType::Rgb));
+        rgb.chunks(3).flat_map(|c| [c[2], c[1], c[0], 0]).collect()
+    }
+
+    #[test]
+    fn nlclient_s_dial_is_known_while_the_thermostat_is_off() {
+        // Ben's unit, 2026-11-10: off, 23.5 °C now, Eco's leaf; no ring of ticks.
+        let off = frame_from_png(include_bytes!("../testdata/nest-off-dial.png"));
+        assert!(dial(&off) && !settings_tile(&off), "Back and Done find it");
+        assert!(!dial(&vec![0; off.len()]), "black is not the dial");
+        let mut busy = off.clone();
+        for px in busy.chunks_mut(4).step_by(97) {
+            px[..3].copy_from_slice(&[255, 255, 255]);
+        }
+        assert!(!off_dial(&busy), "white elsewhere (a menu's icons): not the off dial");
+    }
+
     #[test]
     fn a_card_showing_something_else_is_the_same_card_and_another_in_its_place_is_not() {
         let cards = Cards::parse(br#"{"cards":[
@@ -1953,6 +1985,7 @@ fn mode_state(mode: &Mode) {
     let name = match mode {
         Mode::Chooser(index) => format!("Chooser {index}"),
         Mode::Settings { selected } => format!("Settings {selected}"),
+        Mode::ModePrompt { selected, .. } => format!("ModePrompt {selected}"),
         Mode::Menu { view, .. } => format!("Menu {}", format!("{view:?}").split([' ', '{', '(']).next().unwrap_or("")),
         other => format!("{other:?}").split([' ', '{', '(']).next().unwrap_or("").to_owned(),
     };
@@ -2034,6 +2067,9 @@ fn blank(page: &[u8]) -> bool {
 
 /// Whether a frame shows nlclient's home dial: its ring lit around the edge.
 fn dial(page: &[u8]) -> bool {
+    if off_dial(page) {
+        return true;
+    }
     let stride = page.len() / 480;
     let (mut lit, mut total) = (0, 0);
     for angle in (0..360).step_by(3) {
@@ -2046,6 +2082,39 @@ fn dial(page: &[u8]) -> bool {
         }
     }
     lit as f32 / total as f32 > 0.2
+}
+
+/// Whether a frame is nlclient's dial while the thermostat is off: no ring
+/// of ticks (only the temperature now's, grey), its large white OFF in the
+/// middle, and nothing else white (its menus have white icons round the
+/// edge, its Settings tiles are blue).
+fn off_dial(page: &[u8]) -> bool {
+    let stride = page.len() / 480;
+    let white = |x: usize, y: usize| {
+        // Upright (x, y) is framebuffer row x, column 479 - y, as BGRX.
+        let at = x * stride + (479 - y) * 4;
+        page[at..at + 3].iter().all(|&c| c > 200)
+    };
+    let in_box = |x: usize, y: usize| (170..=310).contains(&x) && (205..=275).contains(&y);
+    let mut middle = 0;
+    for x in 170..=310 {
+        for y in 205..=275 {
+            middle += white(x, y) as u32;
+        }
+    }
+    if !(1200..=4500).contains(&middle) {
+        return false;
+    }
+    let mut elsewhere = 0;
+    for x in (10..470).step_by(3) {
+        for y in (10..470).step_by(3) {
+            let (dx, dy) = (x as i32 - 240, y as i32 - 240);
+            if !in_box(x, y) && dx * dx + dy * dy < 230 * 230 {
+                elsewhere += white(x, y) as u32;
+            }
+        }
+    }
+    elsewhere < 40
 }
 
 /// Every screen, drawn to PNGs in UNFR0ZEN_UI_SHOTS with the fonts in
@@ -2174,6 +2243,16 @@ mod shots {
         screens::menu(&mut menu, &fonts, "Thermostat", &[("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"),
             ("mdi:power", "Turn off"), ("mdi:water-boiler", "Stop the boost"), ("mdi:thermometer", "Nest's own dial")], 1);
         save(&menu, &format!("{out}/t6-nest-menu.png"));
+        // Off: the ring turned asks for a mode.
+        let off = &shots[3].1;
+        for selected in [machine::PROMPT_ON, machine::PROMPT_CANCEL] {
+            save(&screens::draw(&fonts, &Screen::ModePrompt { nest: off, selected }, None),
+                 &format!("{out}/t11-nest-off-prompt-{selected}.png"));
+        }
+        // A switch's own screen, on and off.
+        let fan = model::Light { id: "switch.fan".into(), name: "Fan".into(), on: true, dimmable: false, ..Default::default() };
+        save(&screens::draw(&fonts, &Screen::LightDim { light: &fan, on: true, value: 100 }, None), &format!("{out}/s1-switch-on.png"));
+        save(&screens::draw(&fonts, &Screen::LightDim { light: &fan, on: false, value: 100 }, None), &format!("{out}/s2-switch-off.png"));
         let idle = state(serde_json::json!({"update": "v0.5.0"}));
         let mut machine = Machine::new(Instant::now());
         machine.set_nest(idle.clone());

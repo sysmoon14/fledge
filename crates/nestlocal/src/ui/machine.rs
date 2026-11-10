@@ -19,6 +19,16 @@ use crate::logf;
 /// REL_DIAL reports the ADC's raw counts; a step is a deliberate movement.
 pub const CARD_STEP: i32 = 500;
 pub const ROW_STEP: i32 = 250;
+/// A device's ring of actions: an icon a step, never two at once (a quick
+/// hand's reading can hold several rows' worth), and what's left over after
+/// a step doesn't count towards the next.
+pub const MENU_STEP: i32 = 400;
+/// And at most an icon this often: the menu takes a while to draw, and an
+/// icon passed quicker than it shows is skipped as far as the eye goes.
+pub const MENU_EVERY: Duration = Duration::from_millis(220);
+/// The off thermostat asks for a mode only for a turn meant as one: this
+/// much, and none of it from before a press (a hand coming off the ring).
+pub const PROMPT_TURN: i32 = 250;
 /// A percent of brightness or volume; a thermostat's step (half a degree).
 pub const VALUE_STEP: i32 = 30;
 pub const CLIMATE_STEP: i32 = 90;
@@ -50,6 +60,8 @@ pub const RAN_SHOWN: Duration = Duration::from_secs(2);
 /// A step of a light's warmth dial, in kelvin, and of its colour's, in degrees.
 pub const KELVIN_STEP: i32 = 50;
 pub const HUE_STEP: i32 = 4;
+/// The colour dial's far end, a step short of where it began (red).
+pub const HUE_MAX: u16 = 356;
 /// How far the cards follow a turn past either end, in counts.
 pub const END_GIVE: i32 = CARD_STEP / 6;
 pub const SNAP: Duration = Duration::from_millis(250);
@@ -154,6 +166,14 @@ pub enum Action {
     NestDial,
 }
 
+/// The off thermostat's prompt, as the Nest's words, and its choices: on
+/// (heat), left off, or not now. Listed under it as Settings are, from row 1
+/// (row 0 is the question).
+pub const MODE_PROMPT: &str = "To adjust the temperature,\nchange the thermostat mode";
+pub const PROMPT_ON: usize = 1;
+pub const PROMPT_OFF: usize = 2;
+pub const PROMPT_CANCEL: usize = 3;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Mode {
     /// No cards, or no nlclient: everything as stock.
@@ -191,6 +211,9 @@ pub enum Mode {
     SettingSet { setting: Setting, value: f64 },
     /// Settings' Theme: the two side by side, `fledge` chosen.
     ThemePick { fledge: bool },
+    /// The thermostat off and its ring turned: change the mode? Over its dial
+    /// at `target`, `selected` (PROMPT_ON..=PROMPT_CANCEL) highlighted.
+    ModePrompt { target: f64, selected: usize },
     /// A notification over `back`, which shows again once it goes.
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -214,7 +237,7 @@ impl Mode {
             | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
             | Mode::CoverSet { slot, .. } => Some(Slot::Card(*slot)),
-            Mode::Thermostat { .. } => Some(Slot::Thermostat),
+            Mode::Thermostat { .. } | Mode::ModePrompt { .. } => Some(Slot::Thermostat),
             Mode::Menu { view, .. } => view.card_slot(),
             _ => None,
         }
@@ -302,6 +325,8 @@ pub struct Machine {
     /// When the thermostat's ring last turned: its dial says what it's set
     /// to for SET_SHOWN after.
     pub set_at: Option<Instant>,
+    /// When the ring last stepped a ring of actions on (MENU_EVERY).
+    menu_stepped: Option<Instant>,
     /// How far the thermostat's ring has gone towards its next step (-1..1),
     /// its mark following, and staying there at rest, as the Nest's does.
     pub dial_offset: f64,
@@ -324,7 +349,7 @@ impl Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
-            nest: None, nest_dial: false, set_at: None, dial_offset: 0.0, volume_at: None, fledge: false,
+            nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
             rests: false, near_at: None,
         }
     }
@@ -681,6 +706,21 @@ impl Machine {
                     self.volume_at = Some(now);
                 }
                 if let Mode::Thermostat { target } = self.mode {
+                    if self.nest.as_ref().is_some_and(|n| n.card.mode == "off") {
+                        // Nothing to set while it's off: a turn meant as one
+                        // asks for a mode, as the Nest does.
+                        if self.turn.abs() < PROMPT_TURN {
+                            return;
+                        }
+                        self.turn = 0;
+                        out.push(Effect::Click);
+                        self.mode = Mode::ModePrompt { target, selected: PROMPT_ON };
+                        self.dirty = true;
+                        self.sync(out);
+                        return;
+                    }
+                }
+                if let Mode::Thermostat { target } = self.mode {
                     self.set_at = Some(now);
                     self.turn_thermostat(target, out);
                     self.dirty = true;
@@ -689,13 +729,21 @@ impl Machine {
                 }
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
-                    Mode::LightList { .. } | Mode::Menu { .. } | Mode::OptionList { .. } | Mode::Members { .. }
-                    | Mode::Settings { .. } | Mode::ThemePick { .. } => ROW_STEP,
+                    Mode::Menu { .. } => MENU_STEP,
+                    Mode::LightList { .. } | Mode::OptionList { .. } | Mode::Members { .. }
+                    | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. } => ROW_STEP,
                     Mode::ClimateSet { .. } | Mode::Thermostat { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
                 let steps = self.turn / step;
-                if steps != 0 {
+                if steps != 0 && step == MENU_STEP {
+                    self.turn = 0;
+                    if self.menu_stepped.is_some_and(|at| now.duration_since(at) < MENU_EVERY) {
+                        return;
+                    }
+                    self.menu_stepped = Some(now);
+                    self.turned(steps.signum(), out);
+                } else if steps != 0 {
                     self.turn -= steps * step;
                     self.turned(steps, out);
                 }
@@ -794,6 +842,19 @@ impl Machine {
             }
             return;
         }
+        // Nothing to turn: a switch has no dimmer, and the colour dial stops
+        // at either end, as the white one does.
+        match self.mode {
+            Mode::LightDim { slot, light, .. } => {
+                if let Some(Card::Lights(card)) = self.card(slot) {
+                    if !card.lights[light].dimmable {
+                        return;
+                    }
+                }
+            }
+            Mode::LightHue { value, .. } if (steps < 0 && value == 0) || (steps > 0 && value >= HUE_MAX) => return,
+            _ => {}
+        }
         out.push(Effect::Click);
         match self.mode.clone() {
             Mode::Home | Mode::Chooser(_) => {}
@@ -823,7 +884,7 @@ impl Machine {
             }
             Mode::LightHue { slot, light, value } => {
                 if let Some(Card::Lights(card)) = self.card(slot) {
-                    let value = (value as i32 + steps * HUE_STEP).rem_euclid(360) as u16;
+                    let value = (value as i32 + steps * HUE_STEP).clamp(0, HUE_MAX as i32) as u16;
                     self.pending = Some(Command::Hue(card.lights[light].id.clone(), value));
                     self.mode = Mode::LightHue { slot, light, value };
                 }
@@ -868,6 +929,10 @@ impl Machine {
                 self.mode = Mode::Menu { view, actions, selected };
             }
             Mode::Thermostat { .. } => {}
+            Mode::ModePrompt { target, selected } => {
+                let selected = (selected as i32 + steps).clamp(PROMPT_ON as i32, PROMPT_CANCEL as i32) as usize;
+                self.mode = Mode::ModePrompt { target, selected };
+            }
             Mode::Settings { selected } => {
                 let rows = self.settings().len() as i32;
                 self.mode = Mode::Settings { selected: (selected as i32 + steps).clamp(0, rows - 1) as usize };
@@ -895,15 +960,10 @@ impl Machine {
             Some(Slot::Settings) => self.go(Mode::Settings { selected: 0 }, out),
             Some(&Slot::Card(slot)) => {
                 let mode = match self.card(slot) {
-                    // One light: its dimmer, or switched where it is.
+                    // One light (or switch): its own screen. A switch's has no
+                    // dimmer: held, it switches; pressed, its menu.
                     Some(Card::Lights(card)) if card.lights.len() == 1 => {
                         let light = &card.lights[0];
-                        if !light.dimmable {
-                            let on = !light.on;
-                            self.switch_light(slot, 0, on, out);
-                            self.dirty = true;
-                            return;
-                        }
                         Mode::LightDim { slot, light: 0, on: light.on, value: light.brightness.unwrap_or(100) }
                     }
                     Some(Card::Lights(_)) => Mode::LightList { slot, selected: 0 },
@@ -942,6 +1002,8 @@ impl Machine {
 
     fn press(&mut self, out: &mut Vec<Effect>) {
         out.push(Effect::Click);
+        // What the ring had turned is spent: it doesn't carry on past a press.
+        self.turn = 0;
         match self.mode.clone() {
             // Lit by something else, the thermostat showing: open it.
             Mode::Home => {
@@ -1040,6 +1102,18 @@ impl Machine {
                 }
                 actions.push(Action::NestDial);
                 self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
+            }
+            Mode::ModePrompt { target, selected } => {
+                if selected == PROMPT_ON {
+                    if let Some(nest) = &mut self.nest {
+                        let mode = nest.on_mode();
+                        nest.card.mode = mode.to_owned();
+                        self.nest_command("mode", mode, out);
+                    }
+                }
+                // On its dial: to set, once on.
+                let target = self.nest.as_ref().and_then(|n| n.card.target).unwrap_or(target);
+                self.mode = Mode::Thermostat { target };
             }
             Mode::Settings { selected } => {
                 let Some(&setting) = self.settings().get(selected) else { return };
@@ -1215,7 +1289,7 @@ impl Machine {
             }
             (Action::Colour, Mode::LightDim { slot, light, .. }) => {
                 if let Some(Card::Lights(card)) = self.card(slot) {
-                    self.mode = Mode::LightHue { slot, light, value: card.lights[light].hue.unwrap_or(30) % 360 };
+                    self.mode = Mode::LightHue { slot, light, value: (card.lights[light].hue.unwrap_or(30) % 360).min(HUE_MAX) };
                 }
             }
             (Action::Play(_), Mode::Volume { slot, value }) => {
@@ -1253,11 +1327,9 @@ impl Machine {
                     nest.card.mode = mode.to_owned();
                     self.nest_command("mode", mode, out);
                 }
-                if on {
-                    self.mode = view;
-                } else {
-                    self.go(Mode::Chooser(self.place(Slot::Thermostat)), out);
-                }
+                // On or off, it stays open: off, its dial shows the temperature
+                // now, and a turn asks for a mode.
+                self.mode = view;
             }
             (Action::Boost(on), view @ Mode::Thermostat { .. }) => {
                 let minutes = if on { BOOST_MINUTES.to_string() } else { "OFF".to_owned() };
@@ -1340,6 +1412,13 @@ impl Machine {
             return;
         }
         let back = match self.mode.clone() {
+            // Held: as Cancel.
+            Mode::ModePrompt { target, .. } => {
+                out.push(Effect::Click);
+                self.mode = Mode::Thermostat { target };
+                self.dirty = true;
+                return;
+            }
             Mode::Menu { view, .. } => {
                 out.push(Effect::Click);
                 self.mode = *view;
@@ -1562,6 +1641,22 @@ mod tests {
             out
         }
 
+        /// `rows` rows of a list, or icons of a ring of actions (an icon a
+        /// step of the hand, as the ring takes them).
+        fn rows(&mut self, rows: i32) -> Vec<Effect> {
+            if matches!(self.machine.mode, Mode::Menu { .. }) {
+                let mut out = Vec::new();
+                for _ in 0..rows.abs() {
+                    // A hand that lets each icon show.
+                    self.now += MENU_EVERY;
+                    out.extend(self.turn(rows.signum() * MENU_STEP));
+                }
+                out
+            } else {
+                self.turn(rows * ROW_STEP)
+            }
+        }
+
         fn turn(&mut self, counts: i32) -> Vec<Effect> {
             self.input(Input::Turn(counts))
         }
@@ -1624,7 +1719,7 @@ mod tests {
     }
 
     #[test]
-    fn a_card_of_one_light_dims_it_or_switches_it() {
+    fn a_card_of_one_light_opens_its_dimmer_or_its_switch() {
         let mut rig = Rig::with(Cards::parse(br#"{"cards":[
             {"kind":"lights","name":"Lamp","icon":"","lights":[
                 {"id":"light.lamp","name":"Lamp","on":true,"dimmable":true,"brightness":60}]},
@@ -1640,8 +1735,17 @@ mod tests {
         rig.press();
         assert_eq!(rig.machine.mode, Mode::Chooser(1), "Back: to the cards, no list");
         rig.turn(CARD_STEP);
-        assert_eq!(Rig::sends(&rig.press()), vec![Command::On("switch.fan".into())], "switched where it is");
-        assert_eq!(rig.machine.mode, Mode::Chooser(2));
+        assert!(Rig::sends(&rig.press()).is_empty(), "pressed: not switched");
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: false, value: 100 }, "its own screen");
+        assert!(!rig.turn(VALUE_STEP * 3).contains(&Effect::Click), "no dimmer to turn, no click");
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: false, value: 100 });
+        rig.press();
+        let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!("pressed: its menu") };
+        assert_eq!(actions, vec![Action::Back, Action::Switch(true)]);
+        rig.input(Input::LongPress);
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: false, value: 100 }, "held in the menu: out of it");
+        assert_eq!(Rig::sends(&rig.input(Input::LongPress)), vec![Command::On("switch.fan".into())], "held: switched");
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 1, light: 0, on: true, value: 100 });
     }
 
     #[test]
@@ -1660,7 +1764,7 @@ mod tests {
         rig.press();
         let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!() };
         assert_eq!(actions, vec![Action::Back, Action::Switch(false), Action::Warmth, Action::Colour]);
-        rig.turn(ROW_STEP * 2);
+        rig.rows(2);
         rig.press();
         assert_eq!(rig.machine.mode, Mode::LightWarmth { slot: 0, light: 0, value: 2700 });
         for _ in 0..3 {
@@ -1672,11 +1776,14 @@ mod tests {
         rig.press();
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 60 }, "done: its dimmer");
         rig.press();
-        rig.turn(ROW_STEP * 3);
+        rig.rows(3);
         rig.press();
         assert_eq!(rig.machine.mode, Mode::LightHue { slot: 0, light: 0, value: 350 });
         rig.turn(VALUE_STEP * 4);
-        assert_eq!(rig.machine.mode, Mode::LightHue { slot: 0, light: 0, value: 6 }, "round the wheel");
+        assert_eq!(rig.machine.mode, Mode::LightHue { slot: 0, light: 0, value: HUE_MAX }, "it stops at the end");
+        assert!(!rig.turn(VALUE_STEP).contains(&Effect::Click), "at the end: no click");
+        rig.turn(-VALUE_STEP * 120);
+        assert_eq!(rig.machine.mode, Mode::LightHue { slot: 0, light: 0, value: 0 }, "and at the start");
         rig.wait(CARD_IDLE - Duration::from_secs(1));
         assert!(matches!(rig.machine.mode, Mode::LightHue { .. }), "left alone: it stays");
         rig.press();
@@ -1807,12 +1914,12 @@ mod tests {
         rig.turn(CARD_STEP);
         rig.press();
         assert_eq!(rig.machine.mode, Mode::OptionList { slot: 0, selected: 0 }, "on the current one");
-        rig.turn(ROW_STEP * 2);
+        rig.rows(2);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Select("select.boost".into(), "1 hour".into())]);
         assert_eq!(rig.machine.mode, Mode::Chooser(1));
         assert!(matches!(&rig.machine.cards.cards[0], Card::Options(c) if c.current.as_deref() == Some("1 hour")));
         rig.press();
-        rig.turn(ROW_STEP * 9);
+        rig.rows(9);
         assert!(Rig::sends(&rig.press()).is_empty() && rig.machine.mode == Mode::Chooser(1), "Back: nothing chosen");
     }
 
@@ -1828,7 +1935,7 @@ mod tests {
         }
         assert_eq!(Rig::sends(&rig.wait(SEND_EVERY)), vec![Command::Position("cover.blind".into(), 45)]);
         rig.press();
-        rig.turn(ROW_STEP * 2);
+        rig.rows(2);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Close("cover.blind".into())], "its menu: Close");
         rig.long();
         assert_eq!(rig.machine.mode, Mode::Chooser(1));
@@ -1845,13 +1952,13 @@ mod tests {
         rig.press();
         rig.press();
         assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1..] == [Action::Preset(0), Action::Preset(1)]));
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Preset("climate.kitchen".into(), "eco".into())]);
         assert_eq!(rig.machine.mode, Mode::Chooser(1));
         rig.turn(CARD_STEP);
         rig.press();
         rig.press();
-        rig.turn(ROW_STEP * 3);
+        rig.rows(3);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Next("media_player.speaker".into())]);
         assert!(matches!(rig.machine.mode, Mode::Volume { .. }), "back to its volume");
     }
@@ -1866,12 +1973,12 @@ mod tests {
         rig.press();
         let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!() };
         assert_eq!(actions.last(), Some(&Action::Members));
-        rig.turn(ROW_STEP * (actions.len() as i32 - 1));
+        rig.rows(actions.len() as i32 - 1);
         rig.press();
         assert_eq!(rig.machine.mode, Mode::Members { slot: 0, selected: 0 });
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::On("light.ceiling".into())], "each switched");
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         rig.press();
         assert!(matches!(rig.machine.mode, Mode::LightDim { .. }), "Back: the group's dimmer");
     }
@@ -2139,7 +2246,7 @@ mod tests {
         rig.turn(CARD_STEP * 4);
         rig.press();
         let more = rig.machine.settings().iter().position(|s| *s == Setting::More).unwrap();
-        rig.turn(ROW_STEP * more as i32);
+        rig.rows(more as i32);
         assert_eq!(rig.press(), vec![Effect::Own(false), Effect::Hold(false), Effect::OpenNestSettings],
                    "nlclient's menu, on to its Settings");
         assert!(rig.machine.settings_open);
@@ -2212,6 +2319,75 @@ mod tests {
     }
 
     #[test]
+    fn a_ring_of_actions_steps_an_icon_at_a_time_however_quick_the_hand() {
+        let mut rig = nest_rig();
+        rig.press();
+        rig.press();
+        assert!(matches!(rig.machine.mode, Mode::Menu { selected: 0, .. }));
+        rig.turn(MENU_STEP * 3);
+        assert!(matches!(rig.machine.mode, Mode::Menu { selected: 1, .. }), "one reading, one icon: {:?}", rig.machine.mode);
+        for _ in 0..5 {
+            // Readings 30 ms apart (each input moves the rig's clock 20 ms).
+            rig.now += Duration::from_millis(10);
+            rig.turn(MENU_STEP);
+        }
+        assert!(matches!(rig.machine.mode, Mode::Menu { selected: 1, .. }), "a spin quicker than an icon shows: still it: {:?}", rig.machine.mode);
+        rig.now += MENU_EVERY;
+        rig.turn(MENU_STEP - 1);
+        assert!(matches!(rig.machine.mode, Mode::Menu { selected: 1, .. }), "the rest of a step didn't carry over");
+        rig.turn(1);
+        assert!(matches!(rig.machine.mode, Mode::Menu { selected: 2, .. }), "a whole step, in time: the next");
+    }
+
+    #[test]
+    fn turning_the_thermostat_off_keeps_it_open() {
+        let mut rig = nest_rig();
+        rig.press();
+        rig.press();
+        rig.rows(2);
+        let Mode::Menu { actions, selected, .. } = rig.machine.mode.clone() else { panic!() };
+        assert_eq!(actions[selected], Action::Power(false));
+        assert_eq!(sent(&rig.press()), vec![("mode".into(), "off".into())]);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "still on the thermostat");
+    }
+
+    #[test]
+    fn turning_the_off_thermostat_asks_for_a_mode_as_the_nest_does() {
+        let mut rig = nest_rig();
+        rig.machine.set_nest(nest(serde_json::json!({"mode": "off"})));
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 });
+        rig.turn(PROMPT_TURN - 1);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "a hand coming off the ring: no question");
+        rig.press();
+        rig.input(Input::LongPress);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "its menu, and out of it");
+        rig.turn(PROMPT_TURN - 1);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "nor what was turned before a press");
+        assert!(sent(&rig.turn(1)).is_empty(), "nothing set");
+        assert_eq!(rig.machine.mode, Mode::ModePrompt { target: 20.0, selected: PROMPT_ON }, "Heat, Off, Cancel; Heat chosen");
+        rig.rows(5);
+        assert_eq!(rig.machine.mode, Mode::ModePrompt { target: 20.0, selected: PROMPT_CANCEL }, "no further than Cancel");
+        assert!(sent(&rig.press()).is_empty(), "Cancel: nothing sent");
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "back on its dial, still off");
+        rig.turn(PROMPT_TURN);
+        rig.rows(1);
+        assert_eq!(rig.machine.mode, Mode::ModePrompt { target: 20.0, selected: PROMPT_OFF });
+        assert!(sent(&rig.press()).is_empty(), "Off: left off");
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 });
+        rig.turn(PROMPT_TURN);
+        rig.input(Input::LongPress);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "held: as Cancel");
+        rig.turn(PROMPT_TURN);
+        rig.rows(-3);
+        assert_eq!(rig.machine.mode, Mode::ModePrompt { target: 20.0, selected: PROMPT_ON }, "the question isn't a row");
+        assert_eq!(sent(&rig.press()), vec![("mode".into(), "heat".into())], "Heat: on");
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "on its dial to set");
+        rig.turn(CLIMATE_STEP * 2);
+        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 21.0 }, "on, the ring sets it");
+    }
+
+    #[test]
     fn turning_in_eco_leaves_it_and_its_menu_switches_it() {
         let mut rig = nest_rig();
         rig.machine.set_nest(nest(serde_json::json!({"preset": "eco"})));
@@ -2222,16 +2398,16 @@ mod tests {
         assert_eq!(sent(&effects), vec![("target".into(), "20.5".into())], "the press sends the target first");
         let Mode::Menu { actions, .. } = &rig.machine.mode else { panic!("{:?}", rig.machine.mode) };
         assert_eq!(actions, &vec![Action::Back, Action::Eco(true), Action::Power(false), Action::Boost(true), Action::NestDial]);
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         assert_eq!(sent(&rig.press()), vec![("preset".into(), "eco".into())]);
         assert_eq!(rig.machine.mode, Mode::Chooser(0), "Eco: back to the cards");
         rig.press();
         rig.press();
-        rig.turn(ROW_STEP * 3);
+        rig.rows(3);
         assert_eq!(sent(&rig.press()), vec![("hot_water_boost".into(), "60".into())]);
         assert_eq!(rig.machine.nest.as_ref().unwrap().hot_water_boost, Some(60));
         rig.press();
-        rig.turn(ROW_STEP * 4);
+        rig.rows(4);
         assert_eq!(rig.press(), vec![Effect::Own(false), Effect::Hold(false)], "Nest's own dial");
         assert_eq!(rig.machine.mode, Mode::Native);
     }
@@ -2261,24 +2437,24 @@ mod tests {
         assert_eq!(sent(&rig.press()), vec![("away_temperature_low".into(), "13.5".into())]);
         assert_eq!(rig.machine.mode, Mode::Settings { selected: 0 });
         assert_eq!(rig.machine.nest.as_ref().unwrap().eco_low, Some(13.5));
-        rig.turn(ROW_STEP * 2);
+        rig.rows(2);
         assert_eq!(sent(&rig.press()), vec![("learning_mode".into(), "OFF".into())], "Auto-Schedule off");
         assert!(!rig.machine.nest.as_ref().unwrap().learning);
-        rig.turn(ROW_STEP * 4);
+        rig.rows(4);
         assert!(rig.press().is_empty() && rig.machine.mode == Mode::ThemePick { fledge: false }, "the two themes");
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         assert_eq!(rig.machine.mode, Mode::ThemePick { fledge: true });
         assert_eq!(rig.press(), vec![Effect::Theme(true)], "Fledge's kept");
         assert!(rig.machine.fledge);
         assert_eq!(rig.machine.mode, Mode::Settings { selected: 6 }, "back on its row");
-        rig.turn(ROW_STEP * 2);
+        rig.rows(2);
         assert_eq!(rig.press(), vec![Effect::NestDial(true)]);
         assert!(rig.machine.nest_dial);
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         assert_eq!(sent(&rig.press()), vec![("check_update".into(), String::new())], "no update: look for one");
         rig.machine.set_nest(nest(serde_json::json!({"update": "v0.5.0"})));
         assert_eq!(sent(&rig.press()), vec![("update".into(), "install".into())], "one found: install it");
-        rig.turn(ROW_STEP * 9);
+        rig.rows(9);
         rig.press();
         assert_eq!(rig.machine.mode, Mode::Chooser(4), "Done: the cards, on Settings");
     }
@@ -2333,10 +2509,10 @@ mod tests {
         let mut rig = Rig::woken();
         rig.turn(CARD_STEP);
         rig.press();
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::On("switch.fan".into())], "on/off: switched in place");
         assert!(matches!(&rig.machine.cards.cards[0], Card::Lights(c) if c.lights[1].on), "shown on at once");
-        rig.turn(ROW_STEP * 5);
+        rig.rows(5);
         assert_eq!(rig.machine.mode, Mode::LightList { slot: 0, selected: 2 }, "the list stops at Back");
         rig.press();
         assert_eq!(rig.machine.mode, Mode::Chooser(1), "Back: the cards");
@@ -2353,7 +2529,7 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Menu { view: Box::new(dim.clone()),
                                                   actions: vec![Action::Back, Action::Switch(false)], selected: 0 },
                    "a press: the ring of actions, Back first");
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Off("light.lamp".into())]);
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: false, value: 65 });
         rig.press();
@@ -2407,7 +2583,7 @@ mod tests {
         rig.press();
         rig.press();
         rig.press();
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         rig.press();
         rig.turn(VALUE_STEP);
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 1 });
@@ -2430,7 +2606,7 @@ mod tests {
         rig.press();
         assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1] == Action::Play(false)),
                 "playing: the menu offers pause");
-        rig.turn(ROW_STEP);
+        rig.rows(1);
         let effects = rig.press();
         assert!(Rig::sends(&effects).contains(&Command::PlayPause("media_player.speaker".into())));
         assert!(matches!(&rig.machine.cards.cards[2], Card::Media(m) if m.state == "paused"));
@@ -2457,7 +2633,7 @@ mod tests {
         rig.press();
         assert_eq!(rig.machine.mode, Mode::Chooser(1), "the menu's Back");
         rig.press();
-        rig.turn(ROW_STEP * 5);
+        rig.rows(5);
         rig.long();
         assert_eq!(rig.machine.mode, Mode::Chooser(1), "the list's Back row, long: back");
         rig.turn(CARD_STEP);

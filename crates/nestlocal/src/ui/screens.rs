@@ -57,6 +57,9 @@ pub enum Screen<'a> {
     /// Settings' Theme: the Nest's and Fledge's side by side, each a small
     /// dial in its own look, `fledge` chosen.
     ThemePick { fledge: bool },
+    /// The thermostat off and its ring turned: the Nest's question, and Heat
+    /// (Cool), Off and Cancel listed as Settings are, `selected` from 1.
+    ModePrompt { nest: &'a Nest, selected: usize },
 }
 
 const HALF: f32 = 240.0;
@@ -130,6 +133,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
         Screen::ThemePick { fledge } => theme_pick(fonts, *fledge),
         Screen::Settings { rows, nest, nest_dial, selected } => settings_list(fonts, rows, *nest, *nest_dial, *selected, Layer::Whole),
+        Screen::ModePrompt { nest, selected } => mode_prompt(fonts, nest, *selected, Layer::Whole),
         _ => {
             let mut p = still(fonts, screen);
             moving(&mut p, fonts, screen, sweep, None);
@@ -464,7 +468,8 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
     }
     let (_, active) = climate_colours(card);
     let fraction = |t: f64| ((t - card.min) / (card.max - card.min).max(0.5)) as f32;
-    let mark = target.map(|t| paint::tick_at(sweep.unwrap_or(fraction(t))));
+    // Off: no target to mark, only the temperature now.
+    let mark = target.filter(|_| card.mode != "off").map(|t| paint::tick_at(sweep.unwrap_or(fraction(t))));
     let now = card.current.map(|t| paint::tick_at(fraction(t)));
     let range = match (now, mark) {
         (Some(a), Some(b)) if active && a != b => Some((a.min(b), a.max(b), a)),
@@ -506,6 +511,9 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
     }
     if card.mode != "off" {
         now_label(p, fonts, card, place, shown);
+    } else {
+        // Off, as the Nest's: the temperature now stays by its tick.
+        now_label(p, fonts, card, None, 1.0);
     }
     if let Some(t) = target.filter(|_| card.mode != "off") {
         big_number_on(p, live, fonts, t, card.step < 1.0, "", WHITE);
@@ -982,6 +990,7 @@ pub fn list_place(screen: &Screen) -> Option<(usize, usize)> {
         Screen::Members { card, selected } => (*selected, card.members.len() + 1),
         Screen::OptionList { card, selected } => (*selected, card.options.len() + 1),
         Screen::Settings { rows, selected, .. } => (*selected, rows.len()),
+        Screen::ModePrompt { selected, .. } => (*selected, PROMPT_ROWS),
         _ => return None,
     };
     Some((selected, first_row(selected, rows)))
@@ -995,6 +1004,7 @@ pub fn list_layer(fonts: &Fonts, screen: &Screen, layer: Layer) -> Option<Canvas
         Screen::Members { card, selected } => lights_listed(fonts, &card.name, &card.members, *selected, layer),
         Screen::OptionList { card, selected } => option_list(fonts, card, *selected, layer),
         Screen::Settings { rows, nest, nest_dial, selected } => settings_list(fonts, rows, *nest, *nest_dial, *selected, layer),
+        Screen::ModePrompt { nest, selected } => mode_prompt(fonts, nest, *selected, layer),
         _ => return None,
     })
 }
@@ -1006,6 +1016,7 @@ pub fn list_key(screen: &Screen) -> Option<String> {
         Screen::Members { card, .. } => format!("members {first} {card:?}"),
         Screen::OptionList { card, .. } => format!("options {first} {card:?}"),
         Screen::Settings { rows, nest, nest_dial, .. } => format!("settings {first} {rows:?} {nest:?} {nest_dial}"),
+        Screen::ModePrompt { nest, .. } => format!("prompt {first} {}", nest.on_mode()),
         _ => return None,
     })
 }
@@ -1064,8 +1075,8 @@ fn light_dim_still(fonts: &Fonts, light: &Light, on: bool) -> Canvas {
     let hint = match (light.dimmable, on) {
         (true, true) => "Hold to turn off",
         (true, false) => "Hold to turn on",
-        (false, true) => "Press to turn off",
-        (false, false) => "Press to turn on",
+        (false, true) => "Hold to turn off",
+        (false, false) => "Hold to turn on",
     };
     line(&mut p, fonts, 366.0, hint, GREY);
     p
@@ -1075,6 +1086,11 @@ fn light_dim_still(fonts: &Fonts, light: &Light, on: bool) -> Canvas {
 fn light_dim_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, light: &Light, on: bool,
                     value: u8, sweep: Option<f32>) {
     let accent = if on { light.colour() } else { GREY };
+    if !light.dimmable {
+        // A switch: its ring whole, lit while it's on.
+        ring_on(p, live.as_deref_mut(), |_| if on { colour(accent) } else { colour(DIM) }, &[]);
+        return;
+    }
     let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
     ring_on(p, live.as_deref_mut(), |i| if on && i <= top { colour(accent) } else { colour(DIM) },
             &if on { vec![top] } else { vec![] });
@@ -1205,11 +1221,14 @@ pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], 
         let colour = if chosen { [26, 115, 232] } else { [138, 143, 152] };
         icon(p, name, "back", x, y, if chosen { 52.0 } else { 44.0 }, colour);
     }
-    let title = paint::fit(fonts.regular(), 30.0, title, 0.0, 300.0);
-    paint::text(p, fonts.regular(), 30.0, HALF, 232.0, &title, 0.0, WHITE);
+    // What the chosen icon does is what matters here: large, in the
+    // highlight's colour; the device it's for small above it.
+    let title = paint::fit(fonts.medium(), 19.0, title, 0.2, 260.0);
+    paint::text(p, fonts.medium(), 19.0, HALF, 214.0, &title, 0.2, GREY);
     if let Some((_, label)) = items.get(selected) {
         let tint = if fledge { MENU_ON } else { [74, 144, 226] };
-        paint::text(p, fonts.medium(), 19.0, HALF, 270.0, label, 0.2, tint);
+        let label = paint::fit(fonts.regular(), 32.0, label, 0.0, 280.0);
+        paint::text(p, fonts.regular(), 32.0, HALF, 258.0, &label, 0.0, tint);
     }
 }
 
@@ -1413,6 +1432,34 @@ fn options_card(fonts: &Fonts, card: &OptionsCard) -> Canvas {
 }
 
 /// A select's options, the current one marked, then Back.
+/// The off thermostat's prompt: its question where a list's first row
+/// would be, and its choices under it.
+const PROMPT_ROWS: usize = 4;
+
+fn mode_prompt(fonts: &Fonts, nest: &Nest, selected: usize, layer: Layer) -> Canvas {
+    let mut p = paint::face(BLACK);
+    list_backdrop(&mut p, layer, Some(selected));
+    for (i, line) in crate::ui::machine::MODE_PROMPT.split('\n').enumerate() {
+        let line = paint::fit(fonts.regular(), 22.0, line, 0.0, 330.0);
+        paint::text(&mut p, fonts.regular(), 22.0, HALF, 118.0 + 30.0 * i as f32, &line, 0.0, WHITE);
+    }
+    let cools = nest.on_mode() == "cool";
+    let rows = [
+        (if cools { "mdi:snowflake" } else { "mdi:fire" }, if cools { "Cool" } else { "Heat" }),
+        ("mdi:power", "Off"),
+        ("mdi:window-close", "Cancel"),
+    ];
+    for (i, (icon_name, name)) in rows.iter().enumerate() {
+        let row = i + 1;
+        let y = LIST_TOP + row as f32 * ROW_PITCH;
+        let (x, _, h) = PILL;
+        let chosen = layer.chosen(row == selected);
+        icon(&mut p, icon_name, "prompt", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
+        paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, name, 0.0, WHITE, 1.0);
+    }
+    p
+}
+
 fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer) -> Canvas {
     let mut p = paint::face(BLACK);
     let rows = card.options.len() + 1;
