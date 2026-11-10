@@ -2769,6 +2769,15 @@ mod shots {
         for (name, screen) in &shots {
             save(&screens::draw(&fonts, screen, None), &format!("{out}/{name}.png"));
         }
+        // Each state of an alarm's card among the cards, and opened.
+        let states = ["disarmed", "armed_home", "armed_away", "armed_night", "arming", "pending", "triggered", "unavailable"];
+        for (i, state) in states.iter().enumerate() {
+            let timed = matches!(*state, "arming" | "pending");
+            let card = alarm(state, (*state != "disarmed").then_some("number"), if timed { delay } else { None });
+            save(&screens::draw(&fonts, &Screen::AlarmCard { card: &card }, None), &format!("{out}/s{i}-card-{state}.png"));
+            save(&screens::draw(&fonts, &Screen::AlarmView { card: &card, now, note: None }, None),
+                 &format!("{out}/s{i}-open-{state}.png"));
+        }
         let mut tunable = lights.lights[0].clone();
         (tunable.kelvin, tunable.kelvins, tunable.hues, tunable.hue) = (Some(2700), Some([2200, 6500]), true, Some(200));
         save(&screens::draw(&fonts, &Screen::LightWarmth { light: &tunable, value: 2700 }, None), &format!("{out}/9b-warmth.png"));

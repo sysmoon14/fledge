@@ -1633,7 +1633,7 @@ fn alarm_delay_ring(p: &mut Canvas, card: &AlarmCard, now: Option<f64>, mark: Op
                 if (0.0..30.0).contains(&behind) { alpha(AMBER, 1.0 - behind / 30.0 * 0.8) } else { alpha(AMBER, 0.2) }
             }, &marks);
         }
-        (None, None) => paint::ring(p, |_| alpha(AMBER, 0.6), &marks),
+        (None, None) => paint::ring(p, |_| colour(AMBER), &marks),
     }
 }
 
@@ -1645,83 +1645,77 @@ fn alarm_note(p: &mut Canvas, fonts: &Fonts, note: Option<&str>, y: f32) -> bool
     true
 }
 
+/// An alarm's state at a glance: its colour (the whole ring lit in it, and
+/// Fledge's face glowing with it), its icon, the word for it, and what's
+/// under the word.
+fn alarm_state(card: &AlarmCard) -> ([u8; 3], &'static str, &'static str, String) {
+    match (card.state.as_str(), card.armed()) {
+        (_, Some(mode)) => (ALARM_ARMED, alarm_mode_icon(mode), "Armed", card.mode_name(mode)),
+        ("disarmed", _) => (ECO, "mdi:shield-lock-open-outline", "Disarmed", String::new()),
+        ("arming", _) => (AMBER, "mdi:home-export-outline", "Arming", "Leave now".into()),
+        ("pending", _) => (AMBER, "mdi:door-open", "Entry delay",
+                           if card.wants_digits() { "Enter the code".into() } else { String::new() }),
+        ("triggered", _) => (ALARM_RED, "mdi:alarm-light", "Alarm", card.sensors.first().cloned().unwrap_or_default()),
+        ("disarming", _) => (AMBER, "mdi:shield-lock-open-outline", "Disarming", String::new()),
+        _ => (DIM, "mdi:shield-lock-open-outline", "Unavailable", String::new()),
+    }
+}
+
 /// An alarm as its card shows it, or opened (`now`: its countdown and its
-/// going off move).
+/// going off move). Its state is the large word, in its colour, with the
+/// whole ring lit in the same; the alarm's name small above it. Opened
+/// while a delay runs, the seconds left take the word's place.
 fn alarm_screen(fonts: &Fonts, card: &AlarmCard, now: Option<f64>, note: Option<&str>) -> Canvas {
     let name = if card.name.is_empty() { "Alarm" } else { card.name.as_str() };
-    let wants_code = card.wants_digits();
-    match card.state.as_str() {
-        state @ ("arming" | "pending") => {
-            let mut p = alarm_face(AMBER);
-            alarm_delay_ring(&mut p, card, now, None);
-            let arming = state == "arming";
-            let words = if arming { "Arming" } else { "Entry delay" };
-            pill_words(&mut p, fonts, 150.0, words, AMBER, Some(if arming { "mdi:home-export-outline" } else { "mdi:door-open" }));
-            match now.and_then(|now| card.left(now)) {
-                Some((_, seconds)) => {
-                    paint::text(&mut p, fonts.digits(), 140.0, HALF, 300.0, &seconds.to_string(), -4.0, WHITE);
-                }
-                None => {
-                    icon(&mut p, "mdi:shield-lock", &card.id, HALF, 246.0, 96.0, WHITE);
-                }
-            }
-            if !alarm_note(&mut p, fonts, note, 346.0) && now.is_some() {
-                let hint = match (arming, wants_code) {
-                    (true, _) => "Press to cancel",
-                    (false, true) => "Press to enter the code",
-                    (false, false) => "Press to disarm",
-                };
+    let (accent, icon_name, word, under) = alarm_state(card);
+    let triggered = card.state == "triggered";
+    let mut p = alarm_face(if accent == DIM { BLACK } else { accent });
+    let timed = matches!(card.state.as_str(), "arming" | "pending");
+    if timed {
+        alarm_delay_ring(&mut p, card, now, None);
+    } else if triggered {
+        let glow = now.map_or(1.0, alarm_pulse);
+        let c = if paint::fledge() { ALARM_RED } else { WHITE };
+        paint::ring(&mut p, |_| alpha(c, 0.45 + 0.55 * glow), &[]);
+    } else {
+        paint::ring(&mut p, |_| colour(accent), &[]);
+    }
+    // On the Nest's solid red, everything white.
+    let (accent, words) = if triggered && !paint::fledge() { (WHITE, WHITE) } else { (accent, GREY) };
+    let hint = match card.state.as_str() {
+        "arming" => "Press to cancel",
+        "pending" | "triggered" if card.wants_digits() => "Press to enter the code",
+        "pending" | "triggered" => "Press to disarm",
+        "disarmed" if !card.modes.is_empty() => "Press to arm",
+        _ if card.armed().is_some() => "Press to disarm",
+        _ => "",
+    };
+    let seconds = now.and_then(|now| card.left(now)).filter(|_| timed).map(|(_, s)| s);
+    match seconds {
+        Some(seconds) => {
+            pill_words(&mut p, fonts, 150.0, word, accent, Some(icon_name));
+            paint::text(&mut p, fonts.digits(), 140.0, HALF, 300.0, &seconds.to_string(), -4.0, WHITE);
+            if !alarm_note(&mut p, fonts, note, 346.0) {
                 line(&mut p, fonts, 346.0, hint, WHITE);
             }
-            p
         }
-        "triggered" => {
-            let mut p = alarm_face(ALARM_RED);
-            let glow = now.map_or(0.9, alarm_pulse);
-            paint::ring(&mut p, |_| alpha(if paint::fledge() { ALARM_RED } else { WHITE }, 0.35 + 0.6 * glow), &[]);
-            icon(&mut p, "mdi:alarm-light", &card.id, HALF, 160.0, 96.0, WHITE);
-            let size = 46.0;
-            paint::text(&mut p, fonts.medium(), size, HALF, 270.0, "Alarm", 0.0, WHITE);
-            if let Some(sensor) = card.sensors.first() {
-                line(&mut p, fonts, 310.0, sensor, WHITE);
+        None => {
+            icon(&mut p, icon_name, &card.id, HALF, 136.0, 76.0, if triggered { WHITE } else { accent });
+            let label = paint::fit(fonts.medium(), 22.0, name, 0.0, 300.0);
+            paint::text(&mut p, fonts.medium(), 22.0, HALF, 216.0, &label, 0.0, words);
+            let big = paint::fit(fonts.medium(), 52.0, word, 0.0, 340.0);
+            paint::text(&mut p, fonts.medium(), 52.0, HALF, 284.0, &big, 0.0, if triggered { WHITE } else { accent });
+            if !under.is_empty() {
+                let under = paint::fit(fonts.regular(), 24.0, &under, 0.0, 320.0);
+                paint::text(&mut p, fonts.regular(), 24.0, HALF, 326.0, &under, 0.0, WHITE);
             }
-            if !alarm_note(&mut p, fonts, note, 352.0) && now.is_some() {
-                line(&mut p, fonts, 352.0, "Press to disarm", WHITE);
-            }
-            p
-        }
-        state => {
-            let armed = card.armed();
-            let background = if armed.is_some() && paint::fledge() { ALARM_ARMED } else { BLACK };
-            let mut p = paint::face(background);
-            let (icon_name, accent, status, hint) = match (armed, state) {
-                (Some(mode), _) => (alarm_mode_icon(mode), ALARM_ARMED, format!("Armed · {}", card.mode_name(mode)),
-                                    "Press to disarm"),
-                (None, "disarmed") => ("mdi:shield-lock-open-outline", ECO, "Disarmed".to_owned(),
-                                       if card.modes.is_empty() { "" } else { "Press to arm" }),
-                (None, "disarming") => ("mdi:shield-lock-open-outline", AMBER, "Disarming…".to_owned(), ""),
-                (None, _) => ("mdi:shield-lock-open-outline", DIM, "Unavailable".to_owned(), ""),
-            };
-            match armed {
-                Some(_) => paint::ring(&mut p, |_| alpha(ALARM_ARMED, 0.5), &[]),
-                None => paint::ring(&mut p, |_| colour(DIM), &[]),
-            }
-            let found = icons::lookup(&card.icon, &card.id).filter(|_| armed.is_none() && state == "disarmed" && !card.icon.is_empty())
-                .or_else(|| icons::lookup(icon_name, ""));
-            if let Some(found) = found {
-                paint::icon(&mut p, found, HALF, 172.0, 100.0, colour(if armed.is_some() { ALARM_ARMED } else { WHITE }));
-            }
-            let title = paint::fit(fonts.regular(), 40.0, name, 0.0, 330.0);
-            paint::text(&mut p, fonts.regular(), 40.0, HALF, 284.0, &title, 0.0, WHITE);
-            let status = paint::fit(fonts.medium(), 21.0, &status, 0.0, 320.0);
-            paint::text(&mut p, fonts.medium(), 21.0, HALF, 324.0, &status, 0.0, accent);
             // How to use it once it's open; among the cards, what it is.
-            if !alarm_note(&mut p, fonts, note, 360.0) && now.is_some() {
-                line(&mut p, fonts, 360.0, hint, GREY);
+            if !alarm_note(&mut p, fonts, note, 372.0) && now.is_some() {
+                line(&mut p, fonts, 372.0, hint, words);
             }
-            p
         }
     }
+    p
 }
 
 /// Where the code pad's place `k` of `n` sits on the ring: its tick, and
