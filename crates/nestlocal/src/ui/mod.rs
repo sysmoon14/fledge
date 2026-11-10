@@ -23,6 +23,8 @@ mod film;
 mod icons;
 mod machine;
 mod model;
+mod nlstate;
+use nlstate::Shows;
 mod paint;
 mod prof;
 mod screens;
@@ -297,13 +299,18 @@ struct Runtime {
     pressed: Option<(Instant, bool, bool)>,
     /// On nlclient's screens: whether its menu's Back was chosen as the
     /// button went down, and since when the press has waited for its dial.
-    back_chosen: bool,
-    back_since: Option<Instant>,
+    /// Pressed in nlclient's menu, as nlclient told it (true), or with Back
+    /// chosen as its pixels showed (false: a patch that doesn't tell).
+    back_chosen: Option<bool>,
+    back_since: Option<(Instant, bool)>,
     /// In nlclient's Settings, opened from ours: the last input there, when
     /// its dial was last looked for, and how many looks in a row found it.
     native_input: Instant,
     settings_checked: Instant,
     settings_seen: u32,
+    /// nlclient's Settings seen since its thermostat was opened from the
+    /// cards (as nlclient tells it): its dial next is Done, back to the cards.
+    native_settings: bool,
     /// When the thermostat's own state was last asked for.
     nest_checked: Instant,
     /// The thermostat's dial: when its pulse (from now to the target) began,
@@ -467,7 +474,7 @@ impl Runtime {
             rest: false, black: false, beat: 0, last_beat: now,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, ticker: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(), spent: Default::default(), paced: Default::default(),
-            pressed: None, back_chosen: false, back_since: None, native_input: now, settings_checked: now, settings_seen: 0,
+            pressed: None, back_chosen: None, back_since: None, native_input: now, settings_checked: now, settings_seen: 0, native_settings: false,
             nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
             recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
             dial: None, last_dial: now - Duration::from_secs(60),
@@ -545,14 +552,19 @@ impl Runtime {
                     (device::EV_KEY, device::KEY_ENTER, 1) => {
                         self.pressed = Some((now, false, lit));
                         if self.machine.mode == Mode::Native {
-                            self.back_chosen = back_chosen(&self.display.save());
+                            // Its menu shows: choosing Back leaves it for the
+                            // dial at once, with no other screen between.
+                            self.back_chosen = match nlstate::read() {
+                                Some(report) => (report.shows() == Shows::Menu).then_some(true),
+                                None => back_chosen(&self.display.save()).then_some(false),
+                            };
                         }
                         continue;
                     }
                     (device::EV_KEY, device::KEY_ENTER, 0) => match self.pressed.take() {
                         Some((_, false, was_lit)) => {
-                            if self.machine.mode == Mode::Native && std::mem::take(&mut self.back_chosen) {
-                                self.back_since = Some(now);
+                            if let Some(told) = self.back_chosen.take().filter(|_| self.machine.mode == Mode::Native) {
+                                self.back_since = Some((now, told));
                             }
                             self.machine.input(Input::Press, now, was_lit, &mut effects);
                             continue;
@@ -608,27 +620,53 @@ impl Runtime {
                     self.machine.input(Input::LongPress, now, was_lit, &mut effects);
                 }
             }
-            if self.machine.mode == Mode::Native && self.machine.settings_open
-                && now.duration_since(self.native_input) >= Duration::from_millis(600)
+            if self.machine.mode != Mode::Native {
+                self.native_settings = false;
+            } else if now.duration_since(self.native_input) >= Duration::from_millis(600)
                 && now.duration_since(self.settings_checked) >= Duration::from_millis(200) {
-                // In nlclient's Settings opened from ours: left (its Done, or
-                // its Back) once its home dial shows, steady, untouched. A
-                // page on its way somewhere, or a tile that looks like the
-                // dial, doesn't hold for long enough.
+                // In nlclient's Settings: left (its Done, or its Back) once
+                // its home dial shows after them, untouched. Opened from ours, back to
+                // ours; opened from its own menu (as nlclient tells it), back
+                // to the cards on the thermostat. By its pixels (a patch that
+                // doesn't tell), only from ours, and the dial must hold: a page
+                // on its way somewhere, or a tile that looks like the dial,
+                // doesn't hold for long enough.
                 self.settings_checked = now;
-                let page = self.display.save();
-                self.settings_seen = if dial(&page) && !settings_tile(&page) { self.settings_seen + 1 } else { 0 };
+                let left = match nlstate::read() {
+                    Some(report) => {
+                        let shows = report.shows();
+                        self.native_settings |= shows == Shows::Settings;
+                        // Seen first: opened from ours, nlclient is still on
+                        // its dial until its menu and Settings open.
+                        (shows == Shows::Dial && self.native_settings).then_some(SETTINGS_LEFT)
+                    }
+                    None if self.machine.settings_open => {
+                        let page = self.display.save();
+                        (dial(&page) && !settings_tile(&page)).then_some(self.settings_seen + 1)
+                    }
+                    None => None,
+                };
+                self.settings_seen = left.unwrap_or(0);
                 if self.settings_seen >= SETTINGS_LEFT {
                     self.settings_seen = 0;
+                    self.native_settings = false;
                     logf!("ui: nlclient's Settings left");
-                    self.machine.input(Input::SettingsDone, now, lit, &mut effects);
+                    let input = if self.machine.settings_open { Input::SettingsDone } else { Input::NativeBack };
+                    self.machine.input(input, now, lit, &mut effects);
                 }
             }
-            if let Some(since) = self.back_since {
-                // Back pressed in nlclient's menu: once its dial shows, the cards.
-                if self.machine.mode != Mode::Native || now.duration_since(since) > Duration::from_millis(1500) {
+            if let Some((since, told)) = self.back_since {
+                // Pressed in nlclient's menu: once its dial shows, the cards.
+                // As nlclient tells it, Back goes straight from the menu to
+                // the dial; another choice (a mode, Settings) shows something
+                // else first, and is left to nlclient. By its pixels, Back was
+                // chosen as the button went down.
+                let shows = if told { nlstate::read().map(|report| report.shows()) } else { None };
+                if self.machine.mode != Mode::Native || now.duration_since(since) > Duration::from_millis(1500)
+                    || told && !matches!(shows, Some(Shows::Menu | Shows::Dial)) {
                     self.back_since = None;
-                } else if now.duration_since(since) > Duration::from_millis(250) && home_dial(&mut self.display) {
+                } else if if told { shows == Some(Shows::Dial) }
+                          else { now.duration_since(since) > Duration::from_millis(250) && home_dial(&mut self.display) } {
                     self.back_since = None;
                     self.machine.input(Input::NativeBack, now, lit, &mut effects);
                 }
@@ -762,7 +800,7 @@ impl Runtime {
                 // The thermostat as it shows, for the next wake.
                 self.last_dial = now;
                 let page = self.display.save();
-                if dial(&page) {
+                if dial_page(&page) {
                     self.dial = Some(page);
                 }
             }
@@ -1260,16 +1298,17 @@ impl Runtime {
         match effect {
             Effect::Own(true) => {
                 // nlclient's page. Just woken, its page is dark until
-                // nlclient draws its dial: wait for that (as the display
-                // lights), else use the dial as it last showed.
+                // nlclient draws its dial, and after its menu's Back it is
+                // the menu closing: wait for the dial (as the display lights,
+                // or the menu goes), else use the dial as it last showed.
                 let mut page = self.display.save();
                 let waiting = Instant::now();
-                while !dial(&page) && blank(&page) && waiting.elapsed() < Duration::from_millis(1200) {
+                while !dial_page(&page) && (blank(&page) || dial_coming()) && waiting.elapsed() < Duration::from_millis(1200) {
                     std::thread::sleep(Duration::from_millis(40));
                     page = self.display.save();
                 }
                 self.saved = Some(match &self.dial {
-                    Some(last) if !dial(&page) => last.clone(),
+                    Some(last) if !dial_page(&page) => last.clone(),
                     _ => page,
                 });
                 device::own(true);
@@ -1379,9 +1418,9 @@ impl Runtime {
                 std::thread::sleep(Duration::from_millis(300));
                 self.input.press();
                 let waiting = Instant::now();
-                while !back_chosen(&self.display.save()) {
+                while !menu_shows(&mut self.display) {
                     if waiting.elapsed() > Duration::from_millis(1500) {
-                        logf!("ui: nlclient's menu didn't show Back: left at the menu");
+                        logf!("ui: nlclient's menu didn't show: left as it is");
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(40));
@@ -1992,9 +2031,34 @@ fn mode_state(mode: &Mode) {
     let _ = crate::settings_ui::publish("ui.mode", name.as_bytes());
 }
 
-/// Whether nlclient shows its home dial: its ring lit around the edge.
+/// Whether nlclient shows its home dial: as nlclient tells it, or (a screen
+/// patch from before it told) as its pixels look.
 fn home_dial(display: &mut device::Display) -> bool {
-    dial(&display.save())
+    match nlstate::read() {
+        Some(report) => report.shows() == Shows::Dial,
+        None => dial(&display.save()),
+    }
+}
+
+/// Whether a frame of nlclient's is its home dial, drawn: nlclient says it
+/// shows its dial as its menu starts closing, so the frame must look it too.
+fn dial_page(page: &[u8]) -> bool {
+    dial(page) && nlstate::read().is_none_or(|report| report.shows() == Shows::Dial)
+}
+
+/// Whether nlclient is on its way to its dial (as it tells it): its frame
+/// may still be the menu closing.
+fn dial_coming() -> bool {
+    nlstate::read().is_some_and(|report| report.shows() == Shows::Dial)
+}
+
+/// Whether nlclient shows its menu: as it tells it, or by its pixels with
+/// Back chosen (the only menu the pixels know).
+fn menu_shows(display: &mut device::Display) -> bool {
+    match nlstate::read() {
+        Some(report) => report.shows() == Shows::Menu,
+        None => back_chosen(&display.save()),
+    }
 }
 
 /// Whether a frame is a tile of nlclient's Settings: a blue disc in the

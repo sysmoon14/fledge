@@ -50,6 +50,7 @@ fn embedded_object_links_to_golden_payloads() {
             serde_json::from_value(golden["native_api"].clone()).unwrap();
         let mut externals = api;
         externals.entry("native_rename".into()).or_insert(0);
+        externals.entry("native_ui_change".into()).or_insert(0);
         let layout: BTreeMap<String, u32> =
             serde_json::from_value(golden["discovery"]["layout"].clone()).unwrap();
         externals.extend(layout.into_iter().map(|(k, v)| (format!("layout_{k}"), v)));
@@ -176,6 +177,7 @@ fn linker_matches_lld_using_the_same_object() {
         let mut externals: BTreeMap<String, u32> =
             serde_json::from_value(golden["native_api"].clone()).unwrap();
         externals.entry("native_rename".into()).or_insert(0);
+        externals.entry("native_ui_change".into()).or_insert(0);
         let layout: BTreeMap<String, u32> =
             serde_json::from_value(golden["discovery"]["layout"].clone()).unwrap();
         externals.extend(layout.into_iter().map(|(k, v)| (format!("layout_{k}"), v)));
@@ -350,6 +352,7 @@ fn unsupported_relocations_and_branch_veneers_are_refused() {
     let mut externals: BTreeMap<String, u32> =
         serde_json::from_value(golden["native_api"].clone()).unwrap();
     externals.entry("native_rename".into()).or_insert(0);
+    externals.entry("native_ui_change".into()).or_insert(0);
     // Goldens from before the screen hand-over lack its imports: any PLT
     // stub of the build stands in for them.
     let stub = externals["native_fopen"];

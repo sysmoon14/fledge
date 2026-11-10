@@ -406,6 +406,96 @@ static void keeper_start(void *bucket) {
     unsigned int thread;
     native_pthread_create(&thread, 0, keeper, PTR(bucket, BUCKET_GLOBALS_OFFSET));
 }
+/* What nlclient shows, as nlclient itself tells it. Every change of its
+ * screen, view or a screen's active layer goes through one telemetry report
+ * (UiDisplayChange: what changed, and its new name); the patch routes each
+ * call of it through custom_ui_change, which keeps the latest name of each
+ * thing in UI_STATE before reporting as before. The file is
+ *
+ *     <nlclient's pid> <changes so far>
+ *     <what changed>\t<its name>        one line each, the latest last
+ *
+ * written whole and renamed into place, so a reader never sees half of it.
+ * The pid tells a reader the file is this nlclient's, not an earlier one's
+ * (or an older patch's, which writes none). Reports come a few at a time, as
+ * the screen changes; the file is tiny, on tmpfs. */
+extern void native_ui_change(const char *, const char *);
+#define UI_STATE "/var/run/unfr0zen/nlclient.state"
+#define UI_STATE_NEW "/var/run/unfr0zen/nlclient.state.new"
+#define UI_STATE_SIZE 1024
+#define UI_FIELD 80
+/* A field as part of one line: no tabs or line breaks, at most UI_FIELD. */
+static unsigned int ui_field(char *out, const char *text) {
+    unsigned int n = 0;
+    if (!text) text = "-";
+    for (; *text && n < UI_FIELD; text++) out[n++] = (u8)*text < ' ' ? ' ' : *text;
+    return n;
+}
+static unsigned int ui_number(char *out, unsigned int value) {
+    char digits[12];
+    unsigned int n = 0, length = 0;
+    do { digits[length++] = '0' + value % 10; value /= 10; } while (value);
+    while (length) out[n++] = digits[--length];
+    return n;
+}
+static void ui_record(const char *entity, const char *name) {
+    char old[UI_STATE_SIZE], out[UI_STATE_SIZE], key[UI_FIELD], line[2 * UI_FIELD + 2];
+    int pid = native_getpid();
+    int count = 0;
+    int fd = native_open(UI_STATE, 0);
+    if (fd >= 0) {
+        count = native_read(fd, old, sizeof(old));
+        native_close(fd);
+        if (count < 0) count = 0;
+    }
+    /* The header: this nlclient's changes go on counting, another's start over. */
+    int i = 0, was = 0;
+    unsigned int changes = 0;
+    for (; i < count && old[i] >= '0' && old[i] <= '9'; i++) was = was * 10 + (old[i] - '0');
+    if (was == pid && i < count && old[i] == ' ')
+        for (i++; i < count && old[i] >= '0' && old[i] <= '9'; i++) changes = changes * 10 + (old[i] - '0');
+    else
+        count = 0;
+    while (i < count && old[i] != '\n') i++;
+    i++;
+    unsigned int key_length = ui_field(key, entity);
+    unsigned int line_length = key_length;
+    bytes_copy(line, key, key_length);
+    line[line_length++] = '\t';
+    line_length += ui_field(line + line_length, name);
+    line[line_length++] = '\n';
+    /* The header, the older lines of other things as they fit, this one last. */
+    unsigned int n = ui_number(out, (unsigned int)pid);
+    out[n++] = ' ';
+    n += ui_number(out + n, changes + 1);
+    out[n++] = '\n';
+    for (int start = i; start < count;) {
+        int end = start;
+        while (end < count && old[end] != '\n') end++;
+        int tab = start;
+        while (tab < end && old[tab] != '\t') tab++;
+        int same = tab - start == (int)key_length;
+        for (unsigned int k = 0; same && k < key_length; k++) same = old[start + k] == key[k];
+        unsigned int length = (unsigned int)(end - start);
+        if (!same && end < count && tab < end && n + length + 1 + line_length <= sizeof(out)) {
+            bytes_copy(out + n, old + start, length);
+            n += length;
+            out[n++] = '\n';
+        }
+        start = end + 1;
+    }
+    bytes_copy(out + n, line, line_length);
+    n += line_length;
+    void *file = native_fopen(UI_STATE_NEW, "w");
+    if (!file) return;
+    unsigned int written = native_fwrite(out, 1, n, file);
+    if (native_fclose(file) == 0 && written == n) rename_setting(UI_STATE_NEW, UI_STATE);
+}
+/* In place of each call of nlclient's report, a tail call included. */
+void custom_ui_change(const char *entity, const char *name) {
+    ui_record(entity, name);
+    native_ui_change(entity, name);
+}
 int custom_device_commit(void *bucket) {
     int result = native_device_commit(bucket);
     keeper_start(bucket);

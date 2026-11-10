@@ -57,6 +57,9 @@ pub fn build(source: &[u8], object: &[u8]) -> Result<Built> {
     let offset = align(source.len(), 0x10000)?;
     let mut externals = discovery.native_api.clone();
     externals.entry("native_rename".into()).or_insert(0);
+    // Without nlclient's display report found, custom_ui_change is never
+    // called: nothing is routed through it.
+    externals.insert("native_ui_change".into(), discovery.ui_change.as_ref().map_or(0, |ui| ui.reporter));
     externals.extend(
         discovery
             .layout
@@ -105,6 +108,21 @@ pub fn build(source: &[u8], object: &[u8]) -> Result<Built> {
     }
     let call = 0xeb000000 | ((delta >> 2) as u32 & 0xffffff);
     output[swap_offset..swap_offset + 4].copy_from_slice(&call.to_le_bytes());
+    // Each call of nlclient's display report (BL, or B as a tail call) goes
+    // through custom_ui_change, which records what shows for nestlocal.
+    if let Some(ui) = &discovery.ui_change {
+        let custom = linked.symbols["custom_ui_change"];
+        for &site in &ui.calls {
+            let at = elf.offset(site)?;
+            let old = word(source, at)?;
+            let delta = custom as i64 - site as i64 - 8;
+            if old >> 25 != 0x75 || delta % 4 != 0 || !(-(1 << 25)..(1 << 25)).contains(&delta) {
+                return device("ARM display report call out of range or unaligned");
+            }
+            let call = (old & 0xff000000) | ((delta >> 2) as u32 & 0xffffff);
+            output[at..at + 4].copy_from_slice(&call.to_le_bytes());
+        }
+    }
     for (i, w) in menu_words.iter().enumerate() {
         output[menu_offset + i * 4..menu_offset + i * 4 + 4].copy_from_slice(&w.to_le_bytes());
     }
@@ -137,7 +155,7 @@ pub fn build(source: &[u8], object: &[u8]) -> Result<Built> {
         "payload_address":address,"payload_offset":offset,"payload_size":linked.bytes.len(),"entry":linked.entry,
         "symbols":linked.symbols,"native_api":discovery.native_api,"discovery":discovery,
         "image":"/nestlabs/share/images/G_unfr0zen_192px.png","runtime_directory":"/var/run/unfr0zen","wheel_trace":false,
-        "swap_call":swap_call,"settings_menu":{"address":menu_address,"file_offset":menu_offset,"original":menu_names,"unfr0zen_index":1}
+        "swap_call":swap_call,"ui_change":discovery.ui_change,"settings_menu":{"address":menu_address,"file_offset":menu_offset,"original":menu_names,"unfr0zen_index":1}
     });
     let journal = Patch::journal(source, &output)?;
     if Patch::parse(&journal)?.apply(source, false)? != output {

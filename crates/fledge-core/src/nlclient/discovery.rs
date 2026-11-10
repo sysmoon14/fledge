@@ -48,6 +48,90 @@ fn swap_call(elf: &Elf, stub: u32) -> Result<u32> {
     }
     unique(sites, "eglSwapBuffers calls")
 }
+/// nlclient's report of what its display shows: the one function that logs
+/// the UiDisplayChange telemetry event, taking what changed (its screen, its
+/// view, a screen's active layer) and the new thing's name as its first two
+/// arguments, and every direct call or tail call of it. The patch routes
+/// those through custom_ui_change, which records them for nestlocal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UiChange {
+    pub reporter: u32,
+    pub calls: Vec<u32>,
+}
+fn ui_change(elf: &Elf, arm: &Arm, imports: &BTreeMap<String, u32>) -> Result<UiChange> {
+    let log = *imports
+        .get("nlLogEvent")
+        .ok_or_else(|| crate::Error::Device("missing import nlLogEvent".into()))?;
+    let needle = b"\0UiDisplayChange\0";
+    let mut names = Vec::new();
+    for s in elf.sections.iter().filter(|s| s.address != 0 && s.kind == 1 && s.flags & 4 == 0) {
+        let data = bytes(elf.data, s.offset, s.size)?;
+        for (at, _) in data.windows(needle.len()).enumerate().filter(|(_, w)| *w == needle) {
+            names.push(s.address + at as u32 + 1);
+        }
+    }
+    let name = unique(names, "UiDisplayChange event name")?;
+    let text = elf.section(".text")?;
+    let mut loads = Vec::new();
+    let mut branches = Vec::new();
+    for off in (text.offset..text.offset + text.size).step_by(4) {
+        let w = word(elf.data, off)?;
+        let pc = text.address + (off - text.offset) as u32;
+        if w & 0x0e00_0000 == 0x0a00_0000 && w >> 28 != 0xf {
+            let delta = (((w & 0xff_ffff) << 8) as i32) >> 6;
+            branches.push((pc, pc.wrapping_add(8).wrapping_add(delta as u32), w));
+        }
+        // add rD, pc, rM after ldr rM, [pc, #±imm]: a position-independent address.
+        if w & 0xfff_0ff0 == 0x08f_0000 && w >> 28 == 0xe {
+            let rm = w & 0xf;
+            for back in 1..=16u32 {
+                let Some(at) = off.checked_sub(back as usize * 4).filter(|&at| at >= text.offset) else { break };
+                let l = word(elf.data, at)?;
+                if l & 0xff7f_f000 == 0xe51f_0000 | rm << 12 {
+                    let site = pc - back * 4;
+                    let imm = l & 0xfff;
+                    let pool = if l & 0x0080_0000 != 0 { site + 8 + imm } else { site + 8 - imm };
+                    if elf.read(pool)?.wrapping_add(pc).wrapping_add(8) == name {
+                        loads.push(pc);
+                    }
+                    break;
+                }
+                if (l >> 12) & 0xf == rm {
+                    break;
+                }
+            }
+        }
+    }
+    let called: BTreeSet<u32> = branches.iter().filter(|b| b.2 >> 24 == 0xeb).map(|b| b.1).collect();
+    let mut reporters = BTreeSet::new();
+    for &load in &loads {
+        for &start in called.range(load.saturating_sub(0x40)..=load) {
+            let code = arm.code(start, Some(0x60))?;
+            let calls: Vec<_> = code.iter().filter(|i| i.name == "bl").collect();
+            let stores = |reg: &str, disp: i32| {
+                code.iter().any(|i| {
+                    i.name == "str" && i.ops[0].reg() == Some(reg) && i.ops[1].mem().is_some_and(|(b, d, _)| b == "sp" && d == disp)
+                })
+            };
+            if calls.first().is_some_and(|c| c.ops[0].imm() == Some(log) && c.address > load)
+                && stores("r0", 0)
+                && stores("r1", 4)
+            {
+                reporters.insert(start);
+            }
+        }
+    }
+    let reporter = unique(reporters, "UiDisplayChange report")?;
+    let mut calls = Vec::new();
+    for &(site, target, w) in &branches {
+        if target == reporter {
+            require(w >> 28 == 0xe, "a conditional branch to the UiDisplayChange report")?;
+            calls.push(site);
+        }
+    }
+    require(!calls.is_empty(), "no calls of the UiDisplayChange report")?;
+    Ok(UiChange { reporter, calls })
+}
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Discovery {
     pub factory: u32,
@@ -66,6 +150,10 @@ pub struct Discovery {
     pub variant: Option<String>,
     pub stock_sha256: String,
     pub validation: String,
+    /// What the display shows, for nestlocal: optional, a build without it
+    /// is patched without (nestlocal then reads the screen's pixels).
+    #[serde(default)]
+    pub ui_change: Option<UiChange>,
 }
 pub(super) fn require(ok: bool, message: impl Into<String>) -> Result<()> {
     if ok {
@@ -546,6 +634,7 @@ pub fn survey(data: &[u8]) -> Result<(Discovery, Option<String>)> {
     layout.insert("GLOBALS_TIMER_OFFSET".into(), timer(&elf, &arm, &imports)?);
     downlink(&elf, &arm, &imports, &mut api, &mut layout, &mut anchors)?;
     anchors.insert("swap_call_slot".into(), swap_call(&elf, api["native_egl_swap"])?);
+    let ui_change = ui_change(&elf, &arm, &imports).ok();
     require(
         layout["LAYER_VTABLE_SIZE"].max(layout["SCREEN_VTABLE_SIZE"]) <= 0x400,
         "vtable larger than the payload holds",
@@ -609,6 +698,7 @@ pub fn survey(data: &[u8]) -> Result<(Discovery, Option<String>)> {
         variant,
         stock_sha256: sha256_hex(data),
         validation,
+        ui_change,
     };
     Ok((found, objection))
 }

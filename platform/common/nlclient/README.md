@@ -86,6 +86,39 @@ nestlocal hands the display back at rest as before.
 Without cards, or while nlclient is stopped (Doom), nothing is held and the
 unit behaves as stock.
 
+### What nlclient shows
+
+nlclient reports every change of its view, its screen and a screen's active
+layer to its own telemetry, through one function (the `UiDisplayChange`
+event: what changed and the new thing's name). Discovery finds that function
+by the event's name and its `nlLogEvent` call, and the patch routes each of
+its direct calls and tail calls through `custom_ui_change`, which keeps the
+latest name of each thing in `/var/run/unfr0zen/nlclient.state` (written
+whole and renamed into place) before reporting as before:
+
+```text
+6898 26
+current screen	temperature
+current view	thermostatview
+active layer (nlTempScreen)	selectorlayer
+```
+
+The first line is nlclient's pid and its count of reports; the rest is one
+line per thing, tab-separated, the latest last. On a gen 3 (2025 build):
+`current view` is `thermostatview` (the home dial and its menu) or
+`settingsview` (Settings, whose tiles are `current screen`); in the
+thermostat, nlTempScreen's active layer is `temperaturesliderlayer` (the dial,
+heating or off) or `selectorlayer` (the menu). Coming back from Settings
+reports only the view: the thermostat opens on its dial.
+
+nestlocal's UI reads this to know when nlclient's home dial, its menu or its
+Settings show (Back in the menu, Done in Settings). A file whose pid is not a
+running nlclient is ignored, as is its absence (a patch from before this, or
+a build where the report isn't found, which is patched without it): then the
+UI reads nlclient's pixels as before. Selection within a menu isn't reported,
+so opening Settings from the cards still checks Settings is chosen by its
+pixels before pressing.
+
 ## Runtime and build requirements
 
 Run the packaged app or CLI. No screen-patching tools need to be installed on
