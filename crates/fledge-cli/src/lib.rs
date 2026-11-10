@@ -93,7 +93,7 @@ struct Args {
     /// install Fledge's signed releases from Home Assistant's update entity (needs --mqtt)
     #[arg(long, help_heading = "Root filesystem options")]
     updates: bool,
-    /// serve the unit over Matter, with or without --mqtt
+    /// serve the unit over Matter, with or without --mqtt; gen 3 turns off its own Bluetooth for Matter, so real Nest Temperature Sensors stop working
     #[arg(long, help_heading = "Root filesystem options")]
     matter: bool,
     /// Matter pairing code to enter on the phone, 11 digits (implies --matter; default: 0347-100-5534)

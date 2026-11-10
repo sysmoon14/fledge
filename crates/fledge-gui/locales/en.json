@@ -210,7 +210,7 @@
   "setup.home_assistant_title": "Home Assistant",
   "setup.keep_plugged_in": "Keep the thermostat plugged in until it finishes",
   "setup.learning_thermostat": "Learning Thermostat",
-  "setup.matter_about": "Pair with Apple Home, Google Home or Alexa too. Basic thermostat control only.",
+  "setup.matter_about": "Pair with Apple Home, Google Home or Alexa too. Basic thermostat control only. On a 3rd generation, Matter takes over the thermostat's Bluetooth, so Nest Temperature Sensors stop working.",
   "setup.matter_thread_short": "Matter over Thread",
   "setup.minutes_left": "about {minutes} min left",
   "setup.mode_app": "Running Nest's software",
