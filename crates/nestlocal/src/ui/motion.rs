@@ -14,11 +14,14 @@ const ROW: usize = SIDE * 4;
 const CENTRE: f32 = SIDE as f32 / 2.0;
 
 /// Things leaving, press feedback, small labels.
-pub const FAST: Duration = Duration::from_millis(180);
+pub const FAST: Duration = Duration::from_millis(250);
 /// Screens in and out, menus, a list's rows sliding.
-pub const STANDARD: Duration = Duration::from_millis(300);
-/// The glance giving way, sweeps to Off, settling.
-pub const SLOW: Duration = Duration::from_millis(450);
+pub const STANDARD: Duration = Duration::from_millis(420);
+/// The glance giving way, settling, the dial changing colour.
+pub const SLOW: Duration = Duration::from_millis(700);
+/// A light's ring sweeping down to Off or up to its brightness: slow
+/// enough to see it go.
+pub const SWEEP: Duration = Duration::from_millis(900);
 
 /// The one curve: a gentle start and a soft landing (CSS's
 /// cubic-bezier(.4, 0, .2, 1)), `t` and the result 0 to 1.

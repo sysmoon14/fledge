@@ -865,6 +865,11 @@ impl Machine {
                     }
                     return;
                 }
+                if !on && steps < 0 {
+                    // Off already: turning on down leaves it off (it would
+                    // come back on at the lowest, and go off again).
+                    return;
+                }
                 let start = if on { value as i32 } else { 0 };
                 if dim_off && on && steps < 0 && start + steps < 1 {
                     // Past the lowest: it holds there for a moment, then
@@ -1810,6 +1815,12 @@ mod tests {
         let off = rig.input_with_clicks(Input::Turn(-VALUE_STEP));
         assert_eq!(Rig::sends(&off), vec![Command::Off("light.lamp".into())]);
         assert!(off.contains(&Effect::ClickLow), "a lower click: {off:?}");
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: false, value: 1 });
+        for _ in 0..5 {
+            rig.now += DETENT;
+            let more = rig.input_with_clicks(Input::Turn(-VALUE_STEP * 4));
+            assert!(more.is_empty(), "turning on left leaves it off, quietly: {more:?}");
+        }
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: false, value: 1 });
         rig.turn(VALUE_STEP);
         assert_eq!(rig.machine.mode, Mode::LightDim { slot: 0, light: 0, on: true, value: 1 }, "right from Off: on at the lowest");

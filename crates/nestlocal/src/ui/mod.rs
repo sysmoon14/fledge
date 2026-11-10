@@ -461,7 +461,7 @@ struct Count {
 const PULSE: Duration = Duration::from_millis(1800);
 const PULSE_EVERY: Duration = Duration::from_secs(30);
 /// How fast a list's highlight glides to its row: most of the way in this.
-const GLIDE: f32 = 0.05;
+const GLIDE: f32 = 0.065;
 /// A list's windows kept drawn besides the one showing: two on, two back.
 const KEPT_WINDOWS: usize = 4;
 /// How long the thermostat's dial takes to change colour: slow enough to
@@ -488,7 +488,7 @@ const LULL: Duration = Duration::from_millis(150);
 /// How fast what shows catches up with the ring: most of the way in this.
 const FOLLOW: f32 = 0.04;
 /// How fast the cards zoom out as the ring starts, and in as they settle.
-const ZOOM_EASE: f32 = 0.05;
+const ZOOM_EASE: f32 = 0.08;
 
 impl Runtime {
     fn new(ui: Arc<Ui>, sender: Arc<dyn Sender>, fonts: paint::Fonts, display: device::Display,
@@ -992,7 +992,7 @@ impl Runtime {
         };
         if let Some(on) = switched {
             let from = if on { 0.0 } else { shown };
-            self.count = Some(Count { key, from, to: if on { is } else { 0.0 }, since: now, length: motion::SLOW, lit: on });
+            self.count = Some(Count { key, from, to: if on { is } else { 0.0 }, since: now, length: motion::SWEEP, lit: on });
         } else if !turned && (is - was).abs() > f64::EPSILON && self.count.as_ref().is_none_or(|c| c.lit) {
             self.count = Some(Count { key, from: shown, to: is, since: now, length: motion::STANDARD, lit: true });
         } else if turned {
