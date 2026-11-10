@@ -106,6 +106,12 @@ impl Bridge {
             }
             return;
         }
+        if name == "alarm_result" {
+            if let Err(e) = self.ui.set_alarm_result(payload) {
+                logf!("mqtt: alarm_result: {e}");
+            }
+            return;
+        }
         if name == "external_temperature_option" {
             self.set_external_temperature_option(&String::from_utf8_lossy(payload));
             return;

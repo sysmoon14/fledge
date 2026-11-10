@@ -4,8 +4,8 @@
 
 use super::icons;
 use super::machine::Setting;
-use super::model::{ActionCard, Alert, CameraCard, Card, ClimateCard, CoverCard, Glance, Light, LightsCard, MediaCard, Nest,
-                   OptionsCard};
+use super::model::{ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, ClimateCard, CoverCard, Glance, Light, LightsCard,
+                   MediaCard, Nest, OptionsCard};
 use super::paint::{self, *};
 
 pub enum Screen<'a> {
@@ -29,6 +29,18 @@ pub enum Screen<'a> {
     /// A cover's card, and its position on the ring.
     CoverCard { card: &'a CoverCard },
     CoverSet { card: &'a CoverCard, value: u8 },
+    /// An alarm's card among the others: its state, still.
+    AlarmCard { card: &'a AlarmCard },
+    /// An alarm opened, at `now` (Unix seconds): its countdown, its going
+    /// off; `note`, what Home Assistant last said.
+    AlarmView { card: &'a AlarmCard, now: f64, note: Option<&'a str> },
+    /// Its code pad: arming to `arm`, else disarming; the marker on `at`,
+    /// `entered` digits so far; `waiting` for Home Assistant; `locked`, the
+    /// seconds the code is locked out for.
+    AlarmPad { card: &'a AlarmCard, arm: Option<&'a AlarmMode>, at: usize, entered: usize, waiting: bool,
+               note: Option<&'a str>, locked: Option<u64>, now: f64 },
+    /// Arming refused with `sensors` open: arm to `arm` anyway?
+    AlarmOpen { card: &'a AlarmCard, arm: &'a AlarmMode, sensors: &'a [String] },
     /// The time (`now`, Unix seconds), the weather and what's on.
     Glance { glance: &'a Glance, cards: &'a [Card], now: i64 },
     /// The lights card pressed: its lights and Back, `selected` highlighted.
@@ -128,6 +140,12 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::OptionList { card, selected } => option_list(fonts, card, *selected, Layer::Whole),
         Screen::Members { card, selected } => lights_listed(fonts, &card.name, &card.members, *selected, Layer::Whole),
         Screen::CoverCard { card } => cover_card(fonts, card),
+        Screen::AlarmCard { card } => alarm_screen(fonts, card, None, None),
+        Screen::AlarmView { card, now, note } => alarm_screen(fonts, card, Some(*now), *note),
+        Screen::AlarmPad { card, arm, at, entered, waiting, note, locked, now } => {
+            alarm_pad(fonts, card, *arm, *at, *entered, *waiting, *note, *locked, *now)
+        }
+        Screen::AlarmOpen { card, arm, sensors } => alarm_open(fonts, card, arm, sensors),
         Screen::Glance { glance, cards, now } => glance_screen(fonts, glance, cards, *now),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
@@ -1566,6 +1584,252 @@ fn cover_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Font
 pub fn capitalise(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+}
+
+/// An alarm's colours: disarmed, Fledge's eco green; a delay running,
+/// amber; armed, a violet clear of cooling's blue; going off, red.
+const ALARM_ARMED: [u8; 3] = [154, 134, 255];
+const ALARM_RED: [u8; 3] = [255, 59, 59];
+
+/// An armed mode's icon.
+pub fn alarm_mode_icon(mode: &str) -> &'static str {
+    match mode {
+        "home" => "mdi:shield-home",
+        "night" => "mdi:shield-moon",
+        "vacation" => "mdi:airplane",
+        "custom_bypass" => "mdi:shield-star",
+        _ => "mdi:shield-lock",
+    }
+}
+
+/// An alarm screen's face: Fledge's glowing with `c`; the Nest's black,
+/// but solid red for an alarm going off, its ring and words white on it.
+fn alarm_face(c: [u8; 3]) -> Canvas {
+    paint::face(if paint::fledge() || c == ALARM_RED { c } else { BLACK })
+}
+
+/// How bright something going off is at `now` (0..1), pulsing.
+fn alarm_pulse(now: f64) -> f32 {
+    0.5 + 0.5 * (now * std::f64::consts::TAU / 1.2).sin() as f32
+}
+
+/// A delay running on the ring: with its length, what's left of it lit
+/// amber; without, a sweep going round (at `now`), or all of it dimly on
+/// a card at rest. `mark`: a white tick too.
+fn alarm_delay_ring(p: &mut Canvas, card: &AlarmCard, now: Option<f64>, mark: Option<usize>) {
+    let marks: Vec<usize> = mark.into_iter().collect();
+    match (now, now.and_then(|now| card.left(now))) {
+        (_, Some((left, _))) => {
+            let lit = left * (TICKS - 1) as f32;
+            paint::ring(p, |i| if i as f32 <= lit { colour(AMBER) } else { colour(DIM) }, &marks);
+        }
+        (Some(now), None) => {
+            let head = (now / 1.6).fract() as f32 * (TICKS + 30) as f32 - 15.0;
+            paint::ring(p, |i| {
+                let behind = head - i as f32;
+                if (0.0..30.0).contains(&behind) { alpha(AMBER, 1.0 - behind / 30.0 * 0.8) } else { alpha(AMBER, 0.2) }
+            }, &marks);
+        }
+        (None, None) => paint::ring(p, |_| alpha(AMBER, 0.6), &marks),
+    }
+}
+
+/// The note under an alarm's screen, if there's one.
+fn alarm_note(p: &mut Canvas, fonts: &Fonts, note: Option<&str>, y: f32) -> bool {
+    let Some(note) = note else { return false };
+    let note = paint::fit(fonts.medium(), 18.0, note, 0.0, 300.0);
+    paint::text(p, fonts.medium(), 18.0, HALF, y, &note, 0.0, ALARM_RED);
+    true
+}
+
+/// An alarm as its card shows it, or opened (`now`: its countdown and its
+/// going off move).
+fn alarm_screen(fonts: &Fonts, card: &AlarmCard, now: Option<f64>, note: Option<&str>) -> Canvas {
+    let name = if card.name.is_empty() { "Alarm" } else { card.name.as_str() };
+    let wants_code = card.wants_digits();
+    match card.state.as_str() {
+        state @ ("arming" | "pending") => {
+            let mut p = alarm_face(AMBER);
+            alarm_delay_ring(&mut p, card, now, None);
+            let arming = state == "arming";
+            let words = if arming { "Arming" } else { "Entry delay" };
+            pill_words(&mut p, fonts, 150.0, words, AMBER, Some(if arming { "mdi:home-export-outline" } else { "mdi:door-open" }));
+            match now.and_then(|now| card.left(now)) {
+                Some((_, seconds)) => {
+                    paint::text(&mut p, fonts.digits(), 140.0, HALF, 300.0, &seconds.to_string(), -4.0, WHITE);
+                }
+                None => {
+                    icon(&mut p, "mdi:shield-lock", &card.id, HALF, 246.0, 96.0, WHITE);
+                }
+            }
+            if !alarm_note(&mut p, fonts, note, 346.0) {
+                let hint = match (arming, wants_code) {
+                    (true, _) => "Press to cancel",
+                    (false, true) => "Press to enter the code",
+                    (false, false) => "Press to disarm",
+                };
+                line(&mut p, fonts, 346.0, hint, WHITE);
+            }
+            p
+        }
+        "triggered" => {
+            let mut p = alarm_face(ALARM_RED);
+            let glow = now.map_or(0.9, alarm_pulse);
+            paint::ring(&mut p, |_| alpha(if paint::fledge() { ALARM_RED } else { WHITE }, 0.35 + 0.6 * glow), &[]);
+            icon(&mut p, "mdi:alarm-light", &card.id, HALF, 160.0, 96.0, WHITE);
+            let size = 46.0;
+            paint::text(&mut p, fonts.medium(), size, HALF, 270.0, "Alarm", 0.0, WHITE);
+            if let Some(sensor) = card.sensors.first() {
+                line(&mut p, fonts, 310.0, sensor, WHITE);
+            }
+            if !alarm_note(&mut p, fonts, note, 352.0) {
+                line(&mut p, fonts, 352.0, "Press to disarm", WHITE);
+            }
+            p
+        }
+        state => {
+            let armed = card.armed();
+            let background = if armed.is_some() && paint::fledge() { ALARM_ARMED } else { BLACK };
+            let mut p = paint::face(background);
+            let (icon_name, accent, status, hint) = match (armed, state) {
+                (Some(mode), _) => (alarm_mode_icon(mode), ALARM_ARMED, format!("Armed · {}", card.mode_name(mode)),
+                                    "Press to disarm"),
+                (None, "disarmed") => ("mdi:shield-lock-open-outline", ECO, "Disarmed".to_owned(),
+                                       if card.modes.is_empty() { "" } else { "Press to arm" }),
+                (None, "disarming") => ("mdi:shield-lock-open-outline", AMBER, "Disarming…".to_owned(), ""),
+                (None, _) => ("mdi:shield-lock-open-outline", DIM, "Unavailable".to_owned(), ""),
+            };
+            match armed {
+                Some(_) => paint::ring(&mut p, |_| alpha(ALARM_ARMED, 0.5), &[]),
+                None => paint::ring(&mut p, |_| colour(DIM), &[]),
+            }
+            let found = icons::lookup(&card.icon, &card.id).filter(|_| armed.is_none() && state == "disarmed" && !card.icon.is_empty())
+                .or_else(|| icons::lookup(icon_name, ""));
+            if let Some(found) = found {
+                paint::icon(&mut p, found, HALF, 172.0, 100.0, colour(if armed.is_some() { ALARM_ARMED } else { WHITE }));
+            }
+            let title = paint::fit(fonts.regular(), 40.0, name, 0.0, 330.0);
+            paint::text(&mut p, fonts.regular(), 40.0, HALF, 284.0, &title, 0.0, WHITE);
+            let status = paint::fit(fonts.medium(), 21.0, &status, 0.0, 320.0);
+            paint::text(&mut p, fonts.medium(), 21.0, HALF, 324.0, &status, 0.0, accent);
+            if !alarm_note(&mut p, fonts, note, 360.0) {
+                line(&mut p, fonts, 360.0, hint, GREY);
+            }
+            p
+        }
+    }
+}
+
+/// Where the code pad's place `k` of `n` sits on the ring: its tick, and
+/// the point its digit is drawn at.
+fn pad_place(k: usize, n: usize) -> (usize, f32, f32) {
+    let (first, last) = (8.0, (TICKS - 9) as f32);
+    let tick = (first + (last - first) * k as f32 / (n - 1).max(1) as f32).round() as usize;
+    let angle = paint::tick_angle(tick, TICKS).to_radians();
+    // Inside Fledge's arc, or the Nest's ticks.
+    let radius = if paint::fledge() { 172.0 } else { 150.0 };
+    (tick, HALF + radius * angle.sin(), HALF - radius * angle.cos())
+}
+
+/// An alarm's code pad: the digits round the ring, the one under the
+/// marker large in the middle, the digits entered as dots.
+#[allow(clippy::too_many_arguments)]
+fn alarm_pad(fonts: &Fonts, card: &AlarmCard, arm: Option<&AlarmMode>, at: usize, entered: usize, waiting: bool,
+             note: Option<&str>, locked: Option<u64>, now: f64) -> Canvas {
+    let pending = card.state == "pending";
+    let triggered = card.state == "triggered";
+    let accent = if triggered { ALARM_RED } else if pending { AMBER } else { ALARM_ARMED };
+    let mut p = alarm_face(if triggered { ALARM_RED } else if pending { AMBER } else { BLACK });
+    let n = super::machine::DIGITS.len() + usize::from(card.code_length.is_none());
+    let at = at.min(n - 1);
+    if let Some(seconds) = locked {
+        paint::ring(&mut p, |_| colour(DIM), &[]);
+        icon(&mut p, "mdi:lock", "lock", HALF, 200.0, 78.0, GREY);
+        paint::text(&mut p, fonts.medium(), 26.0, HALF, 290.0, &format!("Try again in {seconds} s"), 0.0, WHITE);
+        line(&mut p, fonts, 326.0, "Too many tries", GREY);
+        return p;
+    }
+    let (mark, _, _) = pad_place(at, n);
+    if pending {
+        alarm_delay_ring(&mut p, card, Some(now), Some(mark));
+    } else {
+        let base = if triggered { alpha(ALARM_RED, 0.3 + 0.4 * alarm_pulse(now)) } else { colour(DIM) };
+        paint::ring(&mut p, |i| if i.abs_diff(mark) <= 3 { colour(accent) } else { base }, &[mark]);
+    }
+    for k in 0..n {
+        let (_, x, y) = pad_place(k, n);
+        let chosen = k == at;
+        match super::machine::DIGITS.get(k) {
+            Some(digit) => {
+                let (font, size) = if chosen { (fonts.medium(), 34.0) } else { (fonts.regular(), 26.0) };
+                paint::text(&mut p, font, size, x, y + size * 0.36, &digit.to_string(), 0.0, if chosen { WHITE } else { GREY });
+            }
+            None => icon(&mut p, "mdi:check", "check", x, y, if chosen { 36.0 } else { 28.0 }, if chosen { WHITE } else { GREY }),
+        }
+    }
+    let title = match (arm, pending) {
+        (Some(mode), _) => card.mode_name(&mode.mode),
+        (None, true) => match card.left(now) {
+            Some((_, seconds)) => format!("Disarm · {seconds} s"),
+            None => "Disarm now".to_owned(),
+        },
+        (None, false) => "Disarm".to_owned(),
+    };
+    let title_icon = arm.map_or("mdi:shield-lock-open-outline", |mode| alarm_mode_icon(&mode.mode));
+    pill_words(&mut p, fonts, 150.0, &title, accent, Some(title_icon));
+    match super::machine::DIGITS.get(at) {
+        Some(digit) if !waiting => {
+            paint::text(&mut p, fonts.digits(), 120.0, HALF, 288.0, &digit.to_string(), 0.0, WHITE);
+        }
+        Some(_) => {}
+        None => icon(&mut p, "mdi:check", "check", HALF, 250.0, 86.0, accent),
+    }
+    // The digits entered: as many dots as the code has, if Fledge knows,
+    // else one more than entered.
+    let shown = match card.code_length {
+        Some(length) => (length as usize).max(entered),
+        None => entered + usize::from(!waiting),
+    };
+    if shown == 0 || (entered == 0 && card.code_length.is_none() && !waiting) {
+        line(&mut p, fonts, 336.0, "Enter the code", GREY);
+    } else {
+        let gap = if shown > 6 { 20.0 } else { 26.0 };
+        let left = HALF - (shown - 1) as f32 * gap / 2.0;
+        for k in 0..shown {
+            let c = if k < entered { colour(WHITE) } else { alpha(GREY, 0.35) };
+            paint::circle(&mut p, left + k as f32 * gap, 330.0, 7.0, c);
+        }
+    }
+    if waiting {
+        line(&mut p, fonts, 404.0, "Checking…", GREY);
+    } else if !alarm_note(&mut p, fonts, note, 404.0) {
+        let hint = match (super::machine::DIGITS.get(at), entered) {
+            (None, _) => if arm.is_some() { "Press to arm" } else { "Press to disarm" },
+            (Some(_), 0) => "Press to enter · hold to go back",
+            (Some(_), _) => "Hold to rub out",
+        };
+        line(&mut p, fonts, 404.0, hint, GREY);
+    }
+    p
+}
+
+/// Arming refused with a door or window open: what's open, and arming
+/// anyway on a press.
+fn alarm_open(fonts: &Fonts, card: &AlarmCard, arm: &AlarmMode, sensors: &[String]) -> Canvas {
+    let mut p = alarm_face(AMBER);
+    paint::ring(&mut p, |_| alpha(AMBER, 0.4), &[]);
+    pill_words(&mut p, fonts, 104.0, &card.mode_name(&arm.mode), AMBER, Some(alarm_mode_icon(&arm.mode)));
+    icon(&mut p, "mdi:door-open", &card.id, HALF, 190.0, 76.0, WHITE);
+    let what = match sensors {
+        [one] => format!("{one} is open"),
+        [] => "Something is open".to_owned(),
+        many => format!("{} are open", many.len()),
+    };
+    let what = paint::fit(fonts.medium(), 30.0, &what, 0.0, 340.0);
+    paint::text(&mut p, fonts.medium(), 30.0, HALF, 272.0, &what, 0.0, WHITE);
+    line(&mut p, fonts, 314.0, "Press to arm anyway", WHITE);
+    line(&mut p, fonts, 348.0, "Hold to leave it disarmed", GREY);
+    p
 }
 
 #[cfg(test)]

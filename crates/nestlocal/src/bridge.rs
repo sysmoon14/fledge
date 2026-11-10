@@ -20,7 +20,8 @@
 //!   <prefix>/<serial>/set/<command>    Home Assistant's commands; for the
 //!                                      home screen cards ui, art/<entity>,
 //!                                      screen_on (ON/OFF, retained),
-//!                                      screen_wake and alert (notifications)
+//!                                      screen_wake, alert (notifications) and
+//!                                      alarm_result (an alarm command's answer)
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
 
@@ -1019,7 +1020,8 @@ pub fn state(dev: &Fields, sh: &Fields) -> Fields {
 impl crate::ui::Sender for Bridge {
     fn send(&self, command: &crate::ui::Command) {
         let payload = command.payload().to_string();
-        logf!("ui: {payload}");
+        // An alarm's code is never logged.
+        logf!("ui: {}", command.logged());
         self.publish(&format!("{}/ui/command", self.base), false, payload.as_bytes());
     }
 

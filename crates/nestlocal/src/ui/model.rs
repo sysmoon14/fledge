@@ -170,6 +170,8 @@ pub enum Card {
     Options(OptionsCard),
     /// Blinds, curtains, a garage door: the ring sets how open.
     Cover(CoverCard),
+    /// An alarm panel: armed from its modes, disarmed with its code.
+    Alarm(AlarmCard),
     /// A kind from a newer Fledge: left out rather than failing the rest.
     #[serde(other)]
     Unknown,
@@ -213,6 +215,138 @@ pub struct CoverCard {
     /// Whether it can be set part open (else only opened and closed).
     #[serde(default)]
     pub positionable: bool,
+}
+
+/// An alarm panel (protocol 9), as any Home Assistant alarm gives it; Alarmo
+/// adds its delay's length, the sensors that set it off, and arming anyway.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct AlarmCard {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: String,
+    /// disarmed, arming, armed_home, armed_away, armed_night,
+    /// armed_vacation, armed_custom_bypass, pending, disarming, triggered.
+    #[serde(default)]
+    pub state: String,
+    /// The modes it arms to, in the ring's order, each with its name.
+    #[serde(default)]
+    pub modes: Vec<AlarmMode>,
+    /// The code it wants for what it would do next ("number", "text"), as
+    /// its code_format says in this state; None: none.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// How many digits the code has, if Fledge was told: the last sends it.
+    #[serde(default)]
+    pub code_length: Option<u8>,
+    /// The exit or entry delay running, if the panel says how long.
+    #[serde(default)]
+    pub delay: Option<AlarmDelay>,
+    /// What set it off, or stops it arming, by name.
+    #[serde(default)]
+    pub sensors: Vec<String>,
+    /// Whether it can be armed with a door open (Alarmo's force).
+    #[serde(default)]
+    pub can_force: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct AlarmMode {
+    /// home, away, night, vacation, custom_bypass.
+    pub mode: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+pub struct AlarmDelay {
+    /// When it ends (Unix seconds), and how long it is.
+    pub ends: f64,
+    pub seconds: f64,
+}
+
+impl AlarmCard {
+    /// Whether the code it wants now is digits the ring can enter.
+    pub fn wants_digits(&self) -> bool {
+        self.code.as_deref() == Some("number")
+    }
+
+    /// Whether it wants a code the ring can't enter (letters).
+    pub fn wants_text(&self) -> bool {
+        self.code.as_ref().is_some_and(|c| c != "number")
+    }
+
+    /// The mode it's armed in, if it is.
+    pub fn armed(&self) -> Option<&str> {
+        self.state.strip_prefix("armed_")
+    }
+
+    /// Whether it needs whoever is there: coming in, or going off.
+    pub fn urgent(&self) -> bool {
+        matches!(self.state.as_str(), "pending" | "triggered")
+    }
+
+    /// A mode's name on the Nest: as Fledge was told, else Home Assistant's.
+    pub fn mode_name(&self, mode: &str) -> String {
+        let named = self.modes.iter().find(|m| m.mode == mode).map(|m| m.name.trim()).filter(|n| !n.is_empty());
+        named.map(str::to_owned).unwrap_or_else(|| match mode {
+            "home" => "Home".into(),
+            "away" => "Away".into(),
+            "night" => "Night".into(),
+            "vacation" => "Vacation".into(),
+            "custom_bypass" => "Custom".into(),
+            other => other.replace('_', " "),
+        })
+    }
+
+    /// How much of its delay is left at `now` (Unix seconds), 0..1, and the
+    /// whole seconds left; None if it doesn't say.
+    pub fn left(&self, now: f64) -> Option<(f32, u64)> {
+        let delay = self.delay.filter(|d| d.seconds > 0.0)?;
+        let left = (delay.ends - now).max(0.0);
+        Some(((left / delay.seconds).clamp(0.0, 1.0) as f32, left.ceil() as u64))
+    }
+}
+
+/// What Home Assistant says of an alarm command (<base>/set/alarm_result).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct AlarmResult {
+    /// The alarm's entity.
+    pub alarm: String,
+    #[serde(default)]
+    pub ok: bool,
+    /// rejected (the code, or the panel said no), locked (too many tries),
+    /// open_sensors (a door or window open), failed.
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub sensors: Vec<String>,
+    /// Tries left before the code is locked out, and for how long it is.
+    #[serde(default)]
+    pub tries: Option<u8>,
+    #[serde(default)]
+    pub locked_for: Option<u64>,
+}
+
+impl AlarmResult {
+    pub fn parse(payload: &[u8]) -> Result<AlarmResult, String> {
+        let result: AlarmResult = serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+        if result.alarm.is_empty() {
+            return Err("an alarm result needs its alarm".into());
+        }
+        Ok(result)
+    }
+}
+
+/// An alarm code, as entered: its digits never printed (logs, ui.mode).
+#[derive(Clone, Default, PartialEq)]
+pub struct Code(pub String);
+
+impl std::fmt::Debug for Code {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Code({} digits)", self.0.len())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -621,6 +755,10 @@ pub enum Command {
     Position(String, u8),
     Open(String),
     Close(String),
+    /// An alarm armed to a mode (home, away, ...), with its code if it
+    /// wants one; `force`, with a door or window open.
+    AlarmArm { id: String, mode: String, code: Option<Code>, force: bool },
+    AlarmDisarm { id: String, code: Option<Code> },
     /// One of this thermostat's own commands (<base>/set/<name>), done here
     /// rather than sent to Home Assistant: its target, Eco, its settings.
     Nest(String, String),
@@ -649,7 +787,30 @@ impl Command {
             Command::Position(id, p) => json!({"id": id, "action": "position", "value": p}),
             Command::Open(id) => json!({"id": id, "action": "open"}),
             Command::Close(id) => json!({"id": id, "action": "close"}),
+            Command::AlarmArm { id, mode, code, force } => {
+                let mut out = json!({"id": id, "action": "arm", "mode": mode, "force": force});
+                if let Some(code) = code {
+                    out["code"] = json!(code.0);
+                }
+                out
+            }
+            Command::AlarmDisarm { id, code } => {
+                let mut out = json!({"id": id, "action": "disarm"});
+                if let Some(code) = code {
+                    out["code"] = json!(code.0);
+                }
+                out
+            }
         }
+    }
+
+    /// The payload as the log may show it: an alarm code hidden.
+    pub fn logged(&self) -> Value {
+        let mut out = self.payload();
+        if let Some(code) = out.get_mut("code") {
+            *code = json!("…");
+        }
+        out
     }
 }
 

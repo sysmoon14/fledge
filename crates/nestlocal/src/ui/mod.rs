@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 pub use model::Command;
 use machine::{Action, Effect, Input, Machine, Mode, Slot};
-use model::{Alert, Art, Card, Cards, Nest};
+use model::{AlarmResult, Alert, Art, Card, Cards, Nest};
 use screens::Screen;
 
 use crate::logf;
@@ -62,7 +62,8 @@ use crate::logf;
 ///      whatever was opened until it times out
 ///   8  turning a dimmer down past its lowest turns the light off, a
 ///      switch's ring turns it off and on (dim_off, default on)
-pub const PROTOCOL: u32 = 8;
+///   9  alarm cards (arm, disarm; <base>/set/alarm_result)
+pub const PROTOCOL: u32 = 9;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -99,6 +100,8 @@ pub struct Ui {
     wakes: std::sync::atomic::AtomicU64,
     /// Home Assistant's latest notification (<base>/set/alert), counted.
     alert: Mutex<(u64, Option<Alert>)>,
+    /// Its latest answer to an alarm command (<base>/set/alarm_result), counted.
+    alarm_result: Mutex<(u64, Option<AlarmResult>)>,
 }
 
 impl Ui {
@@ -168,6 +171,15 @@ impl Ui {
         let alert = Alert::parse(payload)?;
         let mut held = self.alert.lock().unwrap();
         *held = (held.0 + 1, Some(alert));
+        Ok(())
+    }
+
+    /// Takes Home Assistant's answer to an alarm command
+    /// (<base>/set/alarm_result).
+    pub fn set_alarm_result(&self, payload: &[u8]) -> Result<(), String> {
+        let result = AlarmResult::parse(payload)?;
+        let mut held = self.alarm_result.lock().unwrap();
+        *held = (held.0 + 1, Some(result));
         Ok(())
     }
 
@@ -269,6 +281,8 @@ struct Runtime {
     kept_on: Instant,
     /// The notifications taken, and the scene last shown as run.
     alerts: u64,
+    /// Home Assistant's alarm answers taken so far.
+    alarm_results: u64,
     ran: Option<(usize, Instant)>,
     /// The minute the glance's clock last showed.
     glance_minute: i64,
@@ -399,6 +413,7 @@ fn card_name(card: &Card) -> &str {
         Card::Camera(card) => &card.name,
         Card::Options(card) => &card.name,
         Card::Cover(card) => &card.name,
+        Card::Alarm(card) => &card.name,
         Card::Unknown => "",
     }
 }
@@ -502,7 +517,7 @@ impl Runtime {
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             drawn: Default::default(), stale: Default::default(), progress_checked: Instant::now(), showed: false,
             wakes: 0, kept_on: Instant::now(),
-            alerts: 0, ran: None, glance_minute: 0, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
+            alerts: 0, alarm_results: 0, ran: None, glance_minute: 0, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
             seen: (SEEN_FAR.load(std::sync::atomic::Ordering::Relaxed), SEEN_NEAR.load(std::sync::atomic::Ordering::Relaxed)),
             rest: false, black: false, beat: 0, last_beat: now,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, ticker: None, last_frame: now,
@@ -620,6 +635,14 @@ impl Runtime {
                     alert.art = alert.picture.as_deref().and_then(|key| self.ui.art(key));
                     logf!("ui: notification {}", alert.id);
                     self.machine.show_alert(alert, now, lit, &mut effects);
+                }
+            }
+            let (results, result) = self.ui.alarm_result.lock().unwrap().clone();
+            if results != self.alarm_results {
+                self.alarm_results = results;
+                if let Some(result) = result {
+                    logf!("ui: alarm {}: {}", result.alarm, if result.ok { "done" } else { result.error.as_str() });
+                    self.machine.alarm_result(result, now, &mut effects);
                 }
             }
             if self.machine.ran != self.ran {
@@ -1290,6 +1313,7 @@ impl Runtime {
                 Some(Card::Camera(card)) => card.name.clone(),
                 Some(Card::Options(card)) => card.name.clone(),
                 Some(Card::Cover(card)) => card.name.clone(),
+                Some(Card::Alarm(card)) => card.name.clone(),
                 Some(Card::Unknown) | None => String::new(),
             },
             None => String::new(),
@@ -1387,6 +1411,7 @@ impl Runtime {
             Some(Card::Camera(card)) => Screen::CameraCard { card },
             Some(Card::Options(card)) => Screen::OptionsCard { card },
             Some(Card::Cover(card)) => Screen::CoverCard { card },
+            Some(Card::Alarm(card)) => Screen::AlarmCard { card },
             Some(Card::Unknown) => return,
             None => Screen::SettingsCard,
         };
@@ -1743,6 +1768,25 @@ impl Runtime {
                 Card::Camera(card) => Screen::CameraView { card },
                 _ => return None,
             },
+            Mode::AlarmView { slot } => match card(*slot)? {
+                Card::Alarm(card) => Screen::AlarmView { card, now: unix_now(), note: alarm_note(machine) },
+                _ => return None,
+            },
+            Mode::AlarmPad { slot, arm, at, entered } => match card(*slot)? {
+                Card::Alarm(card) => {
+                    let now = Instant::now();
+                    let locked = machine.alarm_locked.filter(|until| *until > now)
+                        .map(|until| until.duration_since(now).as_secs_f64().ceil() as u64);
+                    Screen::AlarmPad { card, arm: arm.and_then(|i| card.modes.get(i as usize)), at: *at as usize,
+                                       entered: entered.0.len(), waiting: machine.alarm_wait.is_some(),
+                                       note: alarm_note(machine), locked, now: unix_now() }
+                }
+                _ => return None,
+            },
+            Mode::AlarmOpen { slot, arm } => match card(*slot)? {
+                Card::Alarm(card) => Screen::AlarmOpen { card, arm: card.modes.get(*arm as usize)?, sensors: &machine.alarm_open },
+                _ => return None,
+            },
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
             Mode::Glance => Screen::Glance { glance: machine.cards.glance.as_ref()?, cards: &machine.cards.cards,
                                              now: unix_now() as i64 },
@@ -1770,7 +1814,12 @@ impl Runtime {
             Screen::ClimateSet { card, .. } => card.name.clone(),
             Screen::CoverSet { card, .. } => card.name.clone(),
             Screen::NestSet { nest, .. } => nest.card.name.clone(),
+            Screen::AlarmView { card, .. } => card.name.clone(),
             _ => String::new(),
+        };
+        let alarm = match &screen {
+            Screen::AlarmView { card, .. } => Some(*card),
+            _ => None,
         };
         let presets = match &screen {
             Screen::ClimateSet { card, .. } => card.presets.clone(),
@@ -1798,6 +1847,13 @@ impl Runtime {
                 Action::Boost(true) => ("mdi:water-boiler", "Boost hot water, 1 hour"),
                 Action::Boost(false) => ("mdi:water-boiler", "Stop the boost"),
                 Action::NestDial => ("mdi:thermometer", "Nest's own dial"),
+                Action::Arm(i) => {
+                    let mode = alarm.and_then(|card| card.modes.get(*i as usize).map(|m| (card, m)));
+                    let (icon, name) = mode.map_or(("mdi:shield-lock", String::new()), |(card, m)| {
+                        (screens::alarm_mode_icon(&m.mode), card.mode_name(&m.mode))
+                    });
+                    return (icon.to_owned(), name);
+                }
                 Action::Preset(i) => {
                     let name = presets.get(*i as usize).cloned().unwrap_or_default();
                     return (screens::preset_icon(&name).to_owned(), screens::capitalise(&name.replace('_', " ")));
@@ -2108,13 +2164,15 @@ type Transition = motion::Kind;
 fn depth(mode: &Mode, machine: &Machine) -> u8 {
     match mode {
         Mode::LightList { .. } | Mode::ClimateSet { .. } | Mode::Volume { .. } | Mode::Camera { .. }
-        | Mode::OptionList { .. } | Mode::CoverSet { .. } | Mode::Thermostat { .. } | Mode::Settings { .. } => 1,
+        | Mode::OptionList { .. } | Mode::CoverSet { .. } | Mode::Thermostat { .. } | Mode::Settings { .. }
+        | Mode::AlarmView { .. } => 1,
         // A lamp's own card opens straight to its dimmer; a room's, from its list.
         Mode::LightDim { slot, .. } => match machine.cards.cards.get(*slot) {
             Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
             _ => 1,
         },
-        Mode::Members { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. } => 2,
+        Mode::Members { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
+        | Mode::AlarmPad { .. } | Mode::AlarmOpen { .. } => 2,
         Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => {
             depth(&Mode::LightDim { slot: *slot, light: *light, on: true, value: 0 }, machine) + 1
         }
@@ -2354,6 +2412,11 @@ fn hold_state(hold: bool) {
 
 /// What shows, for tools that drive the unit's screen: they check where
 /// they are before each step, so a press never lands on the wrong card.
+/// What Home Assistant last said of an alarm command, while it shows.
+fn alarm_note(machine: &Machine) -> Option<&str> {
+    machine.alarm_note.as_ref().map(|(note, _)| note.as_str())
+}
+
 fn mode_state(mode: &Mode) {
     let name = match mode {
         Mode::Chooser(index) => format!("Chooser {index}"),
@@ -2659,6 +2722,45 @@ mod shots {
             temperature: Some(8.4), unit: "°C".into() }) };
         save(&screens::draw(&fonts, &Screen::Glance { glance: &glance, cards: &cards.cards, now: 1_794_172_380 }, None),
              &format!("{out}/b6-glance.png"));
+        let alarm = |state: &str, code: Option<&str>, delay: Option<model::AlarmDelay>| model::AlarmCard {
+            id: "alarm_control_panel.house".into(), name: "House alarm".into(), icon: String::new(), state: state.into(),
+            modes: vec![model::AlarmMode { mode: "home".into(), name: String::new() },
+                        model::AlarmMode { mode: "away".into(), name: "Going out".into() },
+                        model::AlarmMode { mode: "night".into(), name: "Bedtime".into() }],
+            code: code.map(str::to_owned), code_length: Some(4), delay, sensors: vec!["Front door".into()], can_force: true };
+        let now = 1_794_172_380.0;
+        let delay = Some(model::AlarmDelay { ends: now + 14.2, seconds: 30.0 });
+        let disarmed = alarm("disarmed", None, None);
+        let armed = alarm("armed_away", Some("number"), None);
+        let arming = alarm("arming", Some("number"), delay);
+        let pending = alarm("pending", Some("number"), delay);
+        let pending_plain = alarm("pending", Some("number"), None);
+        let triggered = alarm("triggered", Some("number"), None);
+        let mut any_length = armed.clone();
+        any_length.code_length = None;
+        let shots = [
+            ("c1-alarm-disarmed", Screen::AlarmCard { card: &disarmed }),
+            ("c2-alarm-armed", Screen::AlarmCard { card: &armed }),
+            ("c3-alarm-arming", Screen::AlarmView { card: &arming, now, note: None }),
+            ("c4-alarm-pad", Screen::AlarmPad { card: &armed, arm: None, at: 6, entered: 2, waiting: false, note: None,
+                                                locked: None, now }),
+            ("c5-alarm-pad-any-length", Screen::AlarmPad { card: &any_length, arm: None, at: 10, entered: 5, waiting: false,
+                                                           note: None, locked: None, now }),
+            ("c6-alarm-pad-entry", Screen::AlarmPad { card: &pending, arm: None, at: 2, entered: 0, waiting: false,
+                                                      note: Some("Not accepted · 2 tries left"), locked: None, now }),
+            ("c7-alarm-pad-entry-plain", Screen::AlarmPad { card: &pending_plain, arm: None, at: 4, entered: 1,
+                                                            waiting: false, note: None, locked: None, now }),
+            ("c8-alarm-triggered", Screen::AlarmView { card: &triggered, now, note: None }),
+            ("c9-alarm-arm-pad", Screen::AlarmPad { card: &disarmed, arm: Some(&disarmed.modes[1]), at: 4, entered: 4,
+                                                    waiting: true, note: None, locked: None, now }),
+            ("ca-alarm-locked", Screen::AlarmPad { card: &armed, arm: None, at: 4, entered: 0, waiting: false, note: None,
+                                                   locked: Some(27), now }),
+            ("cb-alarm-open", Screen::AlarmOpen { card: &disarmed, arm: &disarmed.modes[1],
+                                                  sensors: &["Back door".to_owned()] }),
+        ];
+        for (name, screen) in &shots {
+            save(&screens::draw(&fonts, screen, None), &format!("{out}/{name}.png"));
+        }
         let mut tunable = lights.lights[0].clone();
         (tunable.kelvin, tunable.kelvins, tunable.hues, tunable.hue) = (Some(2700), Some([2200, 6500]), true, Some(200));
         save(&screens::draw(&fonts, &Screen::LightWarmth { light: &tunable, value: 2700 }, None), &format!("{out}/9b-warmth.png"));

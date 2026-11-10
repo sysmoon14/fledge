@@ -11,7 +11,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::model::{Alert, Card, Cards, Command, Far, Near, Nest, Wake};
+use super::model::{AlarmCard, AlarmResult, Alert, Card, Cards, Code, Command, Far, Near, Nest, Wake};
 use crate::motion::Sensor;
 use crate::logf;
 
@@ -89,6 +89,22 @@ pub const VOLUME_SHOWN: Duration = Duration::from_millis(1500);
 pub const SET_SHOWN: Duration = Duration::from_secs(3);
 /// The minutes a hot water boost runs from the thermostat's menu.
 pub const BOOST_MINUTES: u32 = 60;
+/// An alarm's code pad: the digits round the ring in rotary-phone order,
+/// then (when the code's length isn't known) a ✓ that sends it; the marker
+/// starts on 5.
+pub const DIGITS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+pub const PAD_START: u8 = 4;
+/// The most digits a code takes before it goes by itself.
+pub const CODE_MAX: usize = 12;
+/// How long an alarm command waits for Home Assistant's answer, and how
+/// long what it said shows.
+pub const ALARM_WAIT: Duration = Duration::from_secs(8);
+pub const ALARM_NOTE: Duration = Duration::from_secs(4);
+/// The code entered to arm is kept (in memory only) this long at most, so
+/// one press cancels the exit delay, or arms anyway with a door open.
+pub const CODE_KEPT: Duration = Duration::from_secs(180);
+/// How often an alarm with a countdown or going off is drawn again.
+pub const ALARM_FRAME: Duration = Duration::from_millis(250);
 
 /// A row of the thermostat's own Settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -167,6 +183,8 @@ pub enum Action {
     Power(bool),
     Boost(bool),
     NestDial,
+    /// An alarm armed to one of its modes, by its place in its card's.
+    Arm(u8),
 }
 
 /// The off thermostat's prompt, as the Nest's words, and its choices: on
@@ -221,6 +239,13 @@ pub enum Mode {
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
     Menu { view: Box<Mode>, actions: Vec<Action>, selected: usize },
+    /// An alarm opened: its state, a countdown while one runs.
+    AlarmView { slot: usize },
+    /// Its code pad: to arm to its mode `arm` (by place), else to disarm;
+    /// the marker on digit `at` (10: the ✓), `entered` so far.
+    AlarmPad { slot: usize, arm: Option<u8>, at: u8, entered: Code },
+    /// Arming to `arm` refused with a door or window open: arm anyway?
+    AlarmOpen { slot: usize, arm: u8 },
 }
 
 impl Mode {
@@ -239,7 +264,8 @@ impl Mode {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
             | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
-            | Mode::CoverSet { slot, .. } => Some(Slot::Card(*slot)),
+            | Mode::CoverSet { slot, .. } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
+            | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
             Mode::Thermostat { .. } | Mode::ModePrompt { .. } => Some(Slot::Thermostat),
             Mode::Menu { view, .. } => view.card_slot(),
             _ => None,
@@ -349,6 +375,23 @@ pub struct Machine {
     pub rests: bool,
     /// When the thermostat last saw someone close.
     near_at: Option<Instant>,
+    /// Each alarm's state as last heard, by entity: one coming to need
+    /// whoever's there (its entry delay, going off) takes the screen.
+    alarm_states: std::collections::HashMap<String, String>,
+    alarm_takeover: Option<usize>,
+    /// The code just entered to arm, and when: see CODE_KEPT.
+    alarm_code: Option<(Code, Instant)>,
+    /// The alarm and mode last armed to, for an answer that a door is open.
+    alarm_arming: Option<(usize, u8)>,
+    /// An alarm command sent and not yet answered, since when.
+    pub alarm_wait: Option<Instant>,
+    /// What Home Assistant last said of one, while it shows.
+    pub alarm_note: Option<(String, Instant)>,
+    /// The code locked out after too many tries, until when.
+    pub alarm_locked: Option<Instant>,
+    /// What's open, as arming was refused for it.
+    pub alarm_open: Vec<String>,
+    alarm_drawn: Option<Instant>,
 }
 
 impl Machine {
@@ -358,7 +401,9 @@ impl Machine {
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
-            rests: false, near_at: None, floor: None,
+            rests: false, near_at: None, floor: None, alarm_states: Default::default(), alarm_takeover: None,
+            alarm_code: None, alarm_arming: None, alarm_wait: None, alarm_note: None, alarm_locked: None,
+            alarm_open: Vec::new(), alarm_drawn: None,
         }
     }
 
@@ -443,6 +488,7 @@ impl Machine {
     /// New cards from Home Assistant: keeps the mode if what it shows exists.
     pub fn set_cards(&mut self, cards: Cards, out: &mut Vec<Effect>) {
         self.cards = cards;
+        self.alarms_changed(out);
         let count = self.cards.cards.len();
         let fine = |mode: &Mode, cards: &Cards| match mode {
             Mode::Chooser(index) => *index < count + 2,
@@ -452,6 +498,9 @@ impl Machine {
             Mode::Camera { slot } => matches!(cards.cards.get(*slot), Some(Card::Camera(_))),
             Mode::OptionList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Options(_))),
             Mode::CoverSet { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Cover(_))),
+            Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. } | Mode::AlarmOpen { slot, .. } => {
+                matches!(cards.cards.get(*slot), Some(Card::Alarm(_)))
+            }
             Mode::Members { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(c)) if !c.members.is_empty()),
             Mode::LightDim { slot, light, .. } | Mode::LightWarmth { slot, light, .. }
             | Mode::LightHue { slot, light, .. } => match cards.cards.get(*slot) {
@@ -739,7 +788,8 @@ impl Machine {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
                     Mode::Menu { .. } => MENU_STEP,
                     Mode::LightList { .. } | Mode::OptionList { .. } | Mode::Members { .. }
-                    | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. } => ROW_STEP,
+                    | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
+                    | Mode::AlarmPad { .. } => ROW_STEP,
                     Mode::ClimateSet { .. } | Mode::Thermostat { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
@@ -790,7 +840,7 @@ impl Machine {
                 self.go(mode, out);
             }
             // A scene or a camera isn't opened: that would run it.
-            Wake::Card(slot) if matches!(self.card(slot), Some(Card::Action(_) | Card::Camera(_))) => {
+            Wake::Card(slot) if matches!(self.card(slot), Some(Card::Action(_) | Card::Camera(_) | Card::Alarm(_))) => {
                 self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
             }
             Wake::Card(slot) => self.open(self.place(Slot::Card(slot)), out),
@@ -800,7 +850,7 @@ impl Machine {
     /// A notification from Home Assistant: over whatever shows, the display
     /// woken for it, with a chime; one already showing gives way to it.
     pub fn show_alert(&mut self, alert: Alert, now: Instant, lit: bool, out: &mut Vec<Effect>) {
-        if self.mode == Mode::Idle {
+        if self.mode == Mode::Idle || self.alarm_urgent() {
             return;
         }
         if alert.dismiss {
@@ -893,6 +943,15 @@ impl Machine {
                 }
             }
             Mode::LightHue { value, .. } if (steps < 0 && value == 0) || (steps > 0 && value >= HUE_MAX) => return,
+            // A code pad stops at either end; locked, or waiting, it doesn't turn.
+            Mode::AlarmPad { slot, at, .. } => {
+                let last = self.pad_positions(slot) as i32 - 1;
+                let to = (at as i32 + steps).clamp(0, last);
+                if to == at as i32 || self.alarm_wait.is_some() || self.locked(self.last_input) {
+                    return;
+                }
+            }
+            Mode::AlarmView { .. } | Mode::AlarmOpen { .. } => return,
             _ => {}
         }
         out.push(Effect::Click);
@@ -984,7 +1043,13 @@ impl Machine {
                     self.mode = Mode::SettingSet { setting, value: (value + steps as f64 * step).clamp(low, high) };
                 }
             }
-            Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance => {}
+            Mode::AlarmPad { slot, arm, at, entered } => {
+                let last = self.pad_positions(slot) as i32 - 1;
+                let at = (at as i32 + steps).clamp(0, last) as u8;
+                self.mode = Mode::AlarmPad { slot, arm, at, entered };
+            }
+            Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance
+            | Mode::AlarmView { .. } | Mode::AlarmOpen { .. } => {}
         }
         self.dirty = true;
     }
@@ -1032,6 +1097,8 @@ impl Machine {
                         let open = if card.state == "open" { 100 } else { 0 };
                         Mode::CoverSet { slot, value: card.position.unwrap_or(open) }
                     }
+                    // An alarm does what its state asks: arms, cancels, disarms.
+                    Some(Card::Alarm(_)) => return self.alarm_press(slot, out),
                     Some(Card::Unknown) | None => return,
                 };
                 self.go(mode, out);
@@ -1124,6 +1191,35 @@ impl Machine {
                 self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Open, Action::Close], selected: 0 };
             }
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
+            Mode::AlarmView { slot } => self.alarm_press(slot, out),
+            Mode::AlarmPad { slot, arm, at, mut entered } => {
+                if self.alarm_wait.is_some() || self.locked(self.last_input) {
+                    return;
+                }
+                match DIGITS.get(at as usize) {
+                    Some(&digit) => {
+                        entered.0.push(digit);
+                        self.alarm_note = None;
+                        let length = match self.card(slot) {
+                            Some(Card::Alarm(card)) => card.code_length.map(usize::from),
+                            _ => None,
+                        };
+                        let full = length.is_some_and(|l| entered.0.len() >= l) || entered.0.len() >= CODE_MAX;
+                        self.mode = Mode::AlarmPad { slot, arm, at, entered: entered.clone() };
+                        if full {
+                            self.alarm_send(slot, arm, Some(entered), false, out);
+                        }
+                    }
+                    // The ✓: sends what's entered.
+                    None if !entered.0.is_empty() => self.alarm_send(slot, arm, Some(entered), false, out),
+                    None => {}
+                }
+            }
+            Mode::AlarmOpen { slot, arm } => {
+                let code = self.alarm_code.as_ref().map(|(code, _)| code.clone());
+                self.alarm_send(slot, Some(arm), code, true, out);
+                self.go(Mode::AlarmView { slot }, out);
+            }
             view @ Mode::Thermostat { .. } => {
                 // Its target goes now; then what else it does.
                 if let Some(command) = self.pending.take() {
@@ -1380,6 +1476,19 @@ impl Machine {
                 self.mode = view;
             }
             (Action::NestDial, _) => self.go(Mode::Native, out),
+            (Action::Arm(arm), view @ Mode::AlarmView { slot }) => {
+                let Some(Card::Alarm(card)) = self.card(slot) else { return };
+                if card.wants_digits() {
+                    self.alarm_note = None;
+                    self.go(Mode::AlarmPad { slot, arm: Some(arm), at: PAD_START, entered: Code::default() }, out);
+                } else if card.wants_text() {
+                    self.alarm_note = Some(("Arm it from Home Assistant".into(), self.last_input));
+                    self.mode = view;
+                } else {
+                    self.alarm_send(slot, Some(arm), None, false, out);
+                    self.mode = view;
+                }
+            }
             (Action::Open | Action::Close, view @ Mode::CoverSet { slot, .. }) => {
                 if let Some(Card::Cover(card)) = self.cards.cards.get_mut(slot) {
                     let (id, open) = (card.id.clone(), action == Action::Open);
@@ -1451,6 +1560,24 @@ impl Machine {
             self.dirty = true;
             return;
         }
+        if let Mode::AlarmPad { slot, arm, at, mut entered } = self.mode.clone() {
+            // Held: rubs out the last digit; with none, back to the alarm.
+            out.push(Effect::Click);
+            if entered.0.pop().is_some() && self.alarm_wait.is_none() {
+                self.mode = Mode::AlarmPad { slot, arm, at, entered };
+                self.dirty = true;
+            } else {
+                self.go(Mode::AlarmView { slot }, out);
+            }
+            return;
+        }
+        if let Mode::AlarmOpen { slot, .. } = self.mode {
+            // Held: left disarmed.
+            out.push(Effect::Click);
+            self.alarm_code = None;
+            self.go(Mode::AlarmView { slot }, out);
+            return;
+        }
         let back = match self.mode.clone() {
             // Held: as Cancel.
             Mode::ModePrompt { target, .. } => {
@@ -1497,10 +1624,236 @@ impl Machine {
         }
     }
 
+    fn alarm(&self, slot: usize) -> Option<&AlarmCard> {
+        match self.card(slot) {
+            Some(Card::Alarm(card)) => Some(card),
+            _ => None,
+        }
+    }
+
+    /// How many places an alarm's code pad has: the digits, and the ✓ when
+    /// the code's length isn't known.
+    pub fn pad_positions(&self, slot: usize) -> usize {
+        let known = self.alarm(slot).is_some_and(|card| card.code_length.is_some());
+        DIGITS.len() + usize::from(!known)
+    }
+
+    /// Whether the code is locked out at `now`.
+    pub fn locked(&self, now: Instant) -> bool {
+        self.alarm_locked.is_some_and(|until| now < until)
+    }
+
+    /// Whether what shows is an alarm needing whoever's there.
+    fn alarm_urgent(&self) -> bool {
+        match &self.mode {
+            Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. } | Mode::AlarmOpen { slot, .. } => {
+                self.alarm(*slot).is_some_and(AlarmCard::urgent)
+            }
+            _ => false,
+        }
+    }
+
+    /// An alarm pressed (its card, or opened): what its state asks for.
+    /// Disarmed, its modes to arm to; arming, the exit delay cancelled
+    /// (with the code just entered, if it took one); armed, coming in or
+    /// going off, disarmed, through the code pad if it wants a code.
+    fn alarm_press(&mut self, slot: usize, out: &mut Vec<Effect>) {
+        let Some(card) = self.alarm(slot).cloned() else { return };
+        if self.alarm_wait.is_some() {
+            return self.go(Mode::AlarmView { slot }, out);
+        }
+        let pad = Mode::AlarmPad { slot, arm: None, at: PAD_START, entered: Code::default() };
+        match card.state.as_str() {
+            "disarmed" if !card.modes.is_empty() => {
+                let mut actions = vec![Action::Back];
+                actions.extend((0..card.modes.len().min(5)).map(|i| Action::Arm(i as u8)));
+                self.go(Mode::Menu { view: Box::new(Mode::AlarmView { slot }), actions, selected: 0 }, out);
+            }
+            "arming" => {
+                match self.alarm_code.as_ref().map(|(code, _)| code.clone()) {
+                    Some(code) => self.alarm_send(slot, None, Some(code), false, out),
+                    None if card.wants_digits() => return self.go(pad, out),
+                    None if card.wants_text() => {
+                        self.alarm_note = Some(("Disarm it from Home Assistant".into(), self.last_input));
+                    }
+                    None => self.alarm_send(slot, None, None, false, out),
+                }
+                self.go(Mode::AlarmView { slot }, out);
+            }
+            _ if card.armed().is_some() || card.urgent() => {
+                if card.wants_digits() {
+                    self.alarm_note = None;
+                    return self.go(pad, out);
+                }
+                if card.wants_text() {
+                    self.alarm_note = Some(("Disarm it from Home Assistant".into(), self.last_input));
+                } else {
+                    self.alarm_send(slot, None, None, false, out);
+                }
+                self.go(Mode::AlarmView { slot }, out);
+            }
+            _ => self.go(Mode::AlarmView { slot }, out),
+        }
+    }
+
+    /// Sends an alarm command: armed to mode `arm` (by place), else
+    /// disarmed; waits for Home Assistant's answer.
+    fn alarm_send(&mut self, slot: usize, arm: Option<u8>, code: Option<Code>, force: bool, out: &mut Vec<Effect>) {
+        let Some(card) = self.alarm(slot) else { return };
+        let id = card.id.clone();
+        let mode = arm.and_then(|i| card.modes.get(i as usize)).map(|m| m.mode.clone());
+        let command = match arm {
+            Some(i) => {
+                let Some(mode) = mode else { return };
+                if let Some(code) = &code {
+                    self.alarm_code = Some((code.clone(), self.last_input));
+                }
+                self.alarm_arming = Some((slot, i));
+                Command::AlarmArm { id, mode, code, force }
+            }
+            None => Command::AlarmDisarm { id, code },
+        };
+        out.push(Effect::Send(command));
+        self.alarm_wait = Some(self.last_input);
+        self.alarm_note = None;
+        self.dirty = true;
+    }
+
+    /// Home Assistant's answer to an alarm command: done, back to the alarm;
+    /// the code not taken, the pad cleared to try again (or locked out); a
+    /// door or window open, whether to arm anyway.
+    pub fn alarm_result(&mut self, result: AlarmResult, now: Instant, out: &mut Vec<Effect>) {
+        let Some(slot) = self.cards.cards.iter().position(|c| matches!(c, Card::Alarm(a) if a.id == result.alarm)) else {
+            return;
+        };
+        self.alarm_wait = None;
+        self.dirty = true;
+        let on_it = self.mode.card_slot() == Some(Slot::Card(slot));
+        if result.ok {
+            self.alarm_note = None;
+            self.alarm_locked = None;
+            if on_it && matches!(self.mode, Mode::AlarmPad { .. } | Mode::AlarmOpen { .. }) {
+                self.go(Mode::AlarmView { slot }, out);
+            }
+            return;
+        }
+        self.alarm_locked = result.locked_for.filter(|s| *s > 0).map(|s| now + Duration::from_secs(s));
+        let note = match result.error.as_str() {
+            "open_sensors" => {
+                let arm = self.alarm_arming.filter(|(s, _)| *s == slot).map(|(_, arm)| arm);
+                if let (Some(arm), true) = (arm, self.alarm(slot).is_some_and(|c| c.can_force)) {
+                    self.alarm_open = result.sensors;
+                    out.push(Effect::ClickLow);
+                    return self.go(Mode::AlarmOpen { slot, arm }, out);
+                }
+                match result.sensors.first() {
+                    Some(sensor) => format!("Not armed: {sensor} is open"),
+                    None => "Not armed: something is open".into(),
+                }
+            }
+            "locked" => "Too many tries".into(),
+            "rejected" => match result.tries {
+                Some(tries) if tries > 0 => format!("Not accepted · {tries} {} left", if tries == 1 { "try" } else { "tries" }),
+                _ => "Not accepted".into(),
+            },
+            _ => "That didn't work: see Home Assistant".into(),
+        };
+        out.push(Effect::ClickLow);
+        self.alarm_note = Some((note, now));
+        if let Mode::AlarmPad { slot: s, arm, at, .. } = self.mode.clone() {
+            if s == slot {
+                self.mode = Mode::AlarmPad { slot, arm, at, entered: Code::default() };
+            }
+        }
+    }
+
+    /// The cards came: an alarm whose state changed to need whoever's there
+    /// takes the screen (at the next tick); the code kept for the exit
+    /// delay goes once it's over.
+    fn alarms_changed(&mut self, out: &mut Vec<Effect>) {
+        let mut seen = std::collections::HashMap::new();
+        let alarms: Vec<(usize, AlarmCard)> = self.cards.cards.iter().enumerate()
+            .filter_map(|(slot, card)| match card {
+                Card::Alarm(card) => Some((slot, card.clone())),
+                _ => None,
+            }).collect();
+        for (slot, card) in alarms {
+            let before = self.alarm_states.get(&card.id);
+            if before != Some(&card.state) && card.urgent() {
+                self.alarm_takeover = Some(slot);
+            }
+            if before.is_some_and(|b| b == "arming") && card.state != "arming"
+                && !matches!(self.mode, Mode::AlarmOpen { .. }) {
+                self.alarm_code = None;
+            }
+            // Disarmed elsewhere (Home Assistant's app): the pad has nothing
+            // left to do.
+            if card.state == "disarmed" && matches!(self.mode, Mode::AlarmPad { slot: s, arm: None, .. } if s == slot) {
+                self.go(Mode::AlarmView { slot }, out);
+            }
+            seen.insert(card.id, card.state);
+        }
+        self.alarm_states = seen;
+    }
+
+    /// An alarm's time passing: taking the screen as it needs whoever's
+    /// there, an answer not coming, the kept code going, and its countdown
+    /// or its going off drawn as they move.
+    fn alarm_tick(&mut self, now: Instant, lit: bool, out: &mut Vec<Effect>) {
+        if let Some(slot) = self.alarm_takeover.take() {
+            let card = self.alarm(slot).cloned();
+            let on_pad = matches!(self.mode, Mode::AlarmPad { slot: s, arm: None, .. } if s == slot);
+            if let (Some(card), false, false) = (card, on_pad, self.mode == Mode::Idle) {
+                logf!("ui: the alarm is {}: its screen", card.state);
+                if !lit {
+                    out.push(Effect::WakeDisplay);
+                    self.lighting = Some(now + LIGHTING);
+                }
+                self.alert = None;
+                self.alert_until = None;
+                self.settings_open = false;
+                self.last_input = now;
+                let pad = card.state == "pending" && card.wants_digits();
+                self.go(if pad { Mode::AlarmPad { slot, arm: None, at: PAD_START, entered: Code::default() } }
+                        else { Mode::AlarmView { slot } }, out);
+            }
+        }
+        if self.alarm_wait.is_some_and(|at| now.duration_since(at) >= ALARM_WAIT) {
+            self.alarm_wait = None;
+            self.alarm_note = Some(("No answer from Home Assistant".into(), now));
+            if let Mode::AlarmPad { slot, arm, at, .. } = self.mode.clone() {
+                self.mode = Mode::AlarmPad { slot, arm, at, entered: Code::default() };
+            }
+            self.dirty = true;
+        }
+        if self.alarm_note.as_ref().is_some_and(|(_, at)| now.duration_since(*at) >= ALARM_NOTE) {
+            self.alarm_note = None;
+            self.dirty = true;
+        }
+        if self.alarm_locked.is_some_and(|until| now >= until) {
+            self.alarm_locked = None;
+            self.dirty = true;
+        }
+        if self.alarm_code.as_ref().is_some_and(|(_, at)| now.duration_since(*at) >= CODE_KEPT) {
+            self.alarm_code = None;
+        }
+        let moving = match &self.mode {
+            Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. } => self.alarm(*slot).is_some_and(|card| {
+                matches!(card.state.as_str(), "arming" | "pending" | "triggered" | "disarming")
+            }) || self.locked(now),
+            _ => false,
+        };
+        if moving && self.alarm_drawn.is_none_or(|at| now.duration_since(at) >= ALARM_FRAME) {
+            self.alarm_drawn = Some(now);
+            self.dirty = true;
+        }
+    }
+
     /// Time passing: going back when left alone, keeping nlclient's display
     /// awake under a card, sending what turning asked for. `home_dial` says
     /// whether nlclient shows its home dial (only asked for when it matters).
     pub fn tick(&mut self, now: Instant, lit: bool, home_dial: &mut dyn FnMut() -> bool, out: &mut Vec<Effect>) {
+        self.alarm_tick(now, lit, out);
         if let Mode::Alert { id, .. } = &self.mode {
             let dark = !lit && !self.lighting.is_some_and(|until| now < until);
             if dark || self.alert_until.is_some_and(|until| now >= until) {
@@ -1565,7 +1918,10 @@ impl Machine {
         // from them, stay until then (going back is the hand's), and the
         // journey starts again from what waking shows.
         let timeout = self.cards.card_idle().unwrap_or(CARD_IDLE);
+        let urgent = self.alarm_urgent();
         let back = match self.mode {
+            // An alarm coming in or going off stays until it's dealt with.
+            _ if urgent => None,
             Mode::Glance if idle >= GLANCE_IDLE && !self.holds_screen() => Some(Mode::Home),
             Mode::Glance | Mode::Alert { .. } => None,
             Mode::Camera { .. } if idle >= timeout.max(CAMERA_IDLE) => Some(self.left_alone()),
@@ -2059,6 +2415,165 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Chooser(1));
         assert_eq!(Rig::sends(&rig.long()), vec![Command::Open("cover.blind".into())],
                    "long press on its card: open again, as it's closing");
+    }
+
+    /// An alarm card (Alarmo's, wanting a code only to disarm, as the
+    /// Nest's own) in `state`, with what else it says.
+    fn alarm_json(state: &str, extra: &str) -> String {
+        let code = if state == "disarmed" { "null" } else { r#""number""# };
+        format!(r#"{{"cards":[{{"kind":"alarm","id":"alarm_control_panel.house","name":"House","state":"{state}",
+            "modes":[{{"mode":"home","name":"Home"}},{{"mode":"away","name":"Going out"}}],"code":{code},
+            "code_length":4,"can_force":true{extra}}}]}}"#)
+    }
+
+    fn alarm(state: &str, extra: &str) -> Cards {
+        Cards::parse(alarm_json(state, extra).as_bytes()).unwrap()
+    }
+
+    /// On the alarm's card, among the cards.
+    fn alarm_rig(state: &str, extra: &str) -> Rig {
+        let mut rig = deck_of(alarm_json(state, extra).as_bytes());
+        rig.turn(CARD_STEP);
+        assert_eq!(rig.machine.mode, Mode::Chooser(1));
+        rig
+    }
+
+    impl Rig {
+        /// Turns the code pad's marker to each digit of `code` and presses.
+        fn enter(&mut self, code: &str) -> Vec<Effect> {
+            let mut out = Vec::new();
+            for digit in code.chars() {
+                let Mode::AlarmPad { at, .. } = self.machine.mode else { panic!("not on the pad: {:?}", self.machine.mode) };
+                let to = DIGITS.iter().position(|d| *d == digit).unwrap() as i32;
+                self.now += TURN_KEPT;
+                self.rows(to - at as i32);
+                out.extend(self.press());
+            }
+            out
+        }
+
+        fn answer(&mut self, json: &str) -> Vec<Effect> {
+            let mut out = vec![];
+            self.machine.alarm_result(AlarmResult::parse(json.as_bytes()).unwrap(), self.now, &mut out);
+            out
+        }
+    }
+
+    fn pad(arm: Option<u8>, at: u8, entered: &str) -> Mode {
+        Mode::AlarmPad { slot: 0, arm, at, entered: Code(entered.into()) }
+    }
+
+    #[test]
+    fn an_alarm_arms_from_its_modes_without_a_code_when_it_wants_none() {
+        let mut rig = alarm_rig("disarmed", "");
+        rig.press();
+        let Mode::Menu { actions, .. } = &rig.machine.mode else { panic!("{:?}", rig.machine.mode) };
+        assert_eq!(actions, &vec![Action::Back, Action::Arm(0), Action::Arm(1)], "Back, then its modes");
+        rig.rows(2);
+        let sent = Rig::sends(&rig.press());
+        assert_eq!(sent, vec![Command::AlarmArm { id: "alarm_control_panel.house".into(), mode: "away".into(), code: None,
+                                                   force: false }]);
+        assert_eq!(rig.machine.mode, Mode::AlarmView { slot: 0 });
+        assert!(rig.machine.alarm_wait.is_some(), "waiting for Home Assistant");
+        rig.answer(r#"{"alarm":"alarm_control_panel.house","ok":true}"#);
+        assert!(rig.machine.alarm_wait.is_none());
+    }
+
+    #[test]
+    fn an_armed_alarm_disarms_with_its_code_from_the_pad() {
+        let mut rig = alarm_rig("armed_away", "");
+        rig.press();
+        assert_eq!(rig.machine.mode, pad(None, PAD_START, ""), "the pad, on 5");
+        rig.turn(-ROW_STEP * 9);
+        assert_eq!(rig.machine.mode, pad(None, 0, ""), "it stops at 1");
+        rig.enter("12");
+        assert_eq!(rig.machine.mode, pad(None, 1, "12"));
+        rig.long();
+        assert_eq!(rig.machine.mode, pad(None, 1, "1"), "a long press rubs out a digit");
+        let sent = Rig::sends(&rig.enter("234"));
+        assert_eq!(sent, vec![Command::AlarmDisarm { id: "alarm_control_panel.house".into(), code: Some(Code("1234".into())) }],
+                   "the fourth digit sends it");
+        rig.turn(ROW_STEP);
+        assert_eq!(rig.machine.mode, pad(None, 3, "1234"), "waiting, the pad holds still");
+        rig.answer(r#"{"alarm":"alarm_control_panel.house","ok":true}"#);
+        assert_eq!(rig.machine.mode, Mode::AlarmView { slot: 0 });
+    }
+
+    #[test]
+    fn a_code_not_accepted_clears_the_pad_and_too_many_lock_it() {
+        let mut rig = alarm_rig("armed_home", "");
+        rig.press();
+        rig.enter("9999");
+        rig.answer(r#"{"alarm":"alarm_control_panel.house","ok":false,"error":"rejected","tries":2}"#);
+        assert_eq!(rig.machine.mode, pad(None, 8, ""));
+        assert_eq!(rig.machine.alarm_note.as_ref().map(|n| n.0.as_str()), Some("Not accepted · 2 tries left"));
+        rig.enter("9999");
+        rig.answer(r#"{"alarm":"alarm_control_panel.house","ok":false,"error":"locked","locked_for":30}"#);
+        assert!(rig.machine.locked(rig.now));
+        assert!(Rig::sends(&rig.press()).is_empty() && rig.machine.mode == pad(None, 8, ""), "locked: presses do nothing");
+        rig.wait(Duration::from_secs(31));
+        assert!(!rig.machine.locked(rig.now));
+        assert_eq!(rig.machine.mode, Mode::Home, "left alone, the pad times out as any screen does");
+    }
+
+    #[test]
+    fn without_its_length_a_tick_after_0_sends_the_code() {
+        let json = alarm_json("armed_away", "").replace(r#""code_length":4,"#, "");
+        let mut rig = deck_of(json.as_bytes());
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.enter("12345");
+        assert_eq!(rig.machine.pad_positions(0), 11);
+        rig.now += TURN_KEPT;
+        let sent = Rig::sends(&{ rig.rows(10); rig.press() });
+        assert_eq!(sent, vec![Command::AlarmDisarm { id: "alarm_control_panel.house".into(), code: Some(Code("12345".into())) }]);
+    }
+
+    #[test]
+    fn the_entry_delay_takes_the_screen_into_the_pad_and_going_off_shows_it() {
+        let mut rig = Rig::with(alarm("armed_away", ""));
+        rig.lit = false;
+        rig.machine.set_cards(alarm("pending", r#","delay":{"ends":2000000000,"seconds":30}"#), &mut vec![]);
+        let out = rig.tick();
+        assert!(out.contains(&Effect::WakeDisplay), "the dark display lit");
+        assert_eq!(rig.machine.mode, pad(None, PAD_START, ""));
+        rig.lit = true;
+        rig.wait(Duration::from_secs(60));
+        assert_eq!(rig.machine.mode, pad(None, PAD_START, ""), "it doesn't time out while the delay runs");
+        rig.machine.set_cards(alarm("triggered", r#","sensors":["Front door"]"#), &mut vec![]);
+        rig.tick();
+        assert_eq!(rig.machine.mode, pad(None, PAD_START, ""), "already at the pad: it stays");
+        rig.long();
+        assert_eq!(rig.machine.mode, Mode::AlarmView { slot: 0 });
+        rig.machine.set_cards(alarm("disarmed", ""), &mut vec![]);
+        rig.wait(CARD_IDLE + SNAP);
+        assert_eq!(rig.machine.mode, Mode::Home, "dealt with: it times out as any card does");
+    }
+
+    #[test]
+    fn a_door_open_asks_to_arm_anyway_with_the_code_already_entered() {
+        let json = alarm_json("disarmed", "").replace(r#""code":null"#, r#""code":"number""#);
+        let mut rig = deck_of(json.as_bytes());
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.rows(1);
+        rig.press();
+        assert_eq!(rig.machine.mode, pad(Some(0), PAD_START, ""), "a code to arm: the pad");
+        rig.enter("1234");
+        rig.answer(r#"{"alarm":"alarm_control_panel.house","ok":false,"error":"open_sensors","sensors":["Back door"]}"#);
+        assert_eq!(rig.machine.mode, Mode::AlarmOpen { slot: 0, arm: 0 });
+        assert_eq!(rig.machine.alarm_open, vec!["Back door".to_owned()]);
+        let sent = Rig::sends(&rig.press());
+        assert_eq!(sent, vec![Command::AlarmArm { id: "alarm_control_panel.house".into(), mode: "home".into(),
+                                                   code: Some(Code("1234".into())), force: true }]);
+    }
+
+    #[test]
+    fn an_alarm_code_is_never_printed() {
+        assert_eq!(format!("{:?}", pad(None, 0, "1234")), "AlarmPad { slot: 0, arm: None, at: 0, entered: Code(4 digits) }");
+        let command = Command::AlarmDisarm { id: "alarm_control_panel.house".into(), code: Some(Code("1234".into())) };
+        assert_eq!(command.payload()["code"], "1234");
+        assert!(!command.logged().to_string().contains("1234"));
     }
 
     #[test]
