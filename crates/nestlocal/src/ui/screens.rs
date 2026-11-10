@@ -1825,42 +1825,49 @@ fn mode_place(k: usize, n: usize) -> (usize, f32, f32) {
     (tick, HALF + radius * angle.sin(), HALF - radius * angle.cos())
 }
 
-/// An alarm's modes to arm to, as its code pad's digits are: round the
-/// ring, the marker under the one chosen, and it large in the middle with
-/// what a press does. Nothing shows through from behind.
-fn alarm_modes(fonts: &Fonts, card: &AlarmCard, selected: usize) -> Canvas {
-    let n = card.modes.len() + 1;
+/// One option of a device's: its icon, its name, and what a press on it does.
+pub struct Opt<'a> {
+    pub icon: &'a str,
+    pub name: &'a str,
+    pub under: &'a str,
+}
+
+/// A device's options as the code pad's digits are: round the top of the
+/// ring, the marker under the one chosen, and it large in the middle in
+/// the device's colour (`accent`), with what a press does. Back (an option
+/// like any other) is white. The device's name sits low, in the ring's gap.
+/// Nothing shows through from behind.
+pub fn options(fonts: &Fonts, title: &str, items: &[Opt], selected: usize, accent: [u8; 3]) -> Canvas {
+    let n = items.len().max(1);
     let selected = selected.min(n - 1);
-    let mode = selected.checked_sub(1).and_then(|i| card.modes.get(i));
-    let accent = if mode.is_some() { ALARM_ARMED } else { WHITE };
     let mut p = paint::face(BLACK);
+    let Some(chosen) = items.get(selected) else { return p };
+    let back = chosen.icon == "mdi:arrow-left";
+    let tint = if back { WHITE } else { accent };
     let (mark, _, _) = mode_place(selected, n);
-    let lit = if mode.is_some() { ALARM_ARMED } else { GREY };
-    paint::ring(&mut p, |i| if i.abs_diff(mark) <= 3 { colour(lit) } else { colour(DIM) }, &[mark]);
-    for k in 0..n {
+    paint::ring(&mut p, |i| if i.abs_diff(mark) <= 3 { colour(if back { GREY } else { accent }) } else { colour(DIM) }, &[mark]);
+    for (k, item) in items.iter().enumerate() {
         let (_, x, y) = mode_place(k, n);
-        let name = match k.checked_sub(1).and_then(|i| card.modes.get(i)) {
-            Some(m) => alarm_mode_icon(&m.mode),
-            None => "mdi:arrow-left",
-        };
-        let chosen = k == selected;
-        icon(&mut p, name, "alarm", x, y, if chosen { 40.0 } else { 32.0 }, if chosen { WHITE } else { GREY });
+        let on = k == selected;
+        icon(&mut p, item.icon, "option", x, y, if on { 40.0 } else { 32.0 }, if on { WHITE } else { GREY });
     }
-    let name = if card.name.is_empty() { "Alarm" } else { card.name.as_str() };
-    // Its name low, in the ring's gap: the options round the top have the
-    // rest.
-    let label = paint::fit(fonts.medium(), 18.0, name, 0.0, 200.0);
+    icon(&mut p, chosen.icon, "option", HALF, 212.0, 80.0, tint);
+    let name = paint::fit(fonts.medium(), 42.0, chosen.name, 0.0, 320.0);
+    paint::text(&mut p, fonts.medium(), 42.0, HALF, 300.0, &name, 0.0, WHITE);
+    line(&mut p, fonts, 340.0, chosen.under, GREY);
+    let label = paint::fit(fonts.medium(), 18.0, title, 0.0, 200.0);
     paint::text(&mut p, fonts.medium(), 18.0, HALF, 404.0, &label, 0.0, DIM);
-    let (big_icon, word, under) = match mode {
-        Some(m) => (alarm_mode_icon(&m.mode), card.mode_name(&m.mode),
-                    if card.wants_digits() { "Press, then the code" } else { "Press to arm" }),
-        None => ("mdi:arrow-left", "Back".to_owned(), "To the alarm"),
-    };
-    icon(&mut p, big_icon, "alarm", HALF, 212.0, 80.0, accent);
-    let word = paint::fit(fonts.medium(), 42.0, &word, 0.0, 320.0);
-    paint::text(&mut p, fonts.medium(), 42.0, HALF, 300.0, &word, 0.0, WHITE);
-    line(&mut p, fonts, 340.0, under, GREY);
     p
+}
+
+/// An alarm's modes to arm to, Back first.
+fn alarm_modes(fonts: &Fonts, card: &AlarmCard, selected: usize) -> Canvas {
+    let names: Vec<String> = card.modes.iter().map(|m| card.mode_name(&m.mode)).collect();
+    let under = if card.wants_digits() { "Press, then the code" } else { "Press to arm" };
+    let mut items = vec![Opt { icon: "mdi:arrow-left", name: "Back", under: "To the alarm" }];
+    items.extend(card.modes.iter().zip(&names).map(|(m, name)| Opt { icon: alarm_mode_icon(&m.mode), name, under }));
+    let title = if card.name.is_empty() { "Alarm" } else { card.name.as_str() };
+    options(fonts, title, &items, selected, ALARM_ARMED)
 }
 
 /// Arming refused with a door or window open: what's open, and arming

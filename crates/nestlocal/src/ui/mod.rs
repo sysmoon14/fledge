@@ -2819,6 +2819,69 @@ mod shots {
             save(&screens::draw(&fonts, &Screen::ModePrompt { nest: off, selected }, None),
                  &format!("{out}/t11-nest-off-prompt-{selected}.png"));
         }
+        // Every device's options, as the ring of actions draws them over its
+        // screen (before) and as the option chooser would (after), one
+        // option chosen: o<n>-<device>-before.png and -after.png.
+        use screens::Opt;
+        let back = |under| Opt { icon: "mdi:arrow-left", name: "Back", under };
+        let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
+            state: "open".into(), position: Some(60), positionable: true };
+        let mut presets = climate.clone();
+        presets.presets = vec!["eco".into(), "away".into(), "boost".into()];
+        let lamp_light = &lights.lights[0];
+        // A device, its screen, its name, its ring of actions, its options,
+        // its colour, and the one chosen.
+        type Menu<'a> = (&'a str, Screen<'a>, &'a str, Vec<(&'a str, &'a str)>, Vec<Opt<'a>>, [u8; 3], usize);
+        let menus: Vec<Menu> = vec![
+            ("lamp", Screen::LightDim { light: lamp_light, on: true, value: 60 }, "Reading Lamp",
+             vec![("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off"), ("mdi:white-balance-sunny", "Warmth"),
+                  ("mdi:palette", "Colour")],
+             vec![back("To the cards"), Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn it off" },
+                  Opt { icon: "mdi:white-balance-sunny", name: "Warmth", under: "Press to set its white" },
+                  Opt { icon: "mdi:palette", name: "Colour", under: "Press to choose a colour" }],
+             lamp_light.colour(), 1),
+            ("group", Screen::LightDim { light: &lights.lights[2], on: true, value: 40 }, "Bedroom Lights",
+             vec![("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off"), ("mdi:format-list-bulleted", "Each light")],
+             vec![back("To the cards"), Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn them off" },
+                  Opt { icon: "mdi:format-list-bulleted", name: "Each light", under: "Press to switch each one" }],
+             lights.lights[2].colour(), 2),
+            ("speaker", Screen::MediaCard { card: media, volume: Some(35), progress: Some(0.4) }, "Bedroom speaker",
+             vec![("mdi:arrow-left", "Back to devices"), ("mdi:pause", "Pause"), ("mdi:skip-previous", "Previous"),
+                  ("mdi:skip-next", "Next")],
+             vec![back("To the cards"), Opt { icon: "mdi:pause", name: "Pause", under: "Press to pause" },
+                  Opt { icon: "mdi:skip-previous", name: "Previous", under: "Press for the track before" },
+                  Opt { icon: "mdi:skip-next", name: "Next", under: "Press for the next track" }],
+             paint::MEDIA, 3),
+            ("thermostat", Screen::NestSet { nest: &heating, target: 21.5, pulse: None, setting: false, shown: None }, "Thermostat",
+             vec![("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"), ("mdi:power", "Turn off"),
+                  ("mdi:water-boiler", "Stop the boost"), ("mdi:thermometer", "Nest's own dial")],
+             vec![back("To the cards"), Opt { icon: "mdi:leaf", name: "Eco", under: "Press to turn Eco on" },
+                  Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn the heating off" },
+                  Opt { icon: "mdi:water-boiler", name: "Stop boost", under: "Press to stop the hot water" },
+                  Opt { icon: "mdi:thermometer", name: "Nest's dial", under: "Press for the Nest's own screens" }],
+             paint::HEAT, 1),
+            ("presets", Screen::ClimateSet { card: &presets, target: 21.5 }, "Living room",
+             vec![("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"), ("mdi:airplane", "Away"), ("mdi:fire", "Boost")],
+             vec![back("To the cards"), Opt { icon: "mdi:leaf", name: "Eco", under: "Press for its eco preset" },
+                  Opt { icon: "mdi:airplane", name: "Away", under: "Press for its away preset" },
+                  Opt { icon: "mdi:fire", name: "Boost", under: "Press for its boost preset" }],
+             paint::HEAT, 2),
+            ("cover", Screen::CoverSet { card: &blind, value: 60 }, "Bedroom blind",
+             vec![("mdi:arrow-left", "Back to devices"), ("mdi:arrow-up-bold", "Open"), ("mdi:arrow-down-bold", "Close")],
+             vec![back("To the cards"), Opt { icon: "mdi:arrow-up-bold", name: "Open", under: "Press to open it fully" },
+                  Opt { icon: "mdi:arrow-down-bold", name: "Close", under: "Press to close it" }],
+             [120, 170, 255], 2),
+            ("scene", Screen::ActionCard { card: &scene, done: false, opened: true }, "Goodnight",
+             vec![("mdi:arrow-left", "Back to devices"), ("mdi:play", "Run")],
+             vec![back("To the cards"), Opt { icon: "mdi:play", name: "Run", under: "Press to run it" }],
+             [255, 196, 87], 1),
+        ];
+        for (i, (device, view, title, old, new, accent, selected)) in menus.iter().enumerate() {
+            let mut before = screens::draw(&fonts, view, None);
+            screens::menu(&mut before, &fonts, title, old, *selected);
+            save(&before, &format!("{out}/o{i}-{device}-before.png"));
+            save(&screens::options(&fonts, title, new, *selected, *accent), &format!("{out}/o{i}-{device}-after.png"));
+        }
         // A switch's own screen, on and off.
         let fan = model::Light { id: "switch.fan".into(), name: "Fan".into(), on: true, dimmable: false, ..Default::default() };
         save(&screens::draw(&fonts, &Screen::LightDim { light: &fan, on: true, value: 100 }, None), &format!("{out}/s1-switch-on.png"));
