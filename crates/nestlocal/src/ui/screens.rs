@@ -752,9 +752,6 @@ fn theme_pick(fonts: &Fonts, fledge: bool) -> Canvas {
     p
 }
 
-/// Fledge's chosen menu button.
-const MENU_ON: [u8; 3] = [138, 190, 255];
-
 /// Eco's leaf green, as the Nest shows it.
 const ECO: [u8; 3] = [76, 175, 80];
 /// A setting that's on, as the Nest's own Settings show it.
@@ -1257,40 +1254,6 @@ fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fon
     let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
     ring_on(p, live.as_deref_mut(), |i| if i <= top { colour(MEDIA) } else { colour(DIM) }, &[top]);
     big_number_on(p, live, fonts, value as f64, false, "", WHITE);
-}
-
-/// A device's ring of actions, as the Nest's own press menu: the device's
-/// screen dimmed, the actions' icons around the ring from lower left, the
-/// chosen one blue and named under the device's name.
-pub fn menu(p: &mut Canvas, fonts: &Fonts, title: &str, items: &[(&str, &str)], selected: usize) {
-    // Dark enough that what's under (a dial's large figures) doesn't show
-    // through the menu's own words.
-    paint::dim(p, 0.03);
-    let fledge = paint::fledge();
-    for (i, (name, _)) in items.iter().enumerate() {
-        let angle = (-135.0 + 55.0 * i as f32).to_radians();
-        let chosen = i == selected;
-        if fledge {
-            // Fledge's: round buttons on an arc, the chosen one filled.
-            let (x, y) = (HALF + 166.0 * angle.sin(), HALF - 166.0 * angle.cos());
-            let r = if chosen { 41.0 } else { 34.0 };
-            paint::circle(p, x, y, r, if chosen { colour(MENU_ON) } else { alpha(WHITE, 0.09) });
-            icon(p, name, "back", x, y, if chosen { 36.0 } else { 30.0 }, if chosen { [8, 24, 48] } else { [195, 204, 213] });
-            continue;
-        }
-        let (x, y) = (HALF + 178.0 * angle.sin(), HALF - 178.0 * angle.cos());
-        let colour = if chosen { [26, 115, 232] } else { [138, 143, 152] };
-        icon(p, name, "back", x, y, if chosen { 52.0 } else { 44.0 }, colour);
-    }
-    // What the chosen icon does is what matters here: large, in the
-    // highlight's colour; the device it's for small above it.
-    let title = paint::fit(fonts.medium(), 19.0, title, 0.2, 260.0);
-    paint::text(p, fonts.medium(), 19.0, HALF, 214.0, &title, 0.2, GREY);
-    if let Some((_, label)) = items.get(selected) {
-        let tint = if fledge { MENU_ON } else { [74, 144, 226] };
-        let label = paint::fit(fonts.regular(), 32.0, label, 0.0, 280.0);
-        paint::text(p, fonts.regular(), 32.0, HALF, 258.0, &label, 0.0, tint);
-    }
 }
 
 /// The glance: the time large, the date, the weather and what's on.
@@ -1858,6 +1821,22 @@ pub fn options(fonts: &Fonts, title: &str, items: &[Opt], selected: usize, accen
     let label = paint::fit(fonts.medium(), 18.0, title, 0.0, 200.0);
     paint::text(&mut p, fonts.medium(), 18.0, HALF, 404.0, &label, 0.0, DIM);
     p
+}
+
+/// A device's colour in its options: a light's own, a speaker's teal,
+/// heating's orange (cooling's blue), a cover's blue, a scene's gold.
+pub fn accent(screen: &Screen) -> [u8; 3] {
+    match screen {
+        Screen::LightDim { light, .. } => light.colour(),
+        Screen::Volume { .. } | Screen::MediaCard { .. } => MEDIA,
+        Screen::ClimateSet { card, .. } if card.mode == "cool" => COOL,
+        Screen::NestSet { nest, .. } if nest.card.mode == "cool" => COOL,
+        Screen::ClimateSet { .. } | Screen::NestSet { .. } => HEAT,
+        Screen::CoverSet { .. } => COVER,
+        Screen::ActionCard { .. } => ACTION,
+        Screen::AlarmView { .. } => ALARM_ARMED,
+        _ => WHITE,
+    }
 }
 
 /// An alarm's modes to arm to, Back first.

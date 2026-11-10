@@ -1217,16 +1217,6 @@ fn icon_mask(icon: Icon, size: f32) -> (usize, Vec<u8>) {
     (side as usize, pixmap.data().as_chunks::<4>().0.iter().map(|p| p[3]).collect())
 }
 
-/// Dims the whole canvas to `keep` of its brightness: under a menu.
-pub fn dim(canvas: &mut Canvas, keep: f32) {
-    let keep = (keep.clamp(0.0, 1.0) * 256.0) as u16;
-    for pixel in canvas.pixmap.data_mut().as_chunks_mut::<4>().0 {
-        for channel in &mut pixel[..3] {
-            *channel = ((*channel as u16 * keep) >> 8) as u8;
-        }
-    }
-}
-
 /// A hint on a frame for the panel (device::Frame): a pill low on the
 /// display, its text centred.
 pub fn hint(frame: &mut Vec<u8>, fonts: &Fonts, text: &str) {

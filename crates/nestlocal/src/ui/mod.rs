@@ -1814,12 +1814,13 @@ impl Runtime {
         })
     }
 
-    /// A device's ring of actions, over its dimmed screen.
+    /// A device's options (its ring of actions), round the ring, the one
+    /// chosen large in the middle in the device's colour.
     fn draw_menu(&mut self, view: &Mode, actions: &[Action], selected: usize) {
         let Some(screen) = Self::screen(&self.machine, view) else { return };
         let title = match &screen {
             Screen::LightDim { light, .. } => light.name.clone(),
-            Screen::Volume { card, .. } => card.name.clone(),
+            Screen::Volume { card, .. } | Screen::MediaCard { card, .. } => card.name.clone(),
             Screen::ClimateSet { card, .. } => card.name.clone(),
             Screen::CoverSet { card, .. } => card.name.clone(),
             Screen::NestSet { nest, .. } => nest.card.name.clone(),
@@ -1831,38 +1832,10 @@ impl Runtime {
             Screen::ClimateSet { card, .. } => card.presets.clone(),
             _ => Vec::new(),
         };
-        let mut canvas = screens::draw(&self.fonts, &screen, None);
-        let items: Vec<(String, String)> = actions.iter().map(|action| {
-            let (icon, label) = match action {
-                Action::Back => ("mdi:arrow-left", "Back to devices"),
-                Action::Switch(true) => ("mdi:power", "Turn on"),
-                Action::Switch(false) => ("mdi:power", "Turn off"),
-                Action::Play(true) => ("mdi:play", "Play"),
-                Action::Play(false) => ("mdi:pause", "Pause"),
-                Action::Warmth => ("mdi:white-balance-sunny", "Warmth"),
-                Action::Colour => ("mdi:palette", "Colour"),
-                Action::Next => ("mdi:skip-next", "Next"),
-                Action::Previous => ("mdi:skip-previous", "Previous"),
-                Action::Members => ("mdi:format-list-bulleted", "Each light"),
-                Action::Open => ("mdi:arrow-up-bold", "Open"),
-                Action::Close => ("mdi:arrow-down-bold", "Close"),
-                Action::Eco(true) => ("mdi:leaf", "Eco"),
-                Action::Eco(false) => ("mdi:leaf", "Leave Eco"),
-                Action::Power(true) => ("mdi:power", "Turn heating on"),
-                Action::Power(false) => ("mdi:power", "Turn off"),
-                Action::Boost(true) => ("mdi:water-boiler", "Boost hot water, 1 hour"),
-                Action::Boost(false) => ("mdi:water-boiler", "Stop the boost"),
-                Action::NestDial => ("mdi:thermometer", "Nest's own dial"),
-                Action::Run => ("mdi:play", "Run"),
-                Action::Preset(i) => {
-                    let name = presets.get(*i as usize).cloned().unwrap_or_default();
-                    return (screens::preset_icon(&name).to_owned(), screens::capitalise(&name.replace('_', " ")));
-                }
-            };
-            (icon.to_owned(), label.to_owned())
-        }).collect();
-        let items: Vec<(&str, &str)> = items.iter().map(|(i, l)| (i.as_str(), l.as_str())).collect();
-        screens::menu(&mut canvas, &self.fonts, &title, &items, selected);
+        let items: Vec<(String, String, String)> = actions.iter().map(|action| menu_item(*action, &presets)).collect();
+        let options: Vec<screens::Opt> = items.iter()
+            .map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
+        let canvas = screens::options(&self.fonts, &title, &options, selected, screens::accent(&screen));
         let frame = device::frame(canvas);
         // The device's screen redraws whole when the menu closes.
         self.live = None;
@@ -2412,6 +2385,40 @@ fn hold_state(hold: bool) {
 
 /// What shows, for tools that drive the unit's screen: they check where
 /// they are before each step, so a press never lands on the wrong card.
+/// An option of a device's: its icon, its name, and what a press on it
+/// does. `presets`: a thermostat's, by their place (Action::Preset).
+fn menu_item(action: Action, presets: &[String]) -> (String, String, String) {
+    let (icon, name, under) = match action {
+        Action::Back => ("mdi:arrow-left", "Back", "To the cards"),
+        Action::Switch(true) => ("mdi:power", "Turn on", "Press to turn it on"),
+        Action::Switch(false) => ("mdi:power", "Turn off", "Press to turn it off"),
+        Action::Play(true) => ("mdi:play", "Play", "Press to play"),
+        Action::Play(false) => ("mdi:pause", "Pause", "Press to pause"),
+        Action::Warmth => ("mdi:white-balance-sunny", "Warmth", "Press to set its white"),
+        Action::Colour => ("mdi:palette", "Colour", "Press to choose a colour"),
+        Action::Next => ("mdi:skip-next", "Next", "Press for the next track"),
+        Action::Previous => ("mdi:skip-previous", "Previous", "Press for the track before"),
+        Action::Members => ("mdi:format-list-bulleted", "Each light", "Press to switch each one"),
+        Action::Open => ("mdi:arrow-up-bold", "Open", "Press to open it fully"),
+        Action::Close => ("mdi:arrow-down-bold", "Close", "Press to close it"),
+        Action::Eco(true) => ("mdi:leaf", "Eco", "Press to turn Eco on"),
+        Action::Eco(false) => ("mdi:leaf", "Leave Eco", "Press to turn Eco off"),
+        Action::Power(true) => ("mdi:power", "Heating on", "Press to turn the heating on"),
+        Action::Power(false) => ("mdi:power", "Turn off", "Press to turn the heating off"),
+        Action::Boost(true) => ("mdi:water-boiler", "Boost", "Press for an hour of hot water"),
+        Action::Boost(false) => ("mdi:water-boiler", "Stop boost", "Press to stop the hot water"),
+        Action::NestDial => ("mdi:thermometer", "Nest's dial", "Press for the Nest's own screens"),
+        Action::Run => ("mdi:play", "Run", "Press to run it"),
+        Action::Preset(i) => {
+            let preset = presets.get(i as usize).cloned().unwrap_or_default();
+            let name = screens::capitalise(&preset.replace('_', " "));
+            let under = format!("Press for its {} preset", preset.replace('_', " "));
+            return (screens::preset_icon(&preset).to_owned(), name, under);
+        }
+    };
+    (icon.to_owned(), name.to_owned(), under.to_owned())
+}
+
 /// What Home Assistant last said of an alarm command, while it shows.
 fn alarm_note(machine: &Machine) -> Option<&str> {
     machine.alarm_note.as_ref().map(|(note, _)| note.as_str())
@@ -2686,9 +2693,9 @@ mod shots {
         for (name, screen) in shots {
             save(&screens::draw(&fonts, &screen, None), &format!("{out}/{name}.png"));
         }
-        let mut menu = screens::draw(&fonts, &Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }, None);
-        screens::menu(&mut menu, &fonts, "Reading Lamp", &[("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off")], 0);
-        save(&menu, &format!("{out}/9-menu.png"));
+        let lamp_options = [screens::Opt { icon: "mdi:arrow-left", name: "Back", under: "To the cards" },
+                            screens::Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn it off" }];
+        save(&screens::options(&fonts, "Reading Lamp", &lamp_options, 0, lights.lights[0].colour()), &format!("{out}/9-menu.png"));
         let lamp = model::LightsCard { name: "Reading Lamp".into(), icon: String::new(), lights: vec![lights.lights[0].clone()], members: vec![] };
         save(&screens::draw(&fonts, &Screen::LightsCard { card: &lamp }, None), &format!("{out}/1b-lamp.png"));
         let scene = model::ActionCard { id: "scene.goodnight".into(), name: "Goodnight".into(), icon: "mdi:weather-night".into() };
@@ -2809,78 +2816,58 @@ mod shots {
             save(&screens::draw(&fonts, &Screen::NestCard { nest, now }, None), &format!("{out}/{name}.png"));
         }
         save(&screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 22.0, pulse: None, setting: true, shown: None }, None), &format!("{out}/t5-nest-set.png"));
-        let mut menu = screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 21.5, pulse: None, setting: false, shown: None }, None);
-        screens::menu(&mut menu, &fonts, "Thermostat", &[("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"),
-            ("mdi:power", "Turn off"), ("mdi:water-boiler", "Stop the boost"), ("mdi:thermometer", "Nest's own dial")], 1);
-        save(&menu, &format!("{out}/t6-nest-menu.png"));
+        let nest_options: Vec<(String, String, String)> = [Action::Back, Action::Eco(true), Action::Power(false), Action::Boost(false),
+            Action::NestDial].into_iter().map(|a| menu_item(a, &[])).collect();
+        let nest_options: Vec<screens::Opt> = nest_options.iter().map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
+        save(&screens::options(&fonts, "Thermostat", &nest_options, 1, paint::HEAT), &format!("{out}/t6-nest-menu.png"));
         // Off: the ring turned asks for a mode.
         let off = &shots[3].1;
         for selected in [machine::PROMPT_ON, machine::PROMPT_CANCEL] {
             save(&screens::draw(&fonts, &Screen::ModePrompt { nest: off, selected }, None),
                  &format!("{out}/t11-nest-off-prompt-{selected}.png"));
         }
-        // Every device's options, as the ring of actions draws them over its
-        // screen (before) and as the option chooser would (after), one
-        // option chosen: o<n>-<device>-before.png and -after.png.
+        // Every device's options, one chosen: o<n>-<device>.png.
         use screens::Opt;
         let back = |under| Opt { icon: "mdi:arrow-left", name: "Back", under };
-        let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
-            state: "open".into(), position: Some(60), positionable: true };
-        let mut presets = climate.clone();
-        presets.presets = vec!["eco".into(), "away".into(), "boost".into()];
         let lamp_light = &lights.lights[0];
-        // A device, its screen, its name, its ring of actions, its options,
-        // its colour, and the one chosen.
-        type Menu<'a> = (&'a str, Screen<'a>, &'a str, Vec<(&'a str, &'a str)>, Vec<Opt<'a>>, [u8; 3], usize);
+        // A device, its name, its options, its colour, and the one chosen.
+        type Menu<'a> = (&'a str, &'a str, Vec<Opt<'a>>, [u8; 3], usize);
         let menus: Vec<Menu> = vec![
-            ("lamp", Screen::LightDim { light: lamp_light, on: true, value: 60 }, "Reading Lamp",
-             vec![("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off"), ("mdi:white-balance-sunny", "Warmth"),
-                  ("mdi:palette", "Colour")],
+            ("lamp", "Reading Lamp",
              vec![back("To the cards"), Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn it off" },
                   Opt { icon: "mdi:white-balance-sunny", name: "Warmth", under: "Press to set its white" },
                   Opt { icon: "mdi:palette", name: "Colour", under: "Press to choose a colour" }],
              lamp_light.colour(), 1),
-            ("group", Screen::LightDim { light: &lights.lights[2], on: true, value: 40 }, "Bedroom Lights",
-             vec![("mdi:arrow-left", "Back to devices"), ("mdi:power", "Turn off"), ("mdi:format-list-bulleted", "Each light")],
+            ("group", "Bedroom Lights",
              vec![back("To the cards"), Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn them off" },
                   Opt { icon: "mdi:format-list-bulleted", name: "Each light", under: "Press to switch each one" }],
              lights.lights[2].colour(), 2),
-            ("speaker", Screen::MediaCard { card: media, volume: Some(35), progress: Some(0.4) }, "Bedroom speaker",
-             vec![("mdi:arrow-left", "Back to devices"), ("mdi:pause", "Pause"), ("mdi:skip-previous", "Previous"),
-                  ("mdi:skip-next", "Next")],
+            ("speaker", "Bedroom speaker",
              vec![back("To the cards"), Opt { icon: "mdi:pause", name: "Pause", under: "Press to pause" },
                   Opt { icon: "mdi:skip-previous", name: "Previous", under: "Press for the track before" },
                   Opt { icon: "mdi:skip-next", name: "Next", under: "Press for the next track" }],
              paint::MEDIA, 3),
-            ("thermostat", Screen::NestSet { nest: &heating, target: 21.5, pulse: None, setting: false, shown: None }, "Thermostat",
-             vec![("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"), ("mdi:power", "Turn off"),
-                  ("mdi:water-boiler", "Stop the boost"), ("mdi:thermometer", "Nest's own dial")],
+            ("thermostat", "Thermostat",
              vec![back("To the cards"), Opt { icon: "mdi:leaf", name: "Eco", under: "Press to turn Eco on" },
                   Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn the heating off" },
                   Opt { icon: "mdi:water-boiler", name: "Stop boost", under: "Press to stop the hot water" },
                   Opt { icon: "mdi:thermometer", name: "Nest's dial", under: "Press for the Nest's own screens" }],
              paint::HEAT, 1),
-            ("presets", Screen::ClimateSet { card: &presets, target: 21.5 }, "Living room",
-             vec![("mdi:arrow-left", "Back to devices"), ("mdi:leaf", "Eco"), ("mdi:airplane", "Away"), ("mdi:fire", "Boost")],
+            ("presets", "Living room",
              vec![back("To the cards"), Opt { icon: "mdi:leaf", name: "Eco", under: "Press for its eco preset" },
                   Opt { icon: "mdi:airplane", name: "Away", under: "Press for its away preset" },
                   Opt { icon: "mdi:fire", name: "Boost", under: "Press for its boost preset" }],
              paint::HEAT, 2),
-            ("cover", Screen::CoverSet { card: &blind, value: 60 }, "Bedroom blind",
-             vec![("mdi:arrow-left", "Back to devices"), ("mdi:arrow-up-bold", "Open"), ("mdi:arrow-down-bold", "Close")],
+            ("cover", "Bedroom blind",
              vec![back("To the cards"), Opt { icon: "mdi:arrow-up-bold", name: "Open", under: "Press to open it fully" },
                   Opt { icon: "mdi:arrow-down-bold", name: "Close", under: "Press to close it" }],
              [120, 170, 255], 2),
-            ("scene", Screen::ActionCard { card: &scene, done: false, opened: true }, "Goodnight",
-             vec![("mdi:arrow-left", "Back to devices"), ("mdi:play", "Run")],
+            ("scene", "Goodnight",
              vec![back("To the cards"), Opt { icon: "mdi:play", name: "Run", under: "Press to run it" }],
              [255, 196, 87], 1),
         ];
-        for (i, (device, view, title, old, new, accent, selected)) in menus.iter().enumerate() {
-            let mut before = screens::draw(&fonts, view, None);
-            screens::menu(&mut before, &fonts, title, old, *selected);
-            save(&before, &format!("{out}/o{i}-{device}-before.png"));
-            save(&screens::options(&fonts, title, new, *selected, *accent), &format!("{out}/o{i}-{device}-after.png"));
+        for (i, (device, title, new, accent, selected)) in menus.iter().enumerate() {
+            save(&screens::options(&fonts, title, new, *selected, *accent), &format!("{out}/o{i}-{device}.png"));
         }
         // A switch's own screen, on and off.
         let fan = model::Light { id: "switch.fan".into(), name: "Fan".into(), on: true, dimmable: false, ..Default::default() };
