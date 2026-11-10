@@ -22,6 +22,7 @@ mod motion;
 mod mqtt;
 mod mqtttls;
 mod nlsettings;
+mod occupancy;
 mod schedule;
 mod sensor;
 mod store;
@@ -205,6 +206,9 @@ async fn run(config: flags::Config) {
     });
     if let (Some(bridge), Some(sensor)) = (&bridge, &sensor) {
         bridge.attach_sensor(sensor.clone());
+    }
+    if let Some(bridge) = &bridge {
+        occupancy::watch(bridge.occupancy.clone(), occupancy::EVENT_LOG.into());
     }
     let mut broker_port = None;
     if let (false, Some(bridge)) = (config.mqtt.is_empty(), &bridge) {
