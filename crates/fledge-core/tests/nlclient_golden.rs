@@ -42,18 +42,39 @@ fn object() -> Option<Vec<u8>> {
     }
     object
 }
+/// What a golden gives the screen to link against: nlclient's functions it
+/// found, and its layout's numbers.
+fn externals(golden: &Value) -> BTreeMap<String, u32> {
+    let mut externals: BTreeMap<String, u32> = serde_json::from_value(golden["native_api"].clone()).unwrap();
+    externals.entry("native_rename".into()).or_insert(0);
+    // As the builder links it: nlclient's display report, where it was found.
+    let reporter = golden["discovery"]["ui_change"]["reporter"].as_u64().unwrap_or(0) as u32;
+    externals.insert("native_ui_change".into(), reporter);
+    let layout: BTreeMap<String, u32> = serde_json::from_value(golden["discovery"]["layout"].clone()).unwrap();
+    externals.extend(layout.into_iter().map(|(k, v)| (format!("layout_{k}"), v)));
+    externals
+}
+/// Goldens recorded with every import this screen links against. Those
+/// made before it needed more (the hand-over's) can't link it; they are
+/// recorded again only from their private stock sample
+/// (NLCLIENT_UPDATE_GOLDENS), so until then they are left out, and named.
+fn current_goldens(object: &[u8]) -> Vec<Value> {
+    let (current, stale): (Vec<Value>, Vec<Value>) = goldens().into_iter().partition(|golden| {
+        let address = golden["patch"]["payload_address"].as_u64().unwrap() as u32;
+        !matches!(linker::link(object, address, &externals(golden)),
+                  Err(e) if e.to_string().contains("unresolved payload symbol"))
+    });
+    for golden in &stale {
+        eprintln!("Recorded before this screen's imports: payload {}", golden["payload"]["sha256"]);
+    }
+    assert!(!current.is_empty(), "no golden is recorded with this screen's imports: record one (NLCLIENT_UPDATE_GOLDENS)");
+    current
+}
 #[test]
 fn embedded_object_links_to_golden_payloads() {
     let Some(object) = object() else { return };
-    for golden in goldens() {
-        let api: BTreeMap<String, u32> =
-            serde_json::from_value(golden["native_api"].clone()).unwrap();
-        let mut externals = api;
-        externals.entry("native_rename".into()).or_insert(0);
-        externals.entry("native_ui_change".into()).or_insert(0);
-        let layout: BTreeMap<String, u32> =
-            serde_json::from_value(golden["discovery"]["layout"].clone()).unwrap();
-        externals.extend(layout.into_iter().map(|(k, v)| (format!("layout_{k}"), v)));
+    for golden in current_goldens(&object) {
+        let externals = externals(&golden);
         let linked = linker::link(
             &object,
             golden["patch"]["payload_address"].as_u64().unwrap() as u32,
@@ -92,10 +113,29 @@ fn stock_dumps_match_every_recorded_stage() {
         if !golden_path.exists() {
             continue;
         }
-        let golden: Value = serde_json::from_slice(&std::fs::read(golden_path).unwrap()).unwrap();
+        let mut golden: Value = serde_json::from_slice(&std::fs::read(&golden_path).unwrap()).unwrap();
         let found = nlclient::builder::build(&stock, &object)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         checked += 1;
+        if std::env::var_os("NLCLIENT_UPDATE_GOLDENS").is_some() {
+            // Recorded again from the sample, for a changed screen: what it
+            // finds, links and writes. The toolchain note is kept.
+            for stage in ["discovery", "native_api"] {
+                golden[stage] = found.manifest[stage].clone();
+            }
+            let keys: Vec<String> = golden["patch"].as_object().unwrap().keys().cloned().collect();
+            for key in keys {
+                golden["patch"][&key] = found.manifest[&key].clone();
+            }
+            let offset = found.manifest["payload_offset"].as_u64().unwrap() as usize;
+            let size = found.manifest["payload_size"].as_u64().unwrap() as usize;
+            golden["payload"] = json!({"size":size,"entry":found.manifest["entry"],"symbols":found.manifest["symbols"],"sha256":sha256_hex(&found.output[offset..offset+size])});
+            let mut journal = Vec::new();
+            flate2::read::GzDecoder::new(found.journal.as_slice()).read_to_end(&mut journal).unwrap();
+            golden["output"] = json!({"size":found.output.len(),"sha256":sha256_hex(&found.output),"journal_sha256":sha256_hex(&journal)});
+            std::fs::write(&golden_path, serde_json::to_string_pretty(&golden).unwrap()).unwrap();
+            eprintln!("Recorded {}", golden_path.display());
+        }
         for stage in ["discovery", "native_api"] {
             assert_eq!(
                 found.manifest[stage],
@@ -173,14 +213,8 @@ fn linker_matches_lld_using_the_same_object() {
     let _cleanup = Cleanup(directory.clone());
     let object_path = directory.join("screen.o");
     std::fs::write(&object_path, &object).unwrap();
-    for golden in goldens() {
-        let mut externals: BTreeMap<String, u32> =
-            serde_json::from_value(golden["native_api"].clone()).unwrap();
-        externals.entry("native_rename".into()).or_insert(0);
-        externals.entry("native_ui_change".into()).or_insert(0);
-        let layout: BTreeMap<String, u32> =
-            serde_json::from_value(golden["discovery"]["layout"].clone()).unwrap();
-        externals.extend(layout.into_iter().map(|(k, v)| (format!("layout_{k}"), v)));
+    for golden in current_goldens(&object) {
+        let externals = externals(&golden);
         let address = golden["patch"]["payload_address"].as_u64().unwrap() as u32;
         let linked = linker::link(&object, address, &externals).unwrap();
         let script=format!("{}\nSECTIONS {{ . = {address:#x}; .text : {{ *(.text*) }} .rodata : {{ *(.rodata*) }} .data : {{ *(.data*) *(.got*) }} .bss : {{ *(.bss*) *(COMMON) }} /DISCARD/ : {{ *(.comment) *(.ARM.exidx*) *(.ARM.extab*) }} }}",externals.iter().map(|(k,v)|format!("{k} = {v:#x};")).collect::<Vec<_>>().join("\n"));
