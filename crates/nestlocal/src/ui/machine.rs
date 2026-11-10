@@ -184,8 +184,6 @@ pub enum Action {
     Power(bool),
     Boost(bool),
     NestDial,
-    /// An alarm armed to one of its modes, by its place in its card's.
-    Arm(u8),
     /// A scene, script or button run.
     Run,
 }
@@ -246,6 +244,9 @@ pub enum Mode {
     ActionView { slot: usize },
     /// An alarm opened: its state, a countdown while one runs.
     AlarmView { slot: usize },
+    /// Its modes to arm to round the ring, Back first: `selected` 0 is Back,
+    /// then its modes in order.
+    AlarmModes { slot: usize, selected: usize },
     /// Its code pad: to arm to its mode `arm` (by place), else to disarm;
     /// the marker on digit `at` (10: the ✓), `entered` so far.
     AlarmPad { slot: usize, arm: Option<u8>, at: u8, entered: Code },
@@ -270,6 +271,7 @@ impl Mode {
             | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
             | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
+            | Mode::AlarmModes { slot, .. }
             | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
             Mode::Thermostat { .. } | Mode::ModePrompt { .. } => Some(Slot::Thermostat),
             Mode::Menu { view, .. } => view.card_slot(),
@@ -505,6 +507,9 @@ impl Machine {
             Mode::CoverSet { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Cover(_))),
             Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. } | Mode::AlarmOpen { slot, .. } => {
                 matches!(cards.cards.get(*slot), Some(Card::Alarm(_)))
+            }
+            Mode::AlarmModes { slot, selected } => {
+                matches!(cards.cards.get(*slot), Some(Card::Alarm(a)) if *selected <= a.modes.len())
             }
             Mode::ActionView { slot } => matches!(cards.cards.get(*slot), Some(Card::Action(_))),
             Mode::Members { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(c)) if !c.members.is_empty()),
@@ -795,7 +800,7 @@ impl Machine {
                     Mode::Menu { .. } => MENU_STEP,
                     Mode::LightList { .. } | Mode::OptionList { .. } | Mode::Members { .. }
                     | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
-                    | Mode::AlarmPad { .. } => ROW_STEP,
+                    | Mode::AlarmPad { .. } | Mode::AlarmModes { .. } => ROW_STEP,
                     Mode::ClimateSet { .. } | Mode::Thermostat { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
@@ -957,6 +962,12 @@ impl Machine {
                     return;
                 }
             }
+            Mode::AlarmModes { slot, selected } => {
+                let last = self.alarm(slot).map_or(0, |card| card.modes.len()) as i32;
+                if (selected as i32 + steps).clamp(0, last) == selected as i32 || self.alarm_wait.is_some() {
+                    return;
+                }
+            }
             Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } => return,
             _ => {}
         }
@@ -1053,6 +1064,10 @@ impl Machine {
                 let last = self.pad_positions(slot) as i32 - 1;
                 let at = (at as i32 + steps).clamp(0, last) as u8;
                 self.mode = Mode::AlarmPad { slot, arm, at, entered };
+            }
+            Mode::AlarmModes { slot, selected } => {
+                let last = self.alarm(slot).map_or(0, |card| card.modes.len()) as i32;
+                self.mode = Mode::AlarmModes { slot, selected: (selected as i32 + steps).clamp(0, last) as usize };
             }
             Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance
             | Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } => {}
@@ -1192,6 +1207,8 @@ impl Machine {
             }
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
             Mode::AlarmView { slot } => self.alarm_press(slot, out),
+            Mode::AlarmModes { slot, selected: 0 } => self.go(Mode::AlarmView { slot }, out),
+            Mode::AlarmModes { slot, selected } => self.alarm_arm(slot, (selected - 1) as u8, out),
             view @ Mode::ActionView { .. } => {
                 self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Run], selected: 0 };
             }
@@ -1483,19 +1500,6 @@ impl Machine {
                 self.run(slot, out);
                 self.mode = view;
             }
-            (Action::Arm(arm), view @ Mode::AlarmView { slot }) => {
-                let Some(Card::Alarm(card)) = self.card(slot) else { return };
-                if card.wants_digits() {
-                    self.alarm_note = None;
-                    self.go(Mode::AlarmPad { slot, arm: Some(arm), at: PAD_START, entered: Code::default() }, out);
-                } else if card.wants_text() {
-                    self.alarm_note = Some(("Arm it from Home Assistant".into(), self.last_input));
-                    self.mode = view;
-                } else {
-                    self.alarm_send(slot, Some(arm), None, false, out);
-                    self.mode = view;
-                }
-            }
             (Action::Open | Action::Close, view @ Mode::CoverSet { slot, .. }) => {
                 if let Some(Card::Cover(card)) = self.cards.cards.get_mut(slot) {
                     let (id, open) = (card.id.clone(), action == Action::Open);
@@ -1578,6 +1582,11 @@ impl Machine {
             } else {
                 self.go(Mode::AlarmView { slot }, out);
             }
+            return;
+        }
+        if let Mode::AlarmModes { slot, .. } = self.mode {
+            out.push(Effect::Click);
+            self.go(Mode::AlarmView { slot }, out);
             return;
         }
         if let Mode::AlarmOpen { slot, .. } = self.mode {
@@ -1683,9 +1692,7 @@ impl Machine {
         let pad = Mode::AlarmPad { slot, arm: None, at: PAD_START, entered: Code::default() };
         match card.state.as_str() {
             "disarmed" if !card.modes.is_empty() => {
-                let mut actions = vec![Action::Back];
-                actions.extend((0..card.modes.len().min(5)).map(|i| Action::Arm(i as u8)));
-                self.go(Mode::Menu { view: Box::new(Mode::AlarmView { slot }), actions, selected: 0 }, out);
+                self.go(Mode::AlarmModes { slot, selected: 0 }, out);
             }
             "arming" => {
                 match self.alarm_code.as_ref().map(|(code, _)| code.clone()) {
@@ -1712,6 +1719,23 @@ impl Machine {
             }
             _ => self.go(Mode::AlarmView { slot }, out),
         }
+    }
+
+    /// A mode chosen to arm to: the code pad first if the alarm wants a
+    /// code, else armed now, its own screen showing it come about.
+    fn alarm_arm(&mut self, slot: usize, arm: u8, out: &mut Vec<Effect>) {
+        let Some(card) = self.alarm(slot) else { return };
+        if card.wants_digits() {
+            self.alarm_note = None;
+            self.go(Mode::AlarmPad { slot, arm: Some(arm), at: PAD_START, entered: Code::default() }, out);
+            return;
+        }
+        if card.wants_text() {
+            self.alarm_note = Some(("Arm it from Home Assistant".into(), self.last_input));
+        } else {
+            self.alarm_send(slot, Some(arm), None, false, out);
+        }
+        self.go(Mode::AlarmView { slot }, out);
     }
 
     /// Sends an alarm command: armed to mode `arm` (by place), else
@@ -2495,9 +2519,9 @@ mod tests {
     fn an_alarm_arms_from_its_modes_without_a_code_when_it_wants_none() {
         let mut rig = alarm_rig("disarmed", "");
         rig.press();
-        let Mode::Menu { actions, .. } = &rig.machine.mode else { panic!("{:?}", rig.machine.mode) };
-        assert_eq!(actions, &vec![Action::Back, Action::Arm(0), Action::Arm(1)], "Back, then its modes");
-        rig.rows(2);
+        assert_eq!(rig.machine.mode, Mode::AlarmModes { slot: 0, selected: 0 }, "its modes, on Back");
+        rig.rows(5);
+        assert_eq!(rig.machine.mode, Mode::AlarmModes { slot: 0, selected: 2 }, "Back, then its two modes: it stops there");
         let sent = Rig::sends(&rig.press());
         assert_eq!(sent, vec![Command::AlarmArm { id: "alarm_control_panel.house".into(), mode: "away".into(), code: None,
                                                    force: false }]);

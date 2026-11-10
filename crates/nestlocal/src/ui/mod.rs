@@ -1788,6 +1788,10 @@ impl Runtime {
                 }
                 _ => return None,
             },
+            Mode::AlarmModes { slot, selected } => match card(*slot)? {
+                Card::Alarm(card) => Screen::AlarmModes { card, selected: *selected },
+                _ => return None,
+            },
             Mode::AlarmOpen { slot, arm } => match card(*slot)? {
                 Card::Alarm(card) => Screen::AlarmOpen { card, arm: card.modes.get(*arm as usize)?, sensors: &machine.alarm_open },
                 _ => return None,
@@ -1823,10 +1827,6 @@ impl Runtime {
             Screen::ActionCard { card, .. } => card.name.clone(),
             _ => String::new(),
         };
-        let alarm = match &screen {
-            Screen::AlarmView { card, .. } => Some(*card),
-            _ => None,
-        };
         let presets = match &screen {
             Screen::ClimateSet { card, .. } => card.presets.clone(),
             _ => Vec::new(),
@@ -1854,13 +1854,6 @@ impl Runtime {
                 Action::Boost(false) => ("mdi:water-boiler", "Stop the boost"),
                 Action::NestDial => ("mdi:thermometer", "Nest's own dial"),
                 Action::Run => ("mdi:play", "Run"),
-                Action::Arm(i) => {
-                    let mode = alarm.and_then(|card| card.modes.get(*i as usize).map(|m| (card, m)));
-                    let (icon, name) = mode.map_or(("mdi:shield-lock", String::new()), |(card, m)| {
-                        (screens::alarm_mode_icon(&m.mode), card.mode_name(&m.mode))
-                    });
-                    return (icon.to_owned(), name);
-                }
                 Action::Preset(i) => {
                     let name = presets.get(*i as usize).cloned().unwrap_or_default();
                     return (screens::preset_icon(&name).to_owned(), screens::capitalise(&name.replace('_', " ")));
@@ -2179,7 +2172,7 @@ fn depth(mode: &Mode, machine: &Machine) -> u8 {
             _ => 1,
         },
         Mode::Members { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
-        | Mode::AlarmPad { .. } | Mode::AlarmOpen { .. } => 2,
+        | Mode::AlarmPad { .. } | Mode::AlarmOpen { .. } | Mode::AlarmModes { .. } => 2,
         Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => {
             depth(&Mode::LightDim { slot: *slot, light: *light, on: true, value: 0 }, machine) + 1
         }
@@ -2768,6 +2761,11 @@ mod shots {
         ];
         for (name, screen) in &shots {
             save(&screens::draw(&fonts, screen, None), &format!("{out}/{name}.png"));
+        }
+        // The alarm's modes to arm to, each chosen in turn.
+        for selected in 0..=disarmed.modes.len() {
+            save(&screens::draw(&fonts, &Screen::AlarmModes { card: &disarmed, selected }, None),
+                 &format!("{out}/m{selected}-alarm-modes.png"));
         }
         // Each state of an alarm's card among the cards, and opened.
         let states = ["disarmed", "armed_home", "armed_away", "armed_night", "arming", "pending", "triggered", "unavailable"];

@@ -40,6 +40,9 @@ pub enum Screen<'a> {
     /// seconds the code is locked out for.
     AlarmPad { card: &'a AlarmCard, arm: Option<&'a AlarmMode>, at: usize, entered: usize, waiting: bool,
                note: Option<&'a str>, locked: Option<u64>, now: f64 },
+    /// Its modes to arm to round the ring, Back first, `selected` large in
+    /// the middle.
+    AlarmModes { card: &'a AlarmCard, selected: usize },
     /// Arming refused with `sensors` open: arm to `arm` anyway?
     AlarmOpen { card: &'a AlarmCard, arm: &'a AlarmMode, sensors: &'a [String] },
     /// The time (`now`, Unix seconds), the weather and what's on.
@@ -147,6 +150,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
             alarm_pad(fonts, card, *arm, *at, *entered, *waiting, *note, *locked, *now)
         }
         Screen::AlarmOpen { card, arm, sensors } => alarm_open(fonts, card, arm, sensors),
+        Screen::AlarmModes { card, selected } => alarm_modes(fonts, card, *selected),
         Screen::Glance { glance, cards, now } => glance_screen(fonts, glance, cards, *now),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
@@ -1808,6 +1812,54 @@ fn alarm_pad(fonts: &Fonts, card: &AlarmCard, arm: Option<&AlarmMode>, at: usize
         };
         line(&mut p, fonts, 404.0, hint, GREY);
     }
+    p
+}
+
+/// Where an alarm's option `k` of `n` (Back, then its modes) sits: round
+/// the top of the ring, centred, 20 ticks apart.
+fn mode_place(k: usize, n: usize) -> (usize, f32, f32) {
+    let middle = (TICKS - 1) as f32 / 2.0;
+    let tick = (middle + (k as f32 - (n - 1) as f32 / 2.0) * 20.0).round().clamp(4.0, (TICKS - 5) as f32) as usize;
+    let angle = paint::tick_angle(tick, TICKS).to_radians();
+    let radius = if paint::fledge() { 172.0 } else { 150.0 };
+    (tick, HALF + radius * angle.sin(), HALF - radius * angle.cos())
+}
+
+/// An alarm's modes to arm to, as its code pad's digits are: round the
+/// ring, the marker under the one chosen, and it large in the middle with
+/// what a press does. Nothing shows through from behind.
+fn alarm_modes(fonts: &Fonts, card: &AlarmCard, selected: usize) -> Canvas {
+    let n = card.modes.len() + 1;
+    let selected = selected.min(n - 1);
+    let mode = selected.checked_sub(1).and_then(|i| card.modes.get(i));
+    let accent = if mode.is_some() { ALARM_ARMED } else { WHITE };
+    let mut p = paint::face(BLACK);
+    let (mark, _, _) = mode_place(selected, n);
+    let lit = if mode.is_some() { ALARM_ARMED } else { GREY };
+    paint::ring(&mut p, |i| if i.abs_diff(mark) <= 3 { colour(lit) } else { colour(DIM) }, &[mark]);
+    for k in 0..n {
+        let (_, x, y) = mode_place(k, n);
+        let name = match k.checked_sub(1).and_then(|i| card.modes.get(i)) {
+            Some(m) => alarm_mode_icon(&m.mode),
+            None => "mdi:arrow-left",
+        };
+        let chosen = k == selected;
+        icon(&mut p, name, "alarm", x, y, if chosen { 40.0 } else { 32.0 }, if chosen { WHITE } else { GREY });
+    }
+    let name = if card.name.is_empty() { "Alarm" } else { card.name.as_str() };
+    // Its name low, in the ring's gap: the options round the top have the
+    // rest.
+    let label = paint::fit(fonts.medium(), 18.0, name, 0.0, 200.0);
+    paint::text(&mut p, fonts.medium(), 18.0, HALF, 404.0, &label, 0.0, DIM);
+    let (big_icon, word, under) = match mode {
+        Some(m) => (alarm_mode_icon(&m.mode), card.mode_name(&m.mode),
+                    if card.wants_digits() { "Press, then the code" } else { "Press to arm" }),
+        None => ("mdi:arrow-left", "Back".to_owned(), "To the alarm"),
+    };
+    icon(&mut p, big_icon, "alarm", HALF, 212.0, 80.0, accent);
+    let word = paint::fit(fonts.medium(), 42.0, &word, 0.0, 320.0);
+    paint::text(&mut p, fonts.medium(), 42.0, HALF, 300.0, &word, 0.0, WHITE);
+    line(&mut p, fonts, 340.0, under, GREY);
     p
 }
 
