@@ -72,13 +72,9 @@ jobs:
       - name: Submodules
         run: git submodule update --init --depth 1 platform/diamond3/uboot/upstream platform/common/doom/doomgeneric
 
-      # The OMAP boards' x-loader and the j49's kernel build in Docker
-      # containers of their own, so here on the runner; build-firmware.sh then
-      # finds them up to date.
-      - name: The j49's x-loader and kernel
-        run: |
-          sh platform/j49/xloader.sh build/j49
-          sh platform/j49/kernel.sh build/j49
+      # The 1st and 2nd generation's x-loader and kernel aren't built: the app
+      # turns those Nests away (device::unsupported_thermostat), and their old
+      # Ubuntu build containers no longer reach Ubuntu's archive.
 
       - name: Everything else, in the build image
         env:
