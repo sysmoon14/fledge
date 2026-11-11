@@ -35,14 +35,16 @@ then hands it the rest of your home:
 - **Home Assistant on the thermostat's screen.** Walk up, and your devices
   show zoomed out around the thermostat: turn to browse, press to open. Dim
   lights, set their warmth and colour, set other heating zones, turn a
-  speaker up and see what's playing, all on the ring, with the Nest's own clicks.
+  speaker up and see what's playing, arm and disarm your alarm with its code
+  entered on the ring, all with the Nest's own clicks.
 - **A thermostat card and Settings of its own.** The thermostat's dial,
   Eco, heating on or off and a hot water boost, and its everyday Settings
   (Eco temperature, Home/Away Assist, Auto-Schedule, Early-On, Sunblock,
   units, Fledge updates), in the same style. Nest's own menus are a press
   away for the rest, and Nest's own dial is a setting.
 - **It feels native.** Drawn at 60 frames a second, in Fledge's own look or
-  the Nest's (Settings → Theme); long press to switch a light or pause the music.
+  the Nest's (Settings → Theme). On an open card, press for its options and
+  long press to switch a light, pause the music or run a scene.
 - **Updates from Home Assistant.** The thermostat's software updates from
   an ordinary Home Assistant update entity, signed, with automatic rollback.
 

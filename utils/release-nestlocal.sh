@@ -3,7 +3,7 @@
 # `origin` points at, for the update entity (crates/nestlocal/src/update.rs)
 # to offer:
 #
-#     utils/release-nestlocal.sh [--tag TAG] [--key FILE] [--dry-run]
+#     utils/release-nestlocal.sh [--tag TAG] [--notes FILE] [--key FILE] [--dry-run]
 #     utils/release-nestlocal.sh --init-key [--key FILE]
 #
 #   --init-key  make the signing key (Ed25519, kept on this machine only) and
@@ -11,6 +11,10 @@
 #   --key FILE  the signing key (default ~/.config/unfr0zen/release-signing.pem)
 #   --tag TAG   the release's tag (default: the latest vX.Y.Z tag, its patch
 #               number one more: v0.4.0, then v0.4.1, ...)
+#   --notes FILE  what's new, in Markdown, to open the release notes; its
+#               first paragraph (at most 255 characters) is the summary Home
+#               Assistant's update entity shows. The changes since the last
+#               release follow it.
 #   --dry-run   build, check and sign, then publish nothing (the tag is removed)
 #
 # The commit must be clean and pushed. It is tagged first, so nestlocal reports
@@ -25,11 +29,12 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 key=$HOME/.config/unfr0zen/release-signing.pem
-tag= dry=0 init=0
+tag= dry=0 init=0 notes=
 while [ $# -gt 0 ]; do
     case $1 in
         --tag) [ $# -gt 1 ] || { echo "--tag needs a tag" >&2; exit 2; }; tag=$2; shift ;;
         --key) [ $# -gt 1 ] || { echo "--key needs a file" >&2; exit 2; }; key=$2; shift ;;
+        --notes) [ $# -gt 1 ] || { echo "--notes needs a file" >&2; exit 2; }; notes=$2; shift ;;
         --dry-run) dry=1 ;;
         --init-key) init=1 ;;
         -h|--help) sed -n '2,/^set -eu/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -57,6 +62,7 @@ if [ $init = 1 ]; then
     exit 0
 fi
 [ -f "$key" ] || fail "no signing key $key: make one with --init-key"
+[ -z "$notes" ] || [ -f "$notes" ] || fail "no notes file $notes"
 
 # --- the commit ----------------------------------------------------------------
 git update-index -q --refresh
@@ -115,7 +121,11 @@ rm -f "$out/public.pem"
 if command -v sha256sum > /dev/null; then (cd "$out" && sha256sum nestlocal-armv7 > nestlocal-armv7.sha256)
 else (cd "$out" && shasum -a 256 nestlocal-armv7 > nestlocal-armv7.sha256); fi
 {
-    echo "Fledge $tag: nestlocal for the thermostat. The Home Assistant integration is released apart, from sysmoon14/fledge-homeassistant."
+    if [ -n "$notes" ]; then
+        cat "$notes"
+    else
+        echo "Fledge $tag: nestlocal for the thermostat. The Home Assistant integration is released apart, from sysmoon14/fledge-homeassistant."
+    fi
     echo
     echo "## Changes since $previous"
     echo
