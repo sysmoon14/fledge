@@ -312,7 +312,7 @@ pub enum Progress {
 
 /// The entity's state: what the MQTT update entity reads from its state topic.
 pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>) -> Value {
-    let mut state = serde_json::json!({ "installed_version": VERSION, "title": "Fledge" });
+    let mut state = serde_json::json!({ "installed_version": VERSION, "title": "Fledgeling" });
     state["in_progress"] = matches!(progress, Progress::Downloading(_) | Progress::Restarting).into();
     if let Progress::Downloading(percent) = progress {
         state["update_percentage"] = (*percent).into();
@@ -328,7 +328,7 @@ pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>
             let base = release_of(VERSION);
             if base != VERSION {
                 state["installed_version"] = base.into();
-                state["title"] = format!("Fledge {VERSION}").into();
+                state["title"] = format!("Fledgeling {VERSION}").into();
             }
         }
         state["release_url"] = r.url.clone().into();
@@ -341,7 +341,7 @@ pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>
         _ => None,
     };
     if let Some(note) = note {
-        state["title"] = format!("Fledge ({note})").into();
+        state["title"] = format!("Fledgeling ({note})").into();
     }
     state
 }
@@ -618,7 +618,7 @@ mod tests {
         let s = state(Some(&r), &Progress::Idle, None);
         assert_eq!(s["installed_version"], release_of(VERSION));
         assert_eq!(s["latest_version"], "v99.0.0-rc.1");
-        assert_eq!(state(None, &Progress::Idle, None)["title"], "Fledge");
+        assert_eq!(state(None, &Progress::Idle, None)["title"], "Fledgeling");
     }
 
     #[test]
