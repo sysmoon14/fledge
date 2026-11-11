@@ -391,6 +391,9 @@ pub enum Card {
     Cover(CoverCard),
     /// An alarm panel: armed from its modes, disarmed with its code.
     Alarm(AlarmCard),
+    /// A glance face (protocol 13): something to look at, drawn as the
+    /// glance is, with actions round its ring.
+    Face(FaceCard),
     /// A kind from a newer Fledge: left out rather than failing the rest.
     #[serde(other)]
     Unknown,
@@ -403,6 +406,58 @@ pub struct ActionCard {
     pub name: String,
     #[serde(default)]
     pub icon: String,
+}
+
+/// A glance face as a card: its own layout and lines (Home Assistant sends
+/// them built, as it does the glance), and up to FACE_ACTIONS actions,
+/// listed after Back when it's pressed open; `hold`, one of them, is what
+/// a long press does while it's open.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct FaceCard {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub glance: Glance,
+    #[serde(default)]
+    pub actions: Vec<FaceAction>,
+    #[serde(default)]
+    hold: Option<usize>,
+}
+
+/// The most actions a face has round its ring, after Back.
+pub const FACE_ACTIONS: usize = 4;
+
+impl FaceCard {
+    /// What a hold does: one of its actions, by place.
+    pub fn hold(&self) -> Option<usize> {
+        self.hold.filter(|&i| i < self.actions.len())
+    }
+}
+
+/// One of a face's actions: a scene, script or button run, or a light or
+/// switch turned on and off.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct FaceAction {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: String,
+    /// "run", or "switch".
+    #[serde(default)]
+    pub kind: String,
+    /// A switch's: whether it's on now.
+    #[serde(default)]
+    pub on: Option<bool>,
+}
+
+impl FaceAction {
+    pub fn switched(&self) -> bool {
+        self.kind == "switch"
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -1104,8 +1159,10 @@ impl Cards {
             _ => true,
         });
         for card in &mut cards.cards {
-            if let Card::Climate(card) = card {
-                card.settle_action();
+            match card {
+                Card::Climate(card) => card.settle_action(),
+                Card::Face(face) => face.actions.truncate(FACE_ACTIONS),
+                _ => {}
             }
         }
         Ok(cards)
@@ -1311,6 +1368,22 @@ mod tests {
         assert_eq!((wake(r#""thermostat""#), wake("0"), wake("5"), wake(r#""chooser""#)),
                    (Wake::Thermostat, Wake::Card(0), Wake::Chooser, Wake::Chooser));
         assert!(Cards::parse(b"{").is_err());
+    }
+
+    #[test]
+    fn a_glance_face_is_a_card_with_its_actions_and_hold() {
+        let cards = Cards::parse(br#"{"cards":[{"kind":"face","id":"fledge_face.a1","name":"Weather",
+            "glance":{"layout":"weather","lines":[{"kind":"date"}]},
+            "actions":[{"id":"scene.movie","name":"Movie Night","kind":"run"},
+                       {"id":"light.hall","name":"Hall","kind":"switch","on":true},
+                       {"id":"scene.c","kind":"run"},{"id":"scene.d","kind":"run"},{"id":"scene.e","kind":"run"}],
+            "hold":1}]}"#).unwrap();
+        let Card::Face(face) = &cards.cards[0] else { panic!() };
+        assert_eq!((face.glance.layout, face.actions.len(), face.hold()), (Layout::Weather, FACE_ACTIONS, Some(1)));
+        assert!(face.actions[1].switched() && face.actions[1].on == Some(true) && !face.actions[0].switched());
+        let far = Cards::parse(br#"{"cards":[{"kind":"face","id":"f","actions":[],"hold":3}]}"#).unwrap();
+        let Card::Face(face) = &far.cards[0] else { panic!() };
+        assert_eq!(face.hold(), None, "a hold that isn't one of its actions does nothing");
     }
 
     #[test]

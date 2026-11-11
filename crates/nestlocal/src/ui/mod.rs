@@ -72,7 +72,9 @@ use crate::logf;
 ///  12  the glance's lines close up past one with nothing to say; the
 ///      date in Home Assistant's words and order (glance.words/date_order);
 ///      how dim the night's glance is (glance.dim_level)
-pub const PROTOCOL: u32 = 12;
+///  13  glance faces as cards (kind "face": a glance, actions run or
+///      switched round its ring, one of them held for)
+pub const PROTOCOL: u32 = 13;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -426,7 +428,8 @@ struct Runtime {
 }
 
 /// What a card's frame shows: its card (none for Settings), whether a
-/// scene's says it ran, and a media card's progress bar in pixels.
+/// scene's says it ran, and a media card's progress bar in pixels (a glance
+/// face's: the minute, which its clock shows).
 #[derive(Clone, PartialEq)]
 struct Drawn {
     card: Option<Card>,
@@ -456,6 +459,7 @@ fn card_name(card: &Card) -> &str {
         Card::Options(card) => &card.name,
         Card::Cover(card) => &card.name,
         Card::Alarm(card) => &card.name,
+        Card::Face(card) => &card.name,
         Card::Unknown => "",
     }
 }
@@ -847,7 +851,10 @@ impl Runtime {
             let elapsed = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
             self.last_frame = now;
             let swept = self.sweep(elapsed);
-            if self.machine.mode != Mode::Glance {
+            // The glance, or a glance face opened: a long line scrolls, and
+            // the clock moves on with the minute.
+            let glancing = matches!(self.machine.mode, Mode::Glance | Mode::FaceView { .. });
+            if !glancing {
                 self.ticker = None;
             }
             let counted = self.count.is_some();
@@ -858,7 +865,7 @@ impl Runtime {
             }
             let mut dirty = self.machine.take_dirty() | std::mem::take(&mut self.force_draw) || self.pulse.is_some()
                 || self.gliding() || self.recolour.is_some() || self.ticker_due() || counted;
-            if self.machine.mode == Mode::Glance && unix_now() as i64 / 60 != self.glance_minute {
+            if glancing && unix_now() as i64 / 60 != self.glance_minute {
                 // The glance's clock, as the minute turns.
                 self.glance_minute = unix_now() as i64 / 60;
                 dirty = true;
@@ -1386,6 +1393,7 @@ impl Runtime {
                 Some(Card::Options(card)) => card.name.clone(),
                 Some(Card::Cover(card)) => card.name.clone(),
                 Some(Card::Alarm(card)) => card.name.clone(),
+                Some(Card::Face(card)) => card.name.clone(),
                 Some(Card::Unknown) | None => String::new(),
             },
             None => String::new(),
@@ -1406,6 +1414,8 @@ impl Runtime {
         let card = self.machine.cards.cards.get(slot).filter(|card| !matches!(card, Card::Unknown))?;
         let progress = match card {
             Card::Media(card) => card.progress(unix_now()).map(|done| (done * screens::PROGRESS_WIDTH) as u32),
+            // A face's clock moves on with the minute.
+            Card::Face(_) => Some((unix_now() / 60.0) as u32),
             _ => None,
         };
         Some(Drawn { card: Some(card.clone()), done: self.machine.ran.is_some_and(|(ran, _)| ran == slot), progress })
@@ -1460,6 +1470,13 @@ impl Runtime {
         }
     }
 
+    /// A glance face as it draws now: its own glance, with this thermostat's
+    /// cards and temperature for the lines it works out itself.
+    fn face_at<'a>(&'a self, card: &'a model::FaceCard) -> screens::GlanceIn<'a> {
+        screens::GlanceIn { glance: &card.glance, cards: &self.machine.cards.cards, nest: self.machine.nest.as_ref(),
+                            now: unix_now() as i64 }
+    }
+
     /// Draws card `at` (wrapping round the deck) if it isn't yet.
     fn prepare(&mut self, at: i64) {
         self.prepare_key(self.key(at));
@@ -1485,6 +1502,7 @@ impl Runtime {
             Some(Card::Options(card)) => Screen::OptionsCard { card },
             Some(Card::Cover(card)) => Screen::CoverCard { card },
             Some(Card::Alarm(card)) => Screen::AlarmCard { card },
+            Some(Card::Face(card)) => Screen::Glance { at: self.face_at(card) },
             Some(Card::Unknown) => return,
             None => Screen::SettingsCard,
         };
@@ -1863,6 +1881,11 @@ impl Runtime {
                                                            opened: true },
                 _ => return None,
             },
+            Mode::FaceView { slot } => match card(*slot)? {
+                Card::Face(card) => Screen::Glance { at: screens::GlanceIn { glance: &card.glance, cards: &machine.cards.cards,
+                                                                             nest: machine.nest.as_ref(), now: unix_now() as i64 } },
+                _ => return None,
+            },
             Mode::AlarmView { slot } => match card(*slot)? {
                 Card::Alarm(card) => Screen::AlarmView { card, now: unix_now(), note: alarm_note(machine) },
                 _ => return None,
@@ -1908,7 +1931,16 @@ impl Runtime {
     /// chosen large in the middle in the device's colour.
     fn draw_menu(&mut self, view: &Mode, actions: &[Action], selected: usize) {
         let Some(screen) = Self::screen(&self.machine, view) else { return };
+        // A glance face's: its name, and its own actions.
+        let face = match view {
+            Mode::FaceView { slot } => match self.machine.cards.cards.get(*slot) {
+                Some(Card::Face(face)) => Some(face),
+                _ => None,
+            },
+            _ => None,
+        };
         let title = match &screen {
+            _ if face.is_some() => face.map(|f| f.name.clone()).unwrap_or_default(),
             Screen::LightDim { light, .. } => light.name.clone(),
             Screen::Volume { card, .. } | Screen::MediaCard { card, .. } => card.name.clone(),
             Screen::CoverSet { card, .. } => card.name.clone(),
@@ -1926,7 +1958,10 @@ impl Runtime {
             let now = self.machine.choices(*of, *list).1.filter(|now| !now.is_empty())?;
             Some(screens::choice_label(*list, &now))
         };
-        let items: Vec<(String, String, String)> = actions.iter().map(|action| menu_item(*action, now(action))).collect();
+        let items: Vec<(String, String, String)> = actions.iter().map(|action| match (action, face) {
+            (Action::Face(i), Some(face)) if *i < face.actions.len() => face_item(&face.actions[*i]),
+            _ => menu_item(*action, now(action)),
+        }).collect();
         let options: Vec<screens::Opt> = items.iter()
             .map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
         let canvas = screens::options(&self.fonts, &title, &options, selected, screens::accent(&screen));
@@ -2238,7 +2273,7 @@ fn depth(mode: &Mode, machine: &Machine) -> u8 {
     match mode {
         Mode::LightList { .. } | Mode::Dial { .. } | Mode::Volume { .. } | Mode::Camera { .. }
         | Mode::OptionList { .. } | Mode::CoverSet { .. } | Mode::Settings { .. }
-        | Mode::AlarmView { .. } | Mode::ActionView { .. } => 1,
+        | Mode::AlarmView { .. } | Mode::ActionView { .. } | Mode::FaceView { .. } => 1,
         // A lamp's own card opens straight to its dimmer; a room's, from its list.
         Mode::LightDim { slot, .. } => match machine.cards.cards.get(*slot) {
             Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
@@ -2503,6 +2538,8 @@ fn menu_item(action: Action, now: Option<String>) -> (String, String, String) {
         Action::Close => ("mdi:arrow-down-bold", "Close", "Press to close it"),
         Action::NestDial => ("mdi:thermometer", "Nest's dial", "Press for the Nest's own screens"),
         Action::Run => ("mdi:play", "Run", "Press to run it"),
+        // Named by its face (face_item); this only if it went meanwhile.
+        Action::Face(_) => ("mdi:play", "Run", "Press to do it"),
         Action::Choose(list) => {
             let under = match now {
                 Some(now) => format!("{now} · press to change"),
@@ -2512,6 +2549,19 @@ fn menu_item(action: Action, now: Option<String>) -> (String, String, String) {
         }
     };
     (icon.to_owned(), name.to_owned(), under.to_owned())
+}
+
+/// One of a glance face's actions round its ring: its own icon and name,
+/// and what pressing it does (a switch, which way, as it is now).
+fn face_item(action: &model::FaceAction) -> (String, String, String) {
+    let name = if action.name.trim().is_empty() { action.id.clone() } else { action.name.clone() };
+    let (icon, under) = match (action.switched(), action.on) {
+        (false, _) => ("mdi:play", "Press to run it"),
+        (true, Some(true)) => ("mdi:power", "On · press to turn it off"),
+        (true, _) => ("mdi:power", "Off · press to turn it on"),
+    };
+    let icon = if action.icon.is_empty() { icon.to_owned() } else { action.icon.clone() };
+    (icon, name, under.to_owned())
 }
 
 /// What Home Assistant last said of an alarm command, while it shows.
@@ -2847,6 +2897,20 @@ mod shots {
             temperature: Some(8.4), unit: "°C".into() }), ..model::Glance::default() };
         let at = screens::GlanceIn { glance: &glance, cards: &cards.cards, nest: None, now: 1_794_172_380 };
         save(&screens::draw(&fonts, &Screen::Glance { at }, None), &format!("{out}/b6-glance.png"));
+        // A glance face, opened, and its ring of actions (Movie Night chosen).
+        let faces = Cards::parse(r#"{"cards":[{"kind":"face","id":"fledge_face.a1","name":"Weather",
+            "glance":{"layout":"weather","weather":{"condition":"rainy","temperature":8.4,"unit":"°C"},
+                      "lines":[{"text":"High 12° · Low 5°","icon":"mdi:thermometer"},{"text":"Rain from 15:00","icon":"mdi:weather-rainy"}]},
+            "actions":[{"id":"scene.movie","name":"Movie Night","icon":"mdi:movie-open","kind":"run"},
+                       {"id":"light.hall","name":"Hall Light","kind":"switch","on":false}],"hold":0}]}"#.as_bytes()).unwrap();
+        let [Card::Face(face)] = &faces.cards[..] else { panic!() };
+        let at = screens::GlanceIn { glance: &face.glance, cards: &cards.cards, nest: None, now: 1_794_172_380 };
+        save(&screens::draw(&fonts, &Screen::Glance { at }, None), &format!("{out}/f1-face.png"));
+        let items: Vec<(String, String, String)> = std::iter::once(menu_item(Action::Back, None))
+            .chain(face.actions.iter().map(face_item)).collect();
+        let options: Vec<screens::Opt> = items.iter().map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
+        save(&screens::options(&fonts, &face.name, &options, 1, screens::accent(&Screen::Glance { at })), &format!("{out}/f2-face-actions.png"));
+        save(&screens::options(&fonts, &face.name, &options, 2, screens::accent(&Screen::Glance { at })), &format!("{out}/f3-face-switch.png"));
         let alarm = |state: &str, code: Option<&str>, delay: Option<model::AlarmDelay>| model::AlarmCard {
             id: "alarm_control_panel.house".into(), name: "House alarm".into(), icon: String::new(), state: state.into(),
             modes: vec![model::AlarmMode { mode: "home".into(), name: String::new() },

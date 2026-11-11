@@ -216,6 +216,8 @@ pub enum Action {
     NestDial,
     /// A scene, script or button run.
     Run,
+    /// A glance face's action, by its place among them: run, or switched.
+    Face(usize),
 }
 
 /// The off thermostat's prompt, as the Nest's words, and its choices: on
@@ -293,6 +295,9 @@ pub enum Mode {
     Menu { view: Box<Mode>, actions: Vec<Action>, selected: usize },
     /// A scene, script or button opened: a press its menu, a hold runs it.
     ActionView { slot: usize },
+    /// A glance face opened, full screen: a press its actions (Back first),
+    /// a hold the one it holds for, if it has one.
+    FaceView { slot: usize },
     /// An alarm opened: its state, a countdown while one runs.
     AlarmView { slot: usize },
     /// Its options round the ring (alarm_options): Back first, then its
@@ -321,7 +326,7 @@ impl Mode {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
             | Mode::LightHue { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
-            | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
+            | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::FaceView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
             | Mode::AlarmModes { slot, .. }
             | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
             Mode::Dial { of, .. } | Mode::DialList { of, .. } | Mode::Prompt { of, .. } => Some(of.slot()),
@@ -602,6 +607,7 @@ impl Machine {
                 matches!(cards.cards.get(*slot), Some(Card::Alarm(a)) if *selected < alarm_options(a).len())
             }
             Mode::ActionView { slot } => matches!(cards.cards.get(*slot), Some(Card::Action(_))),
+            Mode::FaceView { slot } => matches!(cards.cards.get(*slot), Some(Card::Face(_))),
             Mode::Members { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(c)) if !c.members.is_empty()),
             Mode::LightDim { slot, light, .. } | Mode::LightWarmth { slot, light, .. }
             | Mode::LightHue { slot, light, .. } => match cards.cards.get(*slot) {
@@ -1105,7 +1111,8 @@ impl Machine {
                     return;
                 }
             }
-            Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } => return,
+            // A face open: the ring does nothing (it has no value to set).
+            Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } | Mode::FaceView { .. } => return,
             _ => {}
         }
         out.push(Effect::Click);
@@ -1205,7 +1212,7 @@ impl Machine {
                 self.mode = Mode::AlarmModes { slot, selected: (selected as i32 + steps).clamp(0, last) as usize };
             }
             Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance
-            | Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } => {}
+            | Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } | Mode::FaceView { .. } => {}
         }
         self.dirty = true;
     }
@@ -1247,6 +1254,8 @@ impl Machine {
                         Mode::CoverSet { slot, value: card.position.unwrap_or(open) }
                     }
                     Some(Card::Alarm(_)) => Mode::AlarmView { slot },
+                    // A glance face: full screen, to look at.
+                    Some(Card::Face(_)) => Mode::FaceView { slot },
                     Some(Card::Unknown) | None => return,
                 };
                 self.go(mode, out);
@@ -1375,6 +1384,19 @@ impl Machine {
             }
             view @ Mode::ActionView { .. } => {
                 self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Run], selected: 0 };
+            }
+            view @ Mode::FaceView { slot } => {
+                let count = match self.card(slot) {
+                    Some(Card::Face(face)) => face.actions.len(),
+                    _ => 0,
+                };
+                if count == 0 {
+                    // Nothing to do: back to the cards, as Back would.
+                    self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
+                } else {
+                    let actions = std::iter::once(Action::Back).chain((0..count).map(Action::Face)).collect();
+                    self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
+                }
             }
             Mode::AlarmPad { slot, arm, at, mut entered } => {
                 if self.alarm_wait.is_some() || self.locked(self.last_input) {
@@ -1711,6 +1733,10 @@ impl Machine {
                 self.run(slot, out);
                 self.mode = view;
             }
+            (Action::Face(action), view @ Mode::FaceView { slot }) => {
+                self.face_action(slot, action, out);
+                self.mode = view;
+            }
             (Action::Open | Action::Close, view @ Mode::CoverSet { slot, .. }) => {
                 if let Some(Card::Cover(card)) = self.cards.cards.get_mut(slot) {
                     let (id, open) = (card.id.clone(), action == Action::Open);
@@ -1765,6 +1791,17 @@ impl Machine {
             // Held on a scene's own screen: it runs.
             Mode::ActionView { slot } => {
                 self.run(slot, out);
+                true
+            }
+            // Held on a face: the action it holds for, if it has one; else
+            // nothing (it has no main action), as below.
+            Mode::FaceView { slot } => {
+                let hold = match self.card(slot) {
+                    Some(Card::Face(face)) => face.hold(),
+                    _ => None,
+                };
+                let Some(action) = hold else { return };
+                self.face_action(slot, action, out);
                 true
             }
             Mode::LightList { slot, selected } => self.toggle(slot, Some(selected), out),
@@ -1840,6 +1877,23 @@ impl Machine {
         };
         out.push(Effect::Click);
         self.go(back, out);
+    }
+
+    /// Does a glance face's action: runs it, or switches it the other way
+    /// (shown switched until Home Assistant says).
+    fn face_action(&mut self, slot: usize, action: usize, out: &mut Vec<Effect>) {
+        let Some(Card::Face(face)) = self.cards.cards.get_mut(slot) else { return };
+        let Some(one) = face.actions.get_mut(action) else { return };
+        let command = if one.switched() {
+            let on = !one.on.unwrap_or(false);
+            one.on = Some(on);
+            if on { Command::On(one.id.clone()) } else { Command::Off(one.id.clone()) }
+        } else {
+            Command::Run(one.id.clone())
+        };
+        out.push(Effect::Send(command));
+        self.ran = Some((slot, self.last_input));
+        self.dirty = true;
     }
 
     /// Runs a scene, script or button: its screen says so for a moment.
@@ -2141,10 +2195,26 @@ impl Machine {
                 }
             }
         }
+        // A face's action switched: shown so on its ring too.
+        fn faces(cards: &mut [Card], id: &str, on: bool) {
+            for card in cards {
+                if let Card::Face(face) = card {
+                    for action in face.actions.iter_mut().filter(|a| a.id == id && a.switched()) {
+                        action.on = Some(on);
+                    }
+                }
+            }
+        }
         let cards = &mut self.cards.cards;
         match command {
-            Command::On(id) => lights(cards, id, |l| l.on = true),
-            Command::Off(id) => lights(cards, id, |l| l.on = false),
+            Command::On(id) => {
+                lights(cards, id, |l| l.on = true);
+                faces(cards, id, true);
+            }
+            Command::Off(id) => {
+                lights(cards, id, |l| l.on = false);
+                faces(cards, id, false);
+            }
             Command::Brightness(id, value) => lights(cards, id, |l| {
                 l.on = true;
                 l.brightness = Some(*value);
@@ -2685,6 +2755,40 @@ mod tests {
         let mut out = vec![];
         rig.machine.show_alert(gone, rig.now, true, &mut out);
         assert!(Rig::sends(&out).is_empty() && rig.machine.mode == dimmer, "Home Assistant took it back");
+    }
+
+    #[test]
+    fn a_glance_face_opens_to_look_at_and_does_its_actions() {
+        let mut rig = Rig::with(Cards::parse(br#"{"cards":[
+            {"kind":"face","id":"fledge_face.a1","name":"Clock","glance":{"layout":"clock"},
+             "actions":[{"id":"scene.movie","name":"Movie Night","kind":"run"},
+                        {"id":"light.hall","name":"Hall","kind":"switch","on":false}],"hold":1},
+            {"kind":"face","id":"fledge_face.b2","name":"Weather","glance":{"layout":"weather"}}],"wake":0}"#).unwrap());
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        assert_eq!(rig.machine.mode, Mode::FaceView { slot: 0 }, "woken to a face: opened, to look at");
+        assert!(Rig::sends(&rig.turn(CARD_STEP * 2)).is_empty());
+        assert_eq!(rig.machine.mode, Mode::FaceView { slot: 0 }, "the ring does nothing while it's open");
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::On("light.hall".into())], "held: what it holds for");
+        assert_eq!(rig.machine.mode, Mode::FaceView { slot: 0 }, "it stays open");
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::Off("light.hall".into())], "a switch the other way each time");
+        rig.press();
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. }
+                         if *actions == vec![Action::Back, Action::Face(0), Action::Face(1)]), "Back first, then its actions");
+        rig.rows(1);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Run("scene.movie".into())], "its first action");
+        assert_eq!(rig.machine.mode, Mode::FaceView { slot: 0 }, "back on its face");
+        rig.press();
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "its menu's Back");
+        rig.turn(CARD_STEP);
+        assert!(Rig::sends(&rig.press()).is_empty(), "pressed on the cards: opened, nothing done");
+        assert_eq!(rig.machine.mode, Mode::FaceView { slot: 1 });
+        assert!(Rig::sends(&rig.long()).is_empty());
+        assert_eq!(rig.machine.mode, Mode::FaceView { slot: 1 }, "no hold: a hold does nothing");
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(2), "no actions: a press goes back to the cards");
     }
 
     #[test]
