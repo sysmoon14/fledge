@@ -2941,6 +2941,7 @@ mod shots {
             ("g5-number", r#"{"layout":"number","big":{"label":"Electricity","value":"24.3","unit":"p/kWh"},"lines":[{"kind":"time"},{"icon":"mdi:car","text":"Car charging"}]}"#),
             ("g6-agenda", r#"{"layout":"agenda","event":{"title":"Dentist","start":1794180600},"lines":[{"kind":"weather"}]}"#),
             ("g7-analog-night", r#"{"layout":"analog","night":true,"dim":true,"lines":[{"kind":"date"}]}"#),
+            ("g9-analog-crossed", r#"{"layout":"analog","offset":-9780,"lines":[{"kind":"date"}]}"#),
             ("g8-clock-lines", r#"{"layout":"clock","lines":[{"kind":"inside"},{"kind":"heating"},{"icon":"mdi:calendar","text":"16:30 Dentist"}]}"#),
         ];
         for (name, json) in glances {

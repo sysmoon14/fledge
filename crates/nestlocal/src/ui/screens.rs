@@ -1434,7 +1434,23 @@ fn weather_words(weather: &Weather) -> String {
 fn glance_lines(at: &GlanceIn) -> Vec<(Slot, Option<Said>)> {
     let lines = at.glance.lines();
     slots(at.glance.layout).iter().enumerate()
-        .map(|(i, slot)| (*slot, lines.get(i).and_then(|line| line_said(line, at)))).collect()
+        .map(|(i, slot)| {
+            let mut slot = *slot;
+            if at.glance.layout == Layout::Analog {
+                slot.y = analog_line(at.minutes());
+            }
+            (slot, lines.get(i).and_then(|line| line_said(line, at)))
+        }).collect()
+}
+
+/// Where the analog clock's line goes at `minutes` past midnight: under
+/// the middle, or above it while a hand points down through its place
+/// and none points up.
+fn analog_line(minutes: i64) -> f32 {
+    let hands = [(minutes.rem_euclid(720)) as f32 / 2.0, minutes.rem_euclid(60) as f32 * 6.0];
+    let down = hands.iter().any(|a| (130.0..=230.0).contains(a));
+    let up = hands.iter().any(|a| *a >= 310.0 || *a <= 50.0);
+    if down && !up { 152.0 } else { ANALOG_SLOTS[0].y }
 }
 
 /// The glance's line of what's on: how large, how much room it has, and
@@ -1527,7 +1543,8 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
         }
         Layout::Temp => {
             let label = if paint::fledge() { "Inside" } else { "INSIDE" };
-            paint::text(&mut p, fonts.medium(), 22.0, HALF, 150.0, label, 2.0, if coloured { [255, 232, 218] } else { GLANCE_QUIET });
+            paint::text(&mut p, fonts.medium(), 22.0, HALF, 150.0, label, if paint::fledge() { 1.0 } else { 2.0 },
+                        if coloured { [255, 232, 218] } else { GLANCE_QUIET });
             match at.nest.and_then(|n| n.card.current.map(|t| (t, n.fahrenheit))) {
                 Some((t, fahrenheit)) => {
                     let value = if fahrenheit { t.round() } else { (t * 2.0).round() / 2.0 };
@@ -1552,8 +1569,7 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
         Layout::Analog => analog_ticks(&mut p),
         Layout::Number => {
             let big = glance.big.clone().unwrap_or_default();
-            let label = paint::fit(fonts.medium(), 20.0, &big.label.to_uppercase(), 3.0, 300.0);
-            paint::text(&mut p, fonts.medium(), 20.0, HALF, 132.0, &label, 3.0, GLANCE_QUIET);
+            glance_label(&mut p, fonts, 132.0, &big.label);
             let value = if big.value.trim().is_empty() { "–" } else { big.value.trim() };
             hero(&mut p, fonts, value, if paint::fledge() { 170.0 } else { 140.0 }, 270.0, 400.0, WHITE);
             let unit = paint::fit(fonts.regular(), 28.0, &big.unit, 0.0, 280.0);
@@ -1562,7 +1578,7 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
         Layout::Agenda => {
             let time = glance.clock.time(at.minutes(), true);
             paint::text(&mut p, fonts.clock(), 56.0, HALF, 122.0, &time, -1.0, WHITE);
-            paint::text(&mut p, fonts.medium(), 18.0, HALF, 178.0, "UP NEXT", 3.0, GLANCE_QUIET);
+            glance_label(&mut p, fonts, 178.0, "Up next");
             match glance.event.as_ref().filter(|e| !e.title.trim().is_empty()) {
                 Some(event) => {
                     fitted(&mut p, fonts.medium(), 64.0, 40.0, HALF, 250.0, event.title.trim(), 380.0, WHITE);
@@ -1574,18 +1590,38 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
             }
         }
     }
-    for (slot, said) in glance_lines(at) {
-        if let Some(said) = said {
-            glance_line(&mut p, fonts, slot, &said, coloured);
-        }
-    }
     if glance.layout == Layout::Analog {
         analog_hands(&mut p, at.minutes());
+    }
+    for (slot, said) in glance_lines(at) {
+        let Some(said) = said else { continue };
+        if glance.layout == Layout::Analog {
+            // Over the hands on a plate of the face's own colour, as a
+            // watch's date window: read whichever way they point.
+            let size = 30.0;
+            let words = paint::measure(fonts.regular(), size, &said.text, 0.0).min(slot.room);
+            let (width, height) = (words + 36.0, 46.0);
+            let face = if paint::fledge() { paint::FACE } else { BLACK };
+            paint::pill(&mut p, HALF - width / 2.0, slot.y - size * 0.36 - height / 2.0, width, height, alpha(face, 0.82));
+        }
+        glance_line(&mut p, fonts, slot, &said, coloured);
     }
     if glance.dim {
         paint::warm_dim(&mut p);
     }
     p
+}
+
+/// A small label over something large: the Nest's capitals, or as written
+/// in Fledge's look.
+fn glance_label(p: &mut Canvas, fonts: &Fonts, y: f32, text: &str) {
+    if paint::fledge() {
+        let text = paint::fit(fonts.medium(), 22.0, text, 1.0, 300.0);
+        paint::text(p, fonts.medium(), 22.0, HALF, y, &text, 1.0, GLANCE_QUIET);
+    } else {
+        let text = paint::fit(fonts.medium(), 20.0, &text.to_uppercase(), 3.0, 300.0);
+        paint::text(p, fonts.medium(), 20.0, HALF, y, &text, 3.0, GLANCE_QUIET);
+    }
 }
 
 /// One line of the glance in its place.
@@ -1599,10 +1635,10 @@ fn glance_line(p: &mut Canvas, fonts: &Fonts, slot: Slot, said: &Said, coloured:
         Style::Main => {
             let c = if coloured { WHITE } else { said.colour.unwrap_or(WHITE) };
             let icon_room = if said.icon.as_deref().is_some_and(|name| icons::lookup(name, "").is_some()) { 56.0 } else { 0.0 };
-            // Smaller first (down to 26 px), then shortened.
+            // Smaller first (down to 24 px), then shortened.
             let room = slot.room - icon_room;
             let full = paint::measure(fonts.regular(), 34.0, &said.text, 0.0);
-            let size = if full > room { (34.0 * room / full).max(26.0) } else { 34.0 };
+            let size = if full > room { (34.0 * room / full).max(24.0) } else { 34.0 };
             let text = paint::fit(fonts.regular(), size, &said.text, 0.0, room);
             let width = paint::measure(fonts.regular(), size, &text, 0.0);
             let left = HALF - (width + icon_room) / 2.0;
@@ -2329,6 +2365,15 @@ mod tests {
         assert_eq!(event(NOW + 12 * 3600, false), "10:13 · tomorrow");
         assert_eq!(event(NOW + 3 * 86_400, true), "All day · Wednesday");
         assert_eq!(short_date(20_400), "Sat 8 Nov");
+    }
+
+    #[test]
+    fn the_analog_clock_s_line_keeps_clear_of_the_hands() {
+        use super::analog_line;
+        assert_eq!(analog_line(10 * 60 + 10), 350.0, "ten past ten: under the middle");
+        assert_eq!(analog_line(6 * 60 + 35), 152.0, "both hands down: above it");
+        assert_eq!(analog_line(6 * 60), 350.0, "one up, one down: where it always is");
+        assert_eq!(analog_line(3 * 60 + 30), 152.0, "the minute hand down");
     }
 
     #[test]
