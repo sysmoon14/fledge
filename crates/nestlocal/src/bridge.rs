@@ -20,8 +20,10 @@
 //!   <prefix>/<serial>/set/<command>    Home Assistant's commands; for the
 //!                                      home screen cards ui, art/<entity>,
 //!                                      screen_on (ON/OFF, retained),
-//!                                      screen_wake, alert (notifications) and
+//!                                      screen_wake, alert (notifications),
 //!                                      alarm_result (an alarm command's answer)
+//!                                      and glance_try (a glance shown for 20 s;
+//!                                      empty ends it)
 //!   <prefix>/<serial>/set/act_as_thermostat
 //!                                      ON/OFF: OFF makes it a panel on the
 //!                                      wall, its heating and hot water off

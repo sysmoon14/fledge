@@ -884,6 +884,37 @@ pub fn circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, c: Color) {
     }
 }
 
+/// A straight line from (x1, y1) to (x2, y2), `width` wide, its ends round.
+#[allow(clippy::too_many_arguments)]
+pub fn line(canvas: &mut Canvas, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, c: Color) {
+    let mut path = PathBuilder::new();
+    path.move_to(x1, y1);
+    path.line_to(x2, y2);
+    let Some(path) = path.finish() else { return };
+    let stroke = tiny_skia::Stroke { width, line_cap: tiny_skia::LineCap::Round, ..Default::default() };
+    let (c, transform) = (canvas.colour(c), canvas.transform());
+    canvas.pixmap.stroke_path(&path, &paint(c), &stroke, transform, None);
+}
+
+/// How the night's glance draws each channel (red, green, blue): dimmer,
+/// and warmer as blue goes most.
+const WARM_DIM: [f32; 3] = [0.62, 0.48, 0.32];
+
+/// Colour `c` dimmed and warmed as warm_dim draws it.
+pub fn warmed(c: [u8; 3]) -> [u8; 3] {
+    [0, 1, 2].map(|k| (c[k] as f32 * WARM_DIM[k]).round() as u8)
+}
+
+/// The whole canvas dimmer and warmer: the glance at night.
+pub fn warm_dim(canvas: &mut Canvas) {
+    let scale = canvas.rgb([0, 1, 2]).map(|k| WARM_DIM[k as usize]);
+    for pixel in canvas.pixmap.data_mut().as_chunks_mut::<4>().0 {
+        for k in 0..3 {
+            pixel[k] = (pixel[k] as f32 * scale[k]) as u8;
+        }
+    }
+}
+
 /// A rectangle with its corners rounded to `r`.
 pub fn rounded(canvas: &mut Canvas, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color) {
     let r = r.min(w / 2.0).min(h / 2.0);

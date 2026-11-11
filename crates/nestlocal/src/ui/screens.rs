@@ -4,8 +4,8 @@
 
 use super::icons;
 use super::machine::Setting;
-use super::model::{ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, ClimateCard, CoverCard, Glance, Light, LightsCard,
-                   MediaCard, Nest, OptionsCard};
+use super::model::{self, ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, ClimateCard, CoverCard, Glance, Layout, Light,
+                   LightsCard, Line, MediaCard, Nest, OptionsCard, Weather};
 use super::paint::{self, *};
 
 use std::borrow::Cow;
@@ -48,8 +48,8 @@ pub enum Screen<'a> {
     AlarmModes { card: &'a AlarmCard, selected: usize },
     /// Arming refused with `sensors` open: arm to `arm` anyway?
     AlarmOpen { card: &'a AlarmCard, arm: &'a AlarmMode, sensors: &'a [String] },
-    /// The time (`now`, Unix seconds), the weather and what's on.
-    Glance { glance: &'a Glance, cards: &'a [Card], now: i64 },
+    /// Home Assistant's glance, as its layout has it.
+    Glance { at: GlanceIn<'a> },
     /// The lights card pressed: its lights and Back, `selected` highlighted.
     LightList { card: &'a LightsCard, selected: usize },
     LightDim { light: &'a Light, on: bool, value: u8 },
@@ -154,7 +154,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         }
         Screen::AlarmOpen { card, arm, sensors } => alarm_open(fonts, card, arm, sensors),
         Screen::AlarmModes { card, selected } => alarm_modes(fonts, card, *selected),
-        Screen::Glance { glance, cards, now } => glance_screen(fonts, glance, cards, *now),
+        Screen::Glance { at } => glance_screen(fonts, at),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
         Screen::ThemePick { fledge } => theme_pick(fonts, *fledge),
@@ -1278,16 +1278,154 @@ fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fon
     big_number_on(p, live, fonts, value as f64, false, "", WHITE);
 }
 
-/// The glance: the time large, the date, the weather and what's on.
-fn glance_screen(fonts: &Fonts, glance: &Glance, cards: &[Card], now: i64) -> Canvas {
-    let mut p = glance_still(fonts, glance, cards, now);
+/// What a glance draws from: Home Assistant's glance, the cards (what's
+/// on), this thermostat (its temperature, what it's doing) and the time
+/// (`now`, Unix seconds).
+#[derive(Clone, Copy)]
+pub struct GlanceIn<'a> {
+    pub glance: &'a Glance,
+    pub cards: &'a [Card],
+    pub nest: Option<&'a Nest>,
+    pub now: i64,
+}
+
+impl GlanceIn<'_> {
+    /// Minutes since midnight, Home Assistant's time.
+    fn minutes(&self) -> i64 {
+        (self.now + self.glance.offset).rem_euclid(86_400) / 60
+    }
+
+    /// Days since 1970, Home Assistant's time.
+    fn days(&self) -> i64 {
+        (self.now + self.glance.offset).div_euclid(86_400)
+    }
+}
+
+/// The glance: something large and lines under it, as its layout has them.
+fn glance_screen(fonts: &Fonts, at: &GlanceIn) -> Canvas {
+    let mut p = glance_still(fonts, at);
     let still = p.clone();
-    glance_words(&mut p, &still, fonts, cards, 0.0);
+    glance_words(&mut p, &still, fonts, at, 0.0);
     p
 }
 
 /// The colour of Fledge's line of what's on.
 const FLEDGE_ON: [u8; 3] = [255, 211, 154];
+/// The glance's quieter words (the date).
+const GLANCE_QUIET: [u8; 3] = [196, 203, 211];
+
+/// How a glance line is drawn in its place.
+#[derive(Clone, Copy, PartialEq)]
+enum Style {
+    /// Smaller, grey, no icon (the date under the time).
+    Quiet,
+    /// White with its icon (the weather).
+    Main,
+    /// In a soft pill (what's on); it scrolls where it's too long.
+    Pill,
+}
+
+/// A line's place: its baseline (a pill's middle), how, and how wide.
+#[derive(Clone, Copy)]
+struct Slot {
+    y: f32,
+    style: Style,
+    room: f32,
+}
+
+const fn slot(y: f32, style: Style, room: f32) -> Slot {
+    Slot { y, style, room }
+}
+
+const CLOCK_SLOTS: [Slot; 3] = [slot(290.0, Style::Quiet, 380.0), slot(352.0, Style::Main, 330.0), slot(404.0, Style::Pill, 290.0)];
+const LARGE_SLOTS: [Slot; 2] = [slot(352.0, Style::Main, 330.0), slot(402.0, Style::Quiet, 300.0)];
+const ANALOG_SLOTS: [Slot; 1] = [slot(350.0, Style::Quiet, 320.0)];
+const NUMBER_SLOTS: [Slot; 2] = [slot(370.0, Style::Quiet, 320.0), slot(418.0, Style::Pill, 230.0)];
+const AGENDA_SLOTS: [Slot; 1] = [slot(370.0, Style::Main, 320.0)];
+
+/// Where each layout puts its lines, top to bottom.
+fn slots(layout: Layout) -> &'static [Slot] {
+    match layout {
+        Layout::Clock | Layout::Unknown => &CLOCK_SLOTS,
+        Layout::Temp | Layout::Weather => &LARGE_SLOTS,
+        Layout::Analog => &ANALOG_SLOTS,
+        Layout::Number => &NUMBER_SLOTS,
+        Layout::Agenda => &AGENDA_SLOTS,
+    }
+}
+
+/// A line worked out: its words, icon and colour (None: the style's).
+#[derive(Debug, PartialEq)]
+struct Said {
+    text: String,
+    icon: Option<String>,
+    colour: Option<[u8; 3]>,
+}
+
+fn said(text: String, icon: Option<&str>, colour: Option<[u8; 3]>) -> Option<Said> {
+    (!text.trim().is_empty()).then(|| Said { text, icon: icon.map(str::to_owned), colour })
+}
+
+/// What a line says: the Nest's own kinds worked out here, Home
+/// Assistant's words as they came; None for nothing to say.
+fn line_said(line: &Line, at: &GlanceIn) -> Option<Said> {
+    let Some(kind) = line.kind.as_deref() else {
+        return said(line.text.clone().unwrap_or_default(), line.icon.as_deref().filter(|i| !i.is_empty()), None);
+    };
+    let clock = &at.glance.clock;
+    match kind {
+        "date" => said(date(at.days()), None, None),
+        "date_short" => said(short_date(at.days()), None, None),
+        "time" => said(clock.time(at.minutes(), true), Some("mdi:clock-outline"), None),
+        "whats_on" => said(whats_on(at.cards), None, None),
+        "weather" => {
+            let weather = at.glance.weather.as_ref()?;
+            said(weather_words(weather), Some(&format!("mdi:{}", weather_icon(&weather.condition))), None)
+        }
+        "inside" => {
+            let nest = at.nest?;
+            let now = degrees(nest.card.current?);
+            let text = match nest.humidity {
+                Some(h) => format!("Inside {now} · {h:.0}%"),
+                None => format!("Inside {now}"),
+            };
+            said(text, Some("mdi:thermometer"), None)
+        }
+        "heating" => {
+            let nest = at.nest?;
+            let card = &nest.card;
+            let eta = nest_eta(nest, at.now as f64).map(|eta| eta.trim_start_matches("In ").to_owned());
+            let to = card.target.map(degrees).unwrap_or_default();
+            let (text, icon, colour) = match card.action.as_str() {
+                "heating" | "preheating" => (format!("Heating to {to}"), "mdi:fire", Some([255, 154, 92])),
+                "cooling" => (format!("Cooling to {to}"), "mdi:snowflake", Some([130, 178, 255])),
+                _ if card.mode == "off" || !nest.acting => ("Heating off".to_owned(), "mdi:thermostat", None),
+                _ if nest.eco => ("Eco".to_owned(), "mdi:leaf", Some([120, 200, 124])),
+                _ => (format!("Set to {to}"), "mdi:thermostat", None),
+            };
+            let text = match eta {
+                Some(eta) if icon != "mdi:thermostat" => format!("{text} · {eta}"),
+                _ => text,
+            };
+            said(text, Some(icon), colour)
+        }
+        _ => None,
+    }
+}
+
+/// The weather in words: "9° · Partly cloudy".
+fn weather_words(weather: &Weather) -> String {
+    let temperature = weather.temperature.map(|t| format!("{t:.0}{}", if weather.unit.contains('F') { "°F" } else { "°" }));
+    [temperature.unwrap_or_default(), condition_name(&weather.condition)]
+        .into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
+}
+
+/// Each of the glance's lines worked out, in their places.
+fn glance_lines(at: &GlanceIn) -> Vec<(Slot, Option<Said>)> {
+    let lines = at.glance.lines();
+    slots(at.glance.layout).iter().enumerate()
+        .map(|(i, slot)| (*slot, lines.get(i).and_then(|line| line_said(line, at)))).collect()
+}
 
 /// The glance's line of what's on: how large, how much room it has, and
 /// how wide its words are.
@@ -1298,8 +1436,8 @@ struct GlanceLine {
 }
 
 impl GlanceLine {
-    fn new(fonts: &Fonts, on: &str) -> GlanceLine {
-        let (size, room) = if paint::fledge() { (23.0, 290.0) } else { (24.0, 300.0) };
+    fn new(fonts: &Fonts, on: &str, room: f32) -> GlanceLine {
+        let (size, room) = if paint::fledge() { (23.0, room) } else { (24.0, room + 10.0) };
         GlanceLine { size, room, words: paint::measure(fonts.medium(), size, on, 0.0) }
     }
 
@@ -1313,71 +1451,270 @@ impl GlanceLine {
 /// coming round again.
 const GLANCE_GAP: f32 = 72.0;
 
-/// How far the glance's line of what's on scrolls before it is back where
-/// it started, in pixels; None where it fits and stays put.
-pub fn glance_scroll(fonts: &Fonts, cards: &[Card]) -> Option<f32> {
-    let line = GlanceLine::new(fonts, &whats_on(cards));
+/// The glance's pill line, if it has one with something to say.
+fn pill_line(at: &GlanceIn) -> Option<(Slot, Said)> {
+    glance_lines(at).into_iter().find_map(|(slot, said)| (slot.style == Style::Pill).then_some(said).flatten().map(|s| (slot, s)))
+}
+
+/// How far the glance's pill line scrolls before it is back where it
+/// started, in pixels; None where it fits and stays put.
+pub fn glance_scroll(fonts: &Fonts, at: &GlanceIn) -> Option<f32> {
+    let (slot, said) = pill_line(at)?;
+    let line = GlanceLine::new(fonts, &said.text, slot.room);
     line.scrolls().then_some(line.words + GLANCE_GAP)
 }
 
 /// Everything the glance shows: another key, another glance to draw.
-pub fn glance_key(glance: &Glance, cards: &[Card], now: i64) -> String {
-    format!("{glance:?} {} {} {}", (now + glance.offset).div_euclid(60), whats_on(cards), paint::fledge())
+pub fn glance_key(at: &GlanceIn) -> String {
+    let lines: Vec<String> = glance_lines(at).into_iter().map(|(_, said)| format!("{said:?}")).collect();
+    let nest = at.nest.map(|n| (n.card.current, n.card.action.as_str(), n.card.mode.as_str()));
+    format!("{:?} {} {} {nest:?} {}", at.glance, (at.now + at.glance.offset).div_euclid(60), lines.join("|"), paint::fledge())
 }
 
-/// The glance's line of what's on, `offset` pixels along, over glance_still
+/// Colour `c` as the glance draws it: dimmer and warmer at night.
+fn glance_colour(at: &GlanceIn, c: [u8; 3]) -> [u8; 3] {
+    if at.glance.dim { paint::warmed(c) } else { c }
+}
+
+/// The glance's pill line, `offset` pixels along, over glance_still
 /// (`still`), where it scrolls: a title on the speaker, a film, a book, too
 /// long to show whole. Returns the upright columns drawn in, if any were.
-pub fn glance_words(p: &mut Canvas, still: &Canvas, fonts: &Fonts, cards: &[Card], offset: f32) -> Option<(u32, u32)> {
-    let on = whats_on(cards);
-    let line = GlanceLine::new(fonts, &on);
+pub fn glance_words(p: &mut Canvas, still: &Canvas, fonts: &Fonts, at: &GlanceIn, offset: f32) -> Option<(u32, u32)> {
+    let (slot, said) = pill_line(at)?;
+    let line = GlanceLine::new(fonts, &said.text, slot.room);
     if !line.scrolls() {
         return None;
     }
-    let (baseline, colour) = if paint::fledge() { (404.0 + line.size * 0.36, FLEDGE_ON) } else { (402.0, ACTION) };
-    let ticker = paint::Ticker { font: fonts.medium(), size: line.size, text: &on, words: line.words,
-        left: HALF - line.room / 2.0, width: line.room, baseline, colour, gap: GLANCE_GAP };
+    let (baseline, colour) = if paint::fledge() {
+        (slot.y + line.size * 0.36, said.colour.unwrap_or(FLEDGE_ON))
+    } else {
+        (slot.y - 2.0, said.colour.unwrap_or(ACTION))
+    };
+    let ticker = paint::Ticker { font: fonts.medium(), size: line.size, text: &said.text, words: line.words,
+        left: HALF - line.room / 2.0, width: line.room, baseline, colour: glance_colour(at, colour), gap: GLANCE_GAP };
     Some(paint::ticker(p, still, &ticker, offset))
 }
 
-/// The glance without the words of a line that scrolls (glance_words).
-pub fn glance_still(fonts: &Fonts, glance: &Glance, cards: &[Card], now: i64) -> Canvas {
-    // Big enough to read across a room: the time across most of the face,
-    // the rest under it filling the round display's width.
-    let mut p = paint::face(BLACK);
-    let local = now + glance.offset;
-    let (minutes, days) = (local.rem_euclid(86_400) / 60, local.div_euclid(86_400));
-    let time = format!("{:02}:{:02}", minutes / 60, minutes % 60);
-    let size = if paint::fledge() { 196.0 } else { 160.0 };
-    paint::text(&mut p, fonts.clock(), size, HALF, 236.0, &time, -3.0, WHITE);
-    let day = paint::fit(fonts.regular(), 30.0, &date(days), 0.0, 380.0);
-    paint::text(&mut p, fonts.regular(), 30.0, HALF, 290.0, &day, 0.0, [196, 203, 211]);
-    if let Some(weather) = &glance.weather {
-        let temperature = weather.temperature.map(|t| format!("{t:.0}{}", if weather.unit.contains('F') { "°F" } else { "°" }));
-        let text = [temperature.unwrap_or_default(), condition_name(&weather.condition)]
-            .into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-        let text = paint::fit(fonts.regular(), 34.0, &text, 0.0, 330.0);
-        let name = format!("mdi:{}", weather_icon(&weather.condition));
-        let width = paint::measure(fonts.regular(), 34.0, &text, 0.0);
-        let left = HALF - (width + 56.0) / 2.0;
-        icon(&mut p, &name, "weather", left + 21.0, 340.0, 44.0, WHITE);
-        paint::text_at(&mut p, fonts.regular(), 34.0, left + 56.0, 352.0, &text, 0.0, WHITE, 1.0);
-    }
-    // What's on: in one line where it fits, else scrolling through it (the
-    // words drawn by glance_words, over this).
-    let on = whats_on(cards);
-    let line = GlanceLine::new(fonts, &on);
-    match (line.scrolls(), paint::fledge()) {
-        (false, true) => pill_words_at(&mut p, fonts, 404.0, &on, FLEDGE_ON, None, line.size, line.room),
-        (false, false) => paint::text(&mut p, fonts.medium(), line.size, HALF, 402.0, &on, 0.0, ACTION),
-        (true, true) => {
-            let (pad, height) = (line.size * 0.95, line.size * 2.1);
-            paint::pill(&mut p, HALF - line.room / 2.0 - pad, 404.0 - height / 2.0, line.room + 2.0 * pad, height,
-                        alpha(FLEDGE_ON, 0.18));
+/// The glance without the words of a pill line that scrolls (glance_words).
+pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
+    let glance = at.glance;
+    let background = match (glance.layout, at.nest) {
+        (Layout::Temp, Some(nest)) if glance.colour.unwrap_or(true) => match nest.card.action.as_str() {
+            "heating" | "preheating" => HEAT,
+            "cooling" => COOL,
+            _ => BLACK,
+        },
+        _ => BLACK,
+    };
+    let coloured = background != BLACK;
+    let mut p = paint::face(background);
+    match glance.layout {
+        Layout::Clock | Layout::Unknown => {
+            // Big enough to read across a room: the time across most of the
+            // face, the rest under it filling the round display's width.
+            let size = if paint::fledge() { 196.0 } else { 160.0 };
+            big_time(&mut p, fonts, &glance.clock, at.minutes(), size, 236.0, 430.0);
         }
-        (true, false) => {}
+        Layout::Temp => {
+            let label = if paint::fledge() { "Inside" } else { "INSIDE" };
+            paint::text(&mut p, fonts.medium(), 22.0, HALF, 150.0, label, 2.0, if coloured { [255, 232, 218] } else { GLANCE_QUIET });
+            match at.nest.and_then(|n| n.card.current.map(|t| (t, n.fahrenheit))) {
+                Some((t, fahrenheit)) => {
+                    let value = if fahrenheit { t.round() } else { (t * 2.0).round() / 2.0 };
+                    big_number_on(&mut p, None, fonts, value, !fahrenheit, "", WHITE);
+                }
+                None => paint::text(&mut p, fonts.digits(), 170.0, HALF, NUMBER_BASELINE, "–", 0.0, WHITE),
+            }
+        }
+        Layout::Weather => match &glance.weather {
+            Some(weather) => {
+                icon(&mut p, &format!("mdi:{}", weather_icon(&weather.condition)), "weather", HALF, 112.0, 64.0, WHITE);
+                let words = paint::fit(fonts.regular(), 26.0, &condition_name(&weather.condition), 0.0, 300.0);
+                paint::text(&mut p, fonts.regular(), 26.0, HALF, 178.0, &words, 0.0, GLANCE_QUIET);
+                let t = weather.temperature.map(|t| format!("{t:.0}°")).unwrap_or_else(|| "–".into());
+                hero(&mut p, fonts, &t, if paint::fledge() { 150.0 } else { 128.0 }, 300.0, 400.0, WHITE);
+            }
+            None => {
+                paint::text(&mut p, fonts.regular(), 26.0, HALF, 178.0, "No weather chosen", 0.0, GLANCE_QUIET);
+                hero(&mut p, fonts, "–", if paint::fledge() { 150.0 } else { 128.0 }, 300.0, 400.0, WHITE);
+            }
+        },
+        Layout::Analog => analog_ticks(&mut p),
+        Layout::Number => {
+            let big = glance.big.clone().unwrap_or_default();
+            let label = paint::fit(fonts.medium(), 20.0, &big.label.to_uppercase(), 3.0, 300.0);
+            paint::text(&mut p, fonts.medium(), 20.0, HALF, 132.0, &label, 3.0, GLANCE_QUIET);
+            let value = if big.value.trim().is_empty() { "–" } else { big.value.trim() };
+            hero(&mut p, fonts, value, if paint::fledge() { 170.0 } else { 140.0 }, 270.0, 400.0, WHITE);
+            let unit = paint::fit(fonts.regular(), 28.0, &big.unit, 0.0, 280.0);
+            paint::text(&mut p, fonts.regular(), 28.0, HALF, 316.0, &unit, 0.0, FLEDGE_ON);
+        }
+        Layout::Agenda => {
+            let time = glance.clock.time(at.minutes(), true);
+            paint::text(&mut p, fonts.clock(), 56.0, HALF, 122.0, &time, -1.0, WHITE);
+            paint::text(&mut p, fonts.medium(), 18.0, HALF, 178.0, "UP NEXT", 3.0, GLANCE_QUIET);
+            match glance.event.as_ref().filter(|e| !e.title.trim().is_empty()) {
+                Some(event) => {
+                    fitted(&mut p, fonts.medium(), 64.0, 40.0, HALF, 250.0, event.title.trim(), 380.0, WHITE);
+                    let when = event_when(event, at);
+                    let when = paint::fit(fonts.regular(), 28.0, &when, 0.0, 340.0);
+                    paint::text(&mut p, fonts.regular(), 28.0, HALF, 300.0, &when, 0.0, FLEDGE_ON);
+                }
+                None => paint::text(&mut p, fonts.medium(), 40.0, HALF, 250.0, "Nothing coming up", 0.0, WHITE),
+            }
+        }
+    }
+    for (slot, said) in glance_lines(at) {
+        if let Some(said) = said {
+            glance_line(&mut p, fonts, slot, &said, coloured);
+        }
+    }
+    if glance.layout == Layout::Analog {
+        analog_hands(&mut p, at.minutes());
+    }
+    if glance.dim {
+        paint::warm_dim(&mut p);
     }
     p
+}
+
+/// One line of the glance in its place.
+fn glance_line(p: &mut Canvas, fonts: &Fonts, slot: Slot, said: &Said, coloured: bool) {
+    match slot.style {
+        Style::Quiet => {
+            // On heating's or cooling's colour, a line's own colour would vanish.
+            let c = if coloured { [255, 232, 218] } else { said.colour.unwrap_or(GLANCE_QUIET) };
+            fitted(p, fonts.regular(), 30.0, 26.0, HALF, slot.y, &said.text, slot.room, c);
+        }
+        Style::Main => {
+            let c = if coloured { WHITE } else { said.colour.unwrap_or(WHITE) };
+            let icon_room = if said.icon.as_deref().is_some_and(|name| icons::lookup(name, "").is_some()) { 56.0 } else { 0.0 };
+            // Smaller first (down to 26 px), then shortened.
+            let room = slot.room - icon_room;
+            let full = paint::measure(fonts.regular(), 34.0, &said.text, 0.0);
+            let size = if full > room { (34.0 * room / full).max(26.0) } else { 34.0 };
+            let text = paint::fit(fonts.regular(), size, &said.text, 0.0, room);
+            let width = paint::measure(fonts.regular(), size, &text, 0.0);
+            let left = HALF - (width + icon_room) / 2.0;
+            if let (Some(name), true) = (&said.icon, icon_room > 0.0) {
+                icon(p, name, "", left + 21.0, slot.y - 12.0, 44.0, c);
+            }
+            paint::text_at(p, fonts.regular(), size, left + icon_room, slot.y, &text, 0.0, c, 1.0);
+        }
+        Style::Pill => {
+            let line = GlanceLine::new(fonts, &said.text, slot.room);
+            match (line.scrolls(), paint::fledge()) {
+                (false, true) => pill_words_at(p, fonts, slot.y, &said.text, said.colour.unwrap_or(FLEDGE_ON),
+                                               said.icon.as_deref().filter(|name| icons::lookup(name, "").is_some()),
+                                               line.size, line.room),
+                (false, false) => paint::text(p, fonts.medium(), line.size, HALF, slot.y - 2.0, &said.text, 0.0,
+                                              said.colour.unwrap_or(ACTION)),
+                (true, true) => {
+                    // The words scroll over it (glance_words).
+                    let (pad, height) = (line.size * 0.95, line.size * 2.1);
+                    paint::pill(p, HALF - line.room / 2.0 - pad, slot.y - height / 2.0, line.room + 2.0 * pad, height,
+                                alpha(said.colour.unwrap_or(FLEDGE_ON), 0.18));
+                }
+                (true, false) => {}
+            }
+        }
+    }
+}
+
+/// The time large, centred on `baseline`, a small AM / PM beside a
+/// 12-hour time; smaller where it would be wider than `room`.
+fn big_time(p: &mut Canvas, fonts: &Fonts, clock: &model::Clock, minutes: i64, size: f32, baseline: f32, room: f32) {
+    let time = clock.time(minutes, false);
+    let half = (clock.twelve() && clock.ampm).then(|| model::Clock::half(minutes.rem_euclid(1440) / 60));
+    let measure = |size: f32| {
+        let words = paint::measure(fonts.clock(), size, &time, -3.0);
+        let small = half.map_or(0.0, |h| 10.0 + paint::measure(fonts.medium(), size * 0.2, h, 1.0));
+        (words, small)
+    };
+    let (words, small) = measure(size);
+    let size = if words + small > room { size * room / (words + small) } else { size };
+    let (words, small) = measure(size);
+    let left = HALF - (words + small) / 2.0;
+    paint::text_at(p, fonts.clock(), size, left, baseline, &time, -3.0, WHITE, 1.0);
+    if let Some(h) = half {
+        paint::text_at(p, fonts.medium(), size * 0.2, left + words + 10.0, baseline, h, 1.0, GLANCE_QUIET, 1.0);
+    }
+}
+
+/// A large value centred on the display, smaller where it would be wider
+/// than `room`.
+fn hero(p: &mut Canvas, fonts: &Fonts, value: &str, size: f32, baseline: f32, room: f32, c: [u8; 3]) {
+    let font = fonts.digits();
+    let words = paint::measure(font, size, value, -3.0);
+    let size = if words > room { size * room / words } else { size };
+    let words = paint::measure(font, size, value, -3.0);
+    paint::text_at(p, font, size, HALF - words / 2.0, baseline, value, -3.0, c, 1.0);
+}
+
+/// `text` centred at `size`, smaller (down to `least`) and then shortened
+/// to fit `room`.
+#[allow(clippy::too_many_arguments)]
+fn fitted(p: &mut Canvas, font: &ab_glyph::FontArc, size: f32, least: f32, cx: f32, y: f32, text: &str, room: f32, c: [u8; 3]) {
+    let width = paint::measure(font, size, text, 0.0);
+    let size = if width > room { (size * room / width).max(least) } else { size };
+    let text = paint::fit(font, size, text, 0.0, room);
+    paint::text(p, font, size, cx, y, &text, 0.0, c);
+}
+
+/// When the next event is: "16:30 · in 2 h", "All day · tomorrow".
+fn event_when(event: &model::Event, at: &GlanceIn) -> String {
+    let local = event.start + at.glance.offset;
+    let days = local.div_euclid(86_400) - at.days();
+    let day = match days {
+        ..=0 => "today".to_owned(),
+        1 => "tomorrow".to_owned(),
+        2..=6 => date(local.div_euclid(86_400)).split(' ').next().unwrap_or_default().to_owned(),
+        _ => short_date(local.div_euclid(86_400)),
+    };
+    if event.all_day {
+        return format!("All day · {day}");
+    }
+    let time = at.glance.clock.time(local.rem_euclid(86_400) / 60, true);
+    let away = (event.start - at.now) as f64 / 60.0;
+    let soon = match away.ceil() as i64 {
+        ..=0 => "now".to_owned(),
+        minutes @ 1..=59 => format!("in {minutes} min"),
+        minutes if days == 0 => format!("in {} h", (minutes as f64 / 60.0).round() as i64),
+        _ => day,
+    };
+    format!("{time} · {soon}")
+}
+
+/// The analog clock's minute ticks round the ring, the hours longer.
+fn analog_ticks(p: &mut Canvas) {
+    for i in 0..60 {
+        let angle = i as f32 * std::f32::consts::PI / 30.0;
+        let hour = i % 5 == 0;
+        let (inner, outer) = (if hour { 194.0 } else { 210.0 }, 226.0);
+        let (s, c) = (angle.sin(), angle.cos());
+        paint::line(p, HALF + inner * s, HALF - inner * c, HALF + outer * s, HALF - outer * c,
+                    if hour { 5.0 } else { 2.5 }, colour(if hour { WHITE } else { DIM }));
+    }
+}
+
+/// The analog clock's hands at `minutes` past midnight.
+fn analog_hands(p: &mut Canvas, minutes: i64) {
+    let (h, m) = ((minutes.rem_euclid(720)) as f32 / 60.0, minutes.rem_euclid(60) as f32);
+    let hand = |p: &mut Canvas, angle: f32, length: f32, width: f32| {
+        let (s, c) = (angle.sin(), angle.cos());
+        paint::line(p, HALF - 18.0 * s, HALF + 18.0 * c, HALF + length * s, HALF - length * c, width, colour(WHITE));
+    };
+    hand(p, h * std::f32::consts::PI / 6.0, 112.0, 11.0);
+    hand(p, m * std::f32::consts::PI / 30.0, 170.0, 6.0);
+    paint::circle(p, HALF, HALF, 9.0, colour(FLEDGE_ON));
+}
+
+/// "Wed 11 Nov" from days since 1970.
+fn short_date(days: i64) -> String {
+    let long = date(days);
+    let mut words = long.split(' ');
+    let (day, number, month) = (words.next().unwrap_or_default(), words.next().unwrap_or_default(), words.next().unwrap_or_default());
+    format!("{} {number} {}", &day[..3.min(day.len())], &month[..3.min(month.len())])
 }
 
 /// "Sunday 8 November" from days since 1970.
@@ -1922,6 +2259,79 @@ fn alarm_open(fonts: &Fonts, card: &AlarmCard, arm: &AlarmMode, sensors: &[Strin
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::{Cards, Event, Glance, Line, Nest};
+    use super::{event_when, line_said, short_date, GlanceIn, Said};
+
+    /// Sunday 8 November 2026, 21:13 UTC.
+    const NOW: i64 = 1_794_172_380;
+
+    fn glance(json: &str) -> Glance {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn nest(extra: serde_json::Value) -> Nest {
+        let mut s = serde_json::json!({"mode": "heat", "action": "idle", "target": 21.0, "current_temperature": 19.5,
+            "current_humidity": 48, "preset": "none", "temperature_scale": "C", "can_heat": true});
+        for (k, v) in extra.as_object().unwrap() {
+            s[k] = v.clone();
+        }
+        Nest::from_state(s.as_object().unwrap())
+    }
+
+    fn says(line: Line, glance: &Glance, nest: Option<&Nest>) -> Option<String> {
+        line_said(&line, &GlanceIn { glance, cards: &[], nest, now: NOW }).map(|Said { text, .. }| text)
+    }
+
+    #[test]
+    fn the_glance_s_own_lines_say_the_date_time_and_thermostat() {
+        let twelve = glance(r#"{"clock":{"hours":12}}"#);
+        assert_eq!(says(Line::kind("date"), &twelve, None).as_deref(), Some("Sunday 8 November"));
+        assert_eq!(says(Line::kind("date_short"), &twelve, None).as_deref(), Some("Sun 8 Nov"));
+        assert_eq!(says(Line::kind("time"), &twelve, None).as_deref(), Some("9:13 PM"));
+        assert_eq!(says(Line::kind("time"), &glance("{}"), None).as_deref(), Some("21:13"));
+        let idle = nest(serde_json::json!({}));
+        assert_eq!(says(Line::kind("inside"), &twelve, Some(&idle)).as_deref(), Some("Inside 19.5° · 48%"));
+        assert_eq!(says(Line::kind("heating"), &twelve, Some(&idle)).as_deref(), Some("Set to 21°"));
+        let heating = nest(serde_json::json!({"action": "heating", "target": 21.5, "time_to_target": "2026-11-08T21:35:00Z"}));
+        assert_eq!(says(Line::kind("heating"), &twelve, Some(&heating)).as_deref(), Some("Heating to 21.5° · 22 min"));
+        assert_eq!(says(Line::kind("inside"), &twelve, None), None, "no thermostat: nothing to say");
+        assert_eq!(says(Line::kind("weather"), &twelve, None), None, "no weather chosen");
+        assert_eq!(says(Line::kind("no_such_kind"), &twelve, None), None, "a newer kind: left empty");
+    }
+
+    #[test]
+    fn home_assistant_s_lines_come_as_they_are() {
+        let line = Line { icon: Some("mdi:calendar".into()), text: Some("16:30 Dentist".into()), kind: None };
+        let g = glance("{}");
+        let said = line_said(&line, &GlanceIn { glance: &g, cards: &[], nest: None, now: NOW }).unwrap();
+        assert_eq!((said.text.as_str(), said.icon.as_deref()), ("16:30 Dentist", Some("mdi:calendar")));
+        assert_eq!(says(Line { text: Some("  ".into()), ..Line::default() }, &g, None), None, "blank: nothing");
+    }
+
+    #[test]
+    fn the_next_event_says_when() {
+        let g = glance(r#"{"offset":3600}"#);
+        let at = GlanceIn { glance: &g, cards: &[], nest: None, now: NOW };
+        let event = |start: i64, all_day: bool| event_when(&Event { title: "x".into(), start, all_day }, &at);
+        assert_eq!(event(NOW + 25 * 60, false), "22:38 · in 25 min");
+        assert_eq!(event(NOW + 90 * 60, false), "23:43 · in 2 h");
+        assert_eq!(event(NOW + 2 * 3600, false), "00:13 · tomorrow", "past midnight");
+        assert_eq!(event(NOW - 60, false), "22:12 · now");
+        assert_eq!(event(NOW + 12 * 3600, false), "10:13 · tomorrow");
+        assert_eq!(event(NOW + 3 * 86_400, true), "All day · Wednesday");
+        assert_eq!(short_date(20_400), "Sat 8 Nov");
+    }
+
+    #[test]
+    fn the_glance_without_lines_is_the_glance_as_it_was() {
+        let cards = Cards::parse(br#"{"cards":[],"glance":{"offset":0}}"#).unwrap();
+        let lines = cards.glance.unwrap().lines();
+        assert_eq!(lines, ["date", "weather", "whats_on"].map(Line::kind).to_vec());
+        let analog = glance(r#"{"layout":"analog","lines":[{"kind":"date"},{"kind":"time"}]}"#);
+        assert_eq!(analog.lines().len(), 1, "as many as its layout has room for");
+        assert_eq!(glance(r#"{"layout":"hologram"}"#).layout.slots(), 3, "a layout from a newer Fledge: the clock");
+    }
+
     #[test]
     fn the_glance_counts_lights_switches_and_fans_apart() {
         let on = |ids: &[&str]| {

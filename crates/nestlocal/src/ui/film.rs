@@ -252,17 +252,18 @@ fn ui_film() {
     let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
         state: "open".into(), position: Some(60), positionable: true };
     let glance = model::Glance { offset: 0, weather: Some(model::Weather { condition: "partlycloudy".into(),
-        temperature: Some(8.4), unit: "°C".into() }) };
+        temperature: Some(8.4), unit: "°C".into() }), ..model::Glance::default() };
     let mut film = Film { dir, frames: 0, last: Vec::new(), captions: Vec::new() };
 
     // The glance, a long title scrolling through its line.
     let glanced = |film: &mut Film, fonts: &paint::Fonts, frames: usize, fade: bool| {
         let cards = parse(60, 21.5, 35, "The Lighthouse at the End of the Bay");
-        let still = screens::glance_still(fonts, &glance, &cards.cards, now);
+        let at = screens::GlanceIn { glance: &glance, cards: &cards.cards, nest: None, now };
+        let still = screens::glance_still(fonts, &at);
         let mut canvas = still.clone();
-        let round = screens::glance_scroll(fonts, &cards.cards).expect("a line that scrolls");
+        let round = screens::glance_scroll(fonts, &at).expect("a line that scrolls");
         for frame in 0..frames {
-            screens::glance_words(&mut canvas, &still, fonts, &cards.cards, super::ticker_offset(frame as f32 * FRAME, round));
+            screens::glance_words(&mut canvas, &still, fonts, &at, super::ticker_offset(frame as f32 * FRAME, round));
             let shown = canvas.pixmap.data().to_vec();
             if frame == 0 && fade {
                 film.fade(&shown);

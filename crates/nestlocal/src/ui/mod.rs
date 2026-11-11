@@ -66,7 +66,10 @@ use crate::logf;
 ///   9  alarm cards (arm, disarm; <base>/set/alarm_result)
 ///  10  the thermostat's card hidden (show_thermostat false); and the
 ///      act_as_thermostat switch, off taking the card away too
-pub const PROTOCOL: u32 = 10;
+///  11  the glance's layouts, 12-hour clock, lines and night
+///      (glance.layout/clock/lines/big/event/colour/night/dim), and a glance
+///      to try for a while (<base>/set/glance_try)
+pub const PROTOCOL: u32 = 11;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -107,6 +110,9 @@ pub struct Ui {
     alert: Mutex<(u64, Option<Alert>)>,
     /// Its latest answer to an alarm command (<base>/set/alarm_result), counted.
     alarm_result: Mutex<(u64, Option<AlarmResult>)>,
+    /// A glance to try for a while (<base>/set/glance_try), counted; None
+    /// puts the saved one back.
+    glance_try: Mutex<(u64, Option<model::Glance>)>,
 }
 
 impl Ui {
@@ -192,6 +198,19 @@ impl Ui {
         let result = AlarmResult::parse(payload)?;
         let mut held = self.alarm_result.lock().unwrap();
         *held = (held.0 + 1, Some(result));
+        Ok(())
+    }
+
+    /// Takes a glance to try for a while (<base>/set/glance_try): the
+    /// panel's unsaved glance on the real screen; empty ends it.
+    pub fn try_glance(&self, payload: &[u8]) -> Result<(), String> {
+        let glance = if payload.iter().all(u8::is_ascii_whitespace) {
+            None
+        } else {
+            Some(serde_json::from_slice::<model::Glance>(payload).map_err(|e| e.to_string())?)
+        };
+        let mut held = self.glance_try.lock().unwrap();
+        *held = (held.0 + 1, glance);
         Ok(())
     }
 
@@ -295,6 +314,8 @@ struct Runtime {
     kept_on: Instant,
     /// The notifications taken, and the scene last shown as run.
     alerts: u64,
+    /// The glances to try taken (Ui::try_glance).
+    glance_tries: u64,
     /// Home Assistant's alarm answers taken so far.
     alarm_results: u64,
     ran: Option<(usize, Instant)>,
@@ -535,7 +556,7 @@ impl Runtime {
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             drawn: Default::default(), stale: Default::default(), progress_checked: Instant::now(), showed: false,
             wakes: 0, kept_on: Instant::now(),
-            alerts: 0, alarm_results: 0, ran: None, glance_minute: 0, backlight_off: false, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
+            alerts: 0, alarm_results: 0, glance_tries: 0, ran: None, glance_minute: 0, backlight_off: false, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
             seen: (SEEN_FAR.load(std::sync::atomic::Ordering::Relaxed), SEEN_NEAR.load(std::sync::atomic::Ordering::Relaxed)),
             rest: false, black: false, beat: 0, last_beat: now,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, ticker: None, last_frame: now,
@@ -654,6 +675,12 @@ impl Runtime {
                     logf!("ui: notification {}", alert.id);
                     self.machine.show_alert(alert, now, lit, &mut effects);
                 }
+            }
+            let (tries, tried) = self.ui.glance_try.lock().unwrap().clone();
+            if tries != self.glance_tries {
+                self.glance_tries = tries;
+                logf!("ui: glance to try: {}", if tried.is_some() { "showing" } else { "ended" });
+                self.machine.try_glance(tried, now, lit, &mut effects);
             }
             let (results, result) = self.ui.alarm_result.lock().unwrap().clone();
             if results != self.alarm_results {
@@ -1854,8 +1881,8 @@ impl Runtime {
                 _ => return None,
             },
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
-            Mode::Glance => Screen::Glance { glance: machine.cards.glance.as_ref()?, cards: &machine.cards.cards,
-                                             now: unix_now() as i64 },
+            Mode::Glance => Screen::Glance { at: screens::GlanceIn { glance: machine.glance()?, cards: &machine.cards.cards,
+                                                                     nest: machine.nest.as_ref(), now: unix_now() as i64 } },
             Mode::Thermostat { target } => Screen::NestSet {
                 nest: machine.nest.as_ref()?, pulse: None,
                 target: machine::on_step(*target, machine.nest.as_ref()?.card.step),
@@ -1932,14 +1959,14 @@ impl Runtime {
             (kind, _) => kind,
         };
         let fade = kind != Transition::Cut;
-        if let Screen::Glance { glance, cards, now } = &screen {
-            if let Some(round) = screens::glance_scroll(&self.fonts, cards) {
+        if let Screen::Glance { at } = &screen {
+            if let Some(round) = screens::glance_scroll(&self.fonts, at) {
                 // A line too long for its place scrolls: the glance drawn
                 // once, then only the line, where it is.
-                let key = screens::glance_key(glance, cards, *now);
+                let key = screens::glance_key(at);
                 let fresh = !matches!(&self.ticker, Some(ticker) if ticker.key == key);
                 if fresh {
-                    let still = screens::glance_still(&self.fonts, glance, cards, *now);
+                    let still = screens::glance_still(&self.fonts, at);
                     // The same words go on from where they were, as the minute turns.
                     let since = match &self.ticker {
                         Some(ticker) if ticker.round == round => ticker.since,
@@ -1949,7 +1976,7 @@ impl Runtime {
                 }
                 let ticker = self.ticker.as_mut().expect("just made");
                 ticker.shown = ticker_offset(ticker.since.elapsed().as_secs_f32(), round);
-                let columns = screens::glance_words(&mut ticker.canvas, &ticker.still, &self.fonts, cards, ticker.shown);
+                let columns = screens::glance_words(&mut ticker.canvas, &ticker.still, &self.fonts, at, ticker.shown);
                 (self.live, self.glide) = (None, None);
                 if fresh || fade {
                     let frame = ticker.canvas.pixmap.data().to_vec();
@@ -2798,9 +2825,9 @@ mod shots {
             members: lights.lights.clone() };
         save(&screens::draw(&fonts, &Screen::Members { card: &group, selected: 1 }, None), &format!("{out}/b5-members.png"));
         let glance = model::Glance { offset: 0, weather: Some(model::Weather { condition: "partlycloudy".into(),
-            temperature: Some(8.4), unit: "°C".into() }) };
-        save(&screens::draw(&fonts, &Screen::Glance { glance: &glance, cards: &cards.cards, now: 1_794_172_380 }, None),
-             &format!("{out}/b6-glance.png"));
+            temperature: Some(8.4), unit: "°C".into() }), ..model::Glance::default() };
+        let at = screens::GlanceIn { glance: &glance, cards: &cards.cards, nest: None, now: 1_794_172_380 };
+        save(&screens::draw(&fonts, &Screen::Glance { at }, None), &format!("{out}/b6-glance.png"));
         let alarm = |state: &str, code: Option<&str>, delay: Option<model::AlarmDelay>| model::AlarmCard {
             id: "alarm_control_panel.house".into(), name: "House alarm".into(), icon: String::new(), state: state.into(),
             modes: vec![model::AlarmMode { mode: "home".into(), name: String::new() },
@@ -2888,6 +2915,23 @@ mod shots {
         ];
         for (name, nest) in &shots {
             save(&screens::draw(&fonts, &Screen::NestCard { nest, now }, None), &format!("{out}/{name}.png"));
+        }
+        // The glance's layouts (protocol 11), as Home Assistant sends them.
+        let glances = [
+            ("g1-clock-12h", r#"{"layout":"clock","clock":{"hours":12,"ampm":true},"lines":[{"kind":"date"},{"kind":"weather"},{"kind":"whats_on"}]}"#),
+            ("g2-temp", r#"{"layout":"temp","lines":[{"kind":"heating"},{"kind":"weather"}]}"#),
+            ("g3-weather", r#"{"layout":"weather","lines":[{"icon":"mdi:thermometer","text":"High 12° · Low 5°"},{"text":"Rain from 15:00"}]}"#),
+            ("g4-analog", r#"{"layout":"analog","lines":[{"kind":"date_short"}]}"#),
+            ("g5-number", r#"{"layout":"number","big":{"label":"Electricity","value":"24.3","unit":"p/kWh"},"lines":[{"kind":"time"},{"icon":"mdi:car","text":"Car charging"}]}"#),
+            ("g6-agenda", r#"{"layout":"agenda","event":{"title":"Dentist","start":1794180600},"lines":[{"kind":"weather"}]}"#),
+            ("g7-analog-night", r#"{"layout":"analog","night":true,"dim":true,"lines":[{"kind":"date"}]}"#),
+            ("g8-clock-lines", r#"{"layout":"clock","lines":[{"kind":"inside"},{"kind":"heating"},{"icon":"mdi:calendar","text":"16:30 Dentist"}]}"#),
+        ];
+        for (name, json) in glances {
+            let mut glance: model::Glance = serde_json::from_str(json).unwrap();
+            glance.weather = Some(model::Weather { condition: "partlycloudy".into(), temperature: Some(8.4), unit: "°C".into() });
+            let at = screens::GlanceIn { glance: &glance, cards: &cards.cards, nest: Some(&heating), now: now as i64 };
+            save(&screens::draw(&fonts, &Screen::Glance { at }, None), &format!("{out}/{name}.png"));
         }
         save(&screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 22.0, pulse: None, setting: true, shown: None }, None), &format!("{out}/t5-nest-set.png"));
         let nest_options: Vec<(String, String, String)> = [Action::Back, Action::Eco(true), Action::Power(false), Action::Boost(false),

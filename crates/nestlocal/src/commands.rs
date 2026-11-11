@@ -156,6 +156,12 @@ impl Bridge {
             }
             return;
         }
+        if name == "glance_try" {
+            if let Err(e) = self.ui.try_glance(payload) {
+                logf!("mqtt: glance_try: {e}");
+            }
+            return;
+        }
         if name == "alarm_result" {
             if let Err(e) = self.ui.set_alarm_result(payload) {
                 logf!("mqtt: alarm_result: {e}");
