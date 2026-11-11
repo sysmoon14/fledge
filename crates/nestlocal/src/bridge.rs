@@ -53,7 +53,7 @@ use crate::weather::Outdoor;
 
 /// The update entity's discovery components and keys (update.rs): the
 /// update itself, and its check button.
-const UPDATE_ENTITIES: [(&str, &str); 2] = [("update", "nestlocal"), ("button", "check_update")];
+const UPDATE_ENTITIES: [(&str, &str); 3] = [("update", "nestlocal"), ("button", "check_update"), ("switch", "update_pre_releases")];
 /// What -external-temperature adds (announce).
 const SENSOR_ENTITIES: [(&str, &str); 2] = [("sensor", "external_temperature"), ("sensor", "temperature_source")];
 /// What stays announced while the Nest isn't a thermostat (role.rs): what
@@ -284,10 +284,11 @@ impl Bridge {
         self.updates.get()
     }
 
-    fn publish_update(&self) {
+    pub(crate) fn publish_update(&self) {
         if let Some(updates) = self.updates.get() {
             let state = crate::update::state(updates.latest.lock().unwrap().as_ref(),
-                                             &updates.progress.lock().unwrap(), crate::update::failed().as_deref());
+                                             &updates.progress.lock().unwrap(), crate::update::failed().as_deref(),
+                                             updates.pre_releases());
             self.publish(&format!("{}/update", self.base), true, state.to_string().as_bytes());
         }
     }
@@ -891,6 +892,14 @@ impl Bridge {
                 "entity_category" => "config",
                 "icon" => "mdi:update",
             });
+            // Off for everyone but those trying release candidates.
+            add(UPDATE_ENTITIES[2].0, UPDATE_ENTITIES[2].1, "Fledgeling pre-releases", fields!{
+                "state_topic" => format!("{}/update", self.base),
+                "value_template" => "{{ 'ON' if value_json.pre_releases else 'OFF' }}",
+                "command_topic" => format!("{set}update_pre_releases"),
+                "entity_category" => "config",
+                "icon" => "mdi:flask-outline",
+            });
         }
         add("button", "clear_schedule", "Clear Nest schedule", fields!{
             "command_topic" => format!("{set}clear_schedule"),
@@ -1335,6 +1344,8 @@ pub mod tests {
         let update: Value = serde_json::from_str(&configs["homeassistant/update/nestlocal_s/nestlocal/config"]).unwrap();
         assert_eq!(update["command_topic"], json!("nestlocal/S/set/update"));
         assert_eq!(update["payload_install"], json!("install"));
+        let pre: Value = serde_json::from_str(&configs["homeassistant/switch/nestlocal_s/update_pre_releases/config"]).unwrap();
+        assert_eq!((&pre["command_topic"], &pre["state_topic"]), (&json!("nestlocal/S/set/update_pre_releases"), &json!("nestlocal/S/update")));
     }
 
     #[test]
@@ -1343,6 +1354,7 @@ pub mod tests {
         assert_eq!(b.stale_update_topics("nestlocal_s"), vec![
             "homeassistant/update/nestlocal_s/nestlocal/config".to_string(),
             "homeassistant/button/nestlocal_s/check_update/config".to_string(),
+            "homeassistant/switch/nestlocal_s/update_pre_releases/config".to_string(),
             "nestlocal/S/update".to_string(),
         ]);
         let b = test_bridge();

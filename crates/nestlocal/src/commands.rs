@@ -116,6 +116,20 @@ impl Bridge {
             }
             return;
         }
+        if name == "update_pre_releases" {
+            let on = matches!(String::from_utf8_lossy(payload).trim().to_ascii_uppercase().as_str(), "ON" | "1" | "TRUE");
+            match self.updates() {
+                Some(updates) => match updates.set_pre_releases(on) {
+                    Ok(()) => {
+                        logf!("mqtt: update_pre_releases: {}", if on { "on" } else { "off" });
+                        self.publish_update();
+                    }
+                    Err(e) => logf!("mqtt: update_pre_releases: {e}"),
+                },
+                None => logf!("mqtt: update_pre_releases: no -update-repo"),
+            }
+            return;
+        }
         if name == "check_update" {
             match self.updates() {
                 Some(updates) => updates.check.notify_one(),

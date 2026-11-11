@@ -42,6 +42,8 @@ pub const ASSET: &str = "nestlocal-armv7";
 pub const SIGNATURE: &str = "nestlocal-armv7.sig";
 /// Left by an install until the new build is healthy (nestlocal.init).
 pub const PENDING: &str = "/etc/nestlocal/update.pending";
+/// There: Home Assistant's Fledgeling pre-releases switch is on.
+pub const PRE_RELEASES_FILE: &str = "/etc/nestlocal/update.pre-releases";
 /// The version nestlocal.init rolled back from.
 pub const FAILED: &str = "/etc/nestlocal/update.failed";
 pub const DAEMON: &str = "/nestlabs/sbin/nestlocal";
@@ -90,10 +92,11 @@ pub fn parse_release(body: &[u8]) -> Result<Release, String> {
     Ok(Release { tag, url: text("html_url"), notes: text("body"), assets })
 }
 
-/// What orders versions: vX.Y.Z, then a release counter -NAME.N after it
-/// (the fork's earlier releases numbered so), then git describe's -K-gHASH
-/// commits after it. -dirty is ignored.
-fn version_key(version: &str) -> Option<(u32, u32, u32, u32, u32)> {
+/// What orders versions: vX.Y.Z; a pre-release of it (-rc.N, -beta.N,
+/// -alpha.N) before it, and the fork's own release counter -NAME.N after it
+/// (its earlier releases numbered so); then git describe's -K-gHASH commits
+/// after either. -dirty is ignored.
+fn version_key(version: &str) -> Option<(u32, u32, u32, u8, u32, u32)> {
     let rest = version.strip_prefix('v')?;
     let (core, mut rest) = rest.split_once('-').unwrap_or((rest, ""));
     let mut parts = core.split('.').map(|p| p.parse::<u32>().ok());
@@ -101,12 +104,15 @@ fn version_key(version: &str) -> Option<(u32, u32, u32, u32, u32)> {
     if parts.next().is_some() {
         return None;
     }
-    let mut counter = 0;
+    let (mut stage, mut counter) = (1, 0);
     if let Some((name, after)) = rest.split_once('.') {
         if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase()) {
             let (n, tail) = after.split_once('-').unwrap_or((after, ""));
             counter = n.parse().ok()?;
             rest = tail;
+            if PRE_RELEASES.contains(&name) {
+                stage = 0;
+            }
         }
     }
     let mut commits = 0;
@@ -115,7 +121,15 @@ fn version_key(version: &str) -> Option<(u32, u32, u32, u32, u32)> {
             commits = k.parse().ok()?;
         }
     }
-    Some((major, minor, patch, counter, commits))
+    Some((major, minor, patch, stage, counter, commits))
+}
+
+/// The names a tag's -NAME.N has when it comes before its release.
+const PRE_RELEASES: [&str; 3] = ["alpha", "beta", "rc"];
+
+/// Whether a tag is a pre-release (vX.Y.Z-rc.N and the like).
+pub fn pre_release(tag: &str) -> bool {
+    version_key(tag).is_some_and(|k| k.3 == 0)
 }
 
 /// The release a build is on: git describe without -K-gHASH and -dirty.
@@ -311,8 +325,9 @@ pub enum Progress {
 }
 
 /// The entity's state: what the MQTT update entity reads from its state topic.
-pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>) -> Value {
+pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>, pre_releases: bool) -> Value {
     let mut state = serde_json::json!({ "installed_version": VERSION, "title": "Fledgeling" });
+    state["pre_releases"] = pre_releases.into();
     state["in_progress"] = matches!(progress, Progress::Downloading(_) | Progress::Restarting).into();
     if let Progress::Downloading(percent) = progress {
         state["update_percentage"] = (*percent).into();
@@ -367,6 +382,11 @@ pub struct Updates {
     pub checked: Mutex<Option<SystemTime>>,
     /// Home Assistant pressed the check button.
     pub check: tokio::sync::Notify,
+    /// Home Assistant's Fledgeling pre-releases switch: offer release
+    /// candidates too (PRE_RELEASES), not only GitHub's latest release.
+    pub pre_releases: std::sync::atomic::AtomicBool,
+    /// Where the switch is kept across restarts: there, it's on.
+    pre_releases_file: std::path::PathBuf,
 }
 
 impl Updates {
@@ -375,8 +395,33 @@ impl Updates {
     pub fn new(repo: &str, key: Option<[u8; 32]>) -> Updates {
         let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
         let tls = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        Updates::with_file(repo, key, tls, PRE_RELEASES_FILE.into())
+    }
+
+    fn with_file(repo: &str, key: Option<[u8; 32]>, tls: rustls::ClientConfig, file: std::path::PathBuf) -> Updates {
+        let on = file.exists();
         Updates { repo: repo.into(), key, tls: Arc::new(tls), progress: Mutex::new(Progress::Idle),
-                  latest: Mutex::new(None), checked: Mutex::new(None), check: tokio::sync::Notify::new() }
+                  latest: Mutex::new(None), checked: Mutex::new(None), check: tokio::sync::Notify::new(),
+                  pre_releases: std::sync::atomic::AtomicBool::new(on), pre_releases_file: file }
+    }
+
+    pub fn pre_releases(&self) -> bool {
+        self.pre_releases.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turns pre-releases on or off, kept across restarts, and checks again.
+    pub fn set_pre_releases(&self, on: bool) -> Result<(), String> {
+        let f = &self.pre_releases_file;
+        let saved = if on { std::fs::write(f, b"") } else {
+            match std::fs::remove_file(f) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        };
+        saved.map_err(|e| format!("{}: {e}", f.display()))?;
+        self.pre_releases.store(on, std::sync::atomic::Ordering::Relaxed);
+        self.check.notify_one();
+        Ok(())
     }
 
     /// Downloads, checks and installs the latest release if it is newer;
@@ -405,20 +450,47 @@ impl Updates {
         *self.checked.lock().unwrap() = Some(SystemTime::now());
         // Asleep, the unit would drop the request half way.
         crate::wake::keep_awake_for(TIMEOUT.as_secs() + 5);
-        let latest = tokio::time::timeout(TIMEOUT, fetch(&self.repo, self.tls.clone())).await
+        let latest = tokio::time::timeout(TIMEOUT, fetch(&self.repo, self.tls.clone(), self.pre_releases())).await
             .map_err(|_| "timed out".to_string())??;
         *self.latest.lock().unwrap() = latest.clone();
         Ok(latest)
     }
 }
 
-async fn fetch(repo: &str, tls: Arc<rustls::ClientConfig>) -> Result<Option<Release>, String> {
+async fn fetch(repo: &str, tls: Arc<rustls::ClientConfig>, pre_releases: bool) -> Result<Option<Release>, String> {
+    if pre_releases {
+        // The newest of the last few, pre-releases among them.
+        let url = format!("https://{API_HOST}/repos/{repo}/releases?per_page=20");
+        return match request(&tls, &url, 4 << 20, |_| {}).await? {
+            (200, body) => newest_release(&body),
+            (404, _) => Ok(None),
+            (code, _) => Err(format!("{repo}: HTTP {code}")),
+        };
+    }
     let url = format!("https://{API_HOST}/repos/{repo}/releases/latest");
     match request(&tls, &url, 1 << 20, |_| {}).await? {
         (200, body) => parse_release(&body).map(Some),
         (404, _) => Ok(None),
         (code, _) => Err(format!("{repo}: HTTP {code}")),
     }
+}
+
+/// The newest published release in GitHub's /releases list, pre-releases
+/// included: by version, not by date (a fix to an older line may come
+/// later). Drafts and tags that aren't versions are left out.
+pub fn newest_release(body: &[u8]) -> Result<Option<Release>, String> {
+    let list: Vec<Value> = serde_json::from_slice(body).map_err(|e| format!("releases: {e}"))?;
+    let mut best: Option<Release> = None;
+    for item in list {
+        if item.get("draft").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let Ok(release) = parse_release(item.to_string().as_bytes()) else { continue };
+        if version_key(&release.tag).is_some() && best.as_ref().is_none_or(|b| newer(&release.tag, &b.tag)) {
+            best = Some(release);
+        }
+    }
+    Ok(best)
 }
 
 /// GETs an https URL that must answer 200, following GitHub's redirects
@@ -544,11 +616,11 @@ mod tests {
 
     #[test]
     fn the_state_offers_a_release_only_once_one_is_known() {
-        let s = state(None, &Progress::Idle, None);
+        let s = state(None, &Progress::Idle, None, false);
         assert_eq!(s["installed_version"], VERSION);
         assert!(s.get("latest_version").is_none());
         let notes = "x".repeat(300);
-        let s = state(Some(&Release { tag: "v99.0.0".into(), url: "u".into(), notes, assets: vec![] }), &Progress::Idle, None);
+        let s = state(Some(&Release { tag: "v99.0.0".into(), url: "u".into(), notes, assets: vec![] }), &Progress::Idle, None, false);
         assert_eq!(s["latest_version"], "v99.0.0");
         assert_eq!(s["release_url"], "u");
         assert_eq!(s["release_summary"].as_str().unwrap().len(), 255);
@@ -566,13 +638,13 @@ mod tests {
 
     #[test]
     fn the_state_shows_an_install_and_a_rollback() {
-        let s = state(None, &Progress::Downloading(40), None);
+        let s = state(None, &Progress::Downloading(40), None, false);
         assert_eq!((s["in_progress"].clone(), s["update_percentage"].clone()), (true.into(), 40.into()));
-        assert_eq!(state(None, &Progress::Restarting, None)["in_progress"], true);
-        let s = state(None, &Progress::Idle, Some("v9.9.9-rc.1"));
+        assert_eq!(state(None, &Progress::Restarting, None, false)["in_progress"], true);
+        let s = state(None, &Progress::Idle, Some("v9.9.9-rc.1"), false);
         assert_eq!(s["in_progress"], false);
         assert!(s["title"].as_str().unwrap().contains("v9.9.9-rc.1 did not start"));
-        assert!(state(None, &Progress::Failed("no room".into()), None)["title"].as_str().unwrap().contains("no room"));
+        assert!(state(None, &Progress::Failed("no room".into()), None, false)["title"].as_str().unwrap().contains("no room"));
     }
 
     #[test]
@@ -594,12 +666,12 @@ mod tests {
     #[test]
     fn a_release_that_was_rolled_back_is_not_offered_again() {
         let r = Release { tag: "v99.0.0-rc.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
-        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"));
+        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"), false);
         assert_eq!(s["latest_version"], s["installed_version"]);
         assert!(s["title"].as_str().unwrap().contains("v99.0.0-rc.1 did not start"));
         // A newer one than that is.
         let r = Release { tag: "v99.0.0-rc.2".into(), ..r };
-        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"));
+        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"), false);
         assert_eq!(s["latest_version"], "v99.0.0-rc.2");
         assert!(s["title"].as_str().unwrap().contains("rolled back"));
     }
@@ -615,10 +687,46 @@ mod tests {
     #[test]
     fn home_assistant_sees_a_development_build_as_its_release_when_one_is_newer() {
         let r = Release { tag: "v99.0.0-rc.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
-        let s = state(Some(&r), &Progress::Idle, None);
+        let s = state(Some(&r), &Progress::Idle, None, false);
         assert_eq!(s["installed_version"], release_of(VERSION));
         assert_eq!(s["latest_version"], "v99.0.0-rc.1");
-        assert_eq!(state(None, &Progress::Idle, None)["title"], "Fledgeling");
+        assert_eq!(state(None, &Progress::Idle, None, false)["title"], "Fledgeling");
+    }
+
+    #[test]
+    fn a_release_candidate_comes_before_its_release() {
+        assert!(newer("v0.8.0", "v0.8.0-rc.2"), "the release replaces its candidates");
+        assert!(newer("v0.8.0-rc.1", "v0.7.0"));
+        assert!(newer("v0.8.0-rc.1", "v0.7.0-13-g9ea79e7"));
+        assert!(newer("v0.8.0", "v0.8.0-rc.1-3-gabc1234"));
+        assert!(newer("v0.8.0-ben.1", "v0.8.0"), "the fork's old counters come after");
+        assert!(pre_release("v0.8.0-rc.1") && pre_release("v1.0.0-beta.2") && !pre_release("v0.8.0") && !pre_release("v0.3.2-ben.3"));
+    }
+
+    #[test]
+    fn with_pre_releases_the_newest_version_listed_is_offered() {
+        let body = br#"[
+            {"tag_name":"v0.7.1","draft":false,"prerelease":false,"html_url":"a","body":"","assets":[]},
+            {"tag_name":"v0.8.0-rc.2","draft":true,"prerelease":true,"html_url":"b","body":"","assets":[]},
+            {"tag_name":"v0.8.0-rc.1","draft":false,"prerelease":true,"html_url":"c","body":"","assets":[]},
+            {"tag_name":"v0.7.0","draft":false,"prerelease":false,"html_url":"d","body":"","assets":[]}]"#;
+        assert_eq!(newest_release(body).unwrap().unwrap().tag, "v0.8.0-rc.1", "not the draft");
+        assert_eq!(newest_release(b"[]").unwrap(), None);
+    }
+
+    #[test]
+    fn the_pre_releases_switch_is_kept() {
+        let dir = std::env::temp_dir().join(format!("nestlocal-pre-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("update.pre-releases");
+        let tls = || rustls::ClientConfig::builder().with_root_certificates(rustls::RootCertStore::empty()).with_no_client_auth();
+        let u = Updates::with_file("o/r", None, tls(), file.clone());
+        assert!(!u.pre_releases());
+        u.set_pre_releases(true).unwrap();
+        assert!(Updates::with_file("o/r", None, tls(), file.clone()).pre_releases(), "after a restart");
+        u.set_pre_releases(false).unwrap();
+        assert!(!file.exists() && !u.pre_releases());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

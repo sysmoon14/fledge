@@ -15,6 +15,9 @@
 #               first paragraph (at most 255 characters) is the summary Home
 #               Assistant's update entity shows. The changes since the last
 #               release follow it.
+#               A tag vX.Y.Z-rc.N (or -beta.N, -alpha.N) is published as a
+#               GitHub pre-release, not marked latest: only units with Home
+#               Assistant's Fledgeling pre-releases switch on are offered it.
 #   --dry-run   build, check and sign, then publish nothing (the tag is removed)
 #
 # The commit must be clean and pushed. It is tagged first, so nestlocal reports
@@ -144,7 +147,11 @@ fi
 # --- publish ------------------------------------------------------------------------
 git push -q origin "refs/tags/$tag" || fail "cannot push tag $tag to origin"
 published=1
-gh release create "$tag" --repo "$repo" --verify-tag --latest --title "Fledge $tag" \
+case $tag in
+    *-rc.*|*-beta.*|*-alpha.*) channel=--prerelease ;;
+    *) channel=--latest ;;
+esac
+gh release create "$tag" --repo "$repo" --verify-tag "$channel" --title "Fledge $tag" \
     --notes-file "$out/notes.md" "$binary" "$binary.sig" "$binary.sha256" ||
     fail "the tag is pushed but the release was not created: gh release create $tag --repo $repo ..."
 echo "Released: https://github.com/$repo/releases/tag/$tag"
