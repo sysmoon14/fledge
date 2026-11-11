@@ -36,8 +36,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use model::Command;
-use machine::{Action, Effect, Input, Machine, Mode, Slot};
-use model::{AlarmResult, Alert, Art, Card, Cards, Nest, OptionsCard};
+use machine::{Action, Dial, Effect, Input, Machine, Mode, Slot};
+use model::{AlarmResult, Alert, Art, Card, Cards, ClimateChoice, Nest, OptionsCard};
 use std::borrow::Cow;
 use screens::Screen;
 
@@ -207,7 +207,7 @@ pub trait Sender: Send + Sync + 'static {
     /// Whether the Nest clicks as the ring turns (its click sound setting).
     fn clicks(&self) -> bool;
     /// This thermostat's state, as Home Assistant's entities read it, with
-    /// can_heat, can_cool, has_hot_water_control, version and update (a
+    /// can_heat, can_cool, has_hot_water_control, has_fan, version and update (a
     /// newer release): its own card and Settings. None until it reports.
     fn nest(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
         None
@@ -696,6 +696,8 @@ impl Runtime {
             if let Some((down, false, was_lit)) = self.pressed {
                 if now.duration_since(down) >= LONG_PRESS {
                     self.pressed = Some((down, true, was_lit));
+                    // Held: what it does shows, unlit.
+                    self.unlight_press();
                     self.machine.input(Input::LongPress, now, was_lit, &mut effects);
                 }
             }
@@ -868,9 +870,18 @@ impl Runtime {
                             // At rest, dark: a turn starts from the thermostat, full size.
                             self.zoom = 1.0;
                         }
-                        (dirty || swept) && {
-                            self.draw();
-                            true
+                        if self.press_lit && (dirty || swept) {
+                            // The button down, its screen lit: nothing drawn
+                            // over it (a dial's live frames put back only
+                            // what moved, leaving the light round them),
+                            // until it comes up and the screen is drawn whole.
+                            self.force_draw = true;
+                            false
+                        } else {
+                            (dirty || swept) && {
+                                self.draw();
+                                true
+                            }
                         }
                     }
                 };
@@ -906,7 +917,7 @@ impl Runtime {
                     self.dial = Some(page);
                 }
             }
-            if !self.animating() && matches!(self.machine.mode, Mode::Thermostat { .. })
+            if !self.animating() && matches!(self.machine.mode, Mode::Dial { .. })
                 && self.machine.idle(now) >= Duration::from_millis(400) {
                 // The dial in its other colour ready while it rests, so the
                 // target crossing the temperature now costs no more than a turn.
@@ -1078,16 +1089,16 @@ impl Runtime {
     /// to it, and back in as it leaves: on the side away from the target,
     /// moving sides only once it has gone.
     fn fade_now_label(&mut self, before: &Mode) {
-        let (visible, side) = match (&self.machine.mode, &self.machine.nest) {
-            (Mode::Thermostat { target }, Some(nest)) => {
-                let card = &nest.card;
+        let (visible, side) = match &self.machine.mode {
+            Mode::Dial { of, target } => {
+                let Some(card) = self.machine.climate(*of) else { return };
                 let target = (target / card.step).round() * card.step;
                 let Some(now) = card.current else { return };
                 ((now - target).abs() >= card.step / 2.0, if target < now { 1.0 } else { -1.0 })
             }
             _ => return,
         };
-        if !matches!(before, Mode::Thermostat { .. }) {
+        if !matches!(before, Mode::Dial { .. }) {
             let shown = visible as u8 as f32;
             (self.now_shown, self.now_side) = ((shown, shown), side);
             return;
@@ -1120,18 +1131,18 @@ impl Runtime {
     /// soon after it opens and then every PULSE_EVERY, while it heats or
     /// cools towards it.
     fn schedule_pulse(&mut self, before: &Mode, now: Instant) {
-        let reaching = match (&self.machine.mode, &self.machine.nest) {
-            (Mode::Thermostat { target }, Some(nest)) => {
-                matches!(nest.card.action.as_str(), "heating" | "cooling")
-                    && nest.card.current.is_some_and(|c| (c - target).abs() >= nest.card.step)
-            }
+        let reaching = match &self.machine.mode {
+            Mode::Dial { of, target } => self.machine.climate(*of).is_some_and(|card| {
+                card.mode != "off" && matches!(card.action.as_str(), "heating" | "cooling")
+                    && card.current.is_some_and(|c| (c - target).abs() >= card.step)
+            }),
             _ => false,
         };
         if !reaching {
             self.pulse = None;
             return;
         }
-        if !matches!(before, Mode::Thermostat { .. }) {
+        if !matches!(before, Mode::Dial { .. }) {
             self.next_pulse = now + Duration::from_millis(700);
         }
         if self.pulse.is_some_and(|at| now.duration_since(at) >= PULSE) {
@@ -1434,7 +1445,7 @@ impl Runtime {
         let Some(source) = self.source(index) else { return };
         let screen = match &source.card {
             Some(Card::Lights(card)) => Screen::LightsCard { card },
-            Some(Card::Climate(card)) => Screen::ClimateCard { card, target: None },
+            Some(Card::Climate(card)) => Screen::NestCard { nest: Cow::Owned(Nest::of_card(card)), now: unix_now() },
             Some(Card::Media(card)) => {
                 let progress = source.progress.map(|pixels| pixels as f32 / screens::PROGRESS_WIDTH);
                 Screen::MediaCard { card, volume: None, progress }
@@ -1469,10 +1480,6 @@ impl Runtime {
         let mode = self.shown_mode();
         match &mode {
             Mode::LightDim { on: true, value, .. } | Mode::Volume { value, .. } => Some(*value as f32 / 100.0),
-            Mode::ClimateSet { slot, target } => match card(*slot) {
-                Some(Card::Climate(c)) => Some(((target - c.min) / (c.max - c.min).max(0.5)) as f32),
-                _ => None,
-            },
             Mode::LightWarmth { slot, light, value } => match card(*slot) {
                 Some(Card::Lights(c)) => {
                     let [low, high] = c.lights.get(*light)?.kelvins.unwrap_or([2000, 6500]);
@@ -1482,9 +1489,9 @@ impl Runtime {
             },
             Mode::LightHue { value, .. } => Some(*value as f32 / 360.0),
             Mode::CoverSet { value, .. } => Some(*value as f32 / 100.0),
-            Mode::Thermostat { target } => {
+            Mode::Dial { of, target } => {
                 // The mark follows the hand between steps.
-                let card = &self.machine.nest.as_ref()?.card;
+                let card = self.machine.climate(*of)?;
                 let at = target + self.machine.dial_offset * card.step;
                 Some(((at - card.min) / (card.max - card.min).max(0.5)) as f32)
             }
@@ -1734,7 +1741,7 @@ impl Runtime {
     fn draw_home(&mut self) {
         let Some(nest) = &self.machine.nest else { return };
         self.home_from = Some(nest.clone());
-        let screen = Screen::NestCard { nest, now: unix_now() };
+        let screen = Screen::NestCard { nest: Cow::Borrowed(nest), now: unix_now() };
         let mut frame = prof::time(prof::Part::Draw, || device::frame(screens::draw(&self.fonts, &screen, None)));
         prof::time(prof::Part::Round, || zoom::round(&mut frame));
         self.shrunk.insert(0, prof::time(prof::Part::Shrink, || zoom::shrink(&frame)));
@@ -1778,15 +1785,15 @@ impl Runtime {
                 Card::Options(card) => Screen::OptionList { card: Cow::Borrowed(card), selected: *selected },
                 _ => return None,
             },
-            Mode::ClimateList { slot, fans, selected } => match card(*slot)? {
-                Card::Climate(card) => {
-                    let (choices, now) = card.choices(*fans);
+            Mode::DialList { of, list, selected } => match machine.climate(*of) {
+                Some(card) => {
+                    let (choices, now) = machine.choices(*of, *list);
                     let options = OptionsCard {
                         id: card.id.clone(),
-                        name: format!("{} · {}", card.name, if *fans { "Fan" } else { "Mode" }),
+                        name: format!("{} · {}", card.name, list.title()),
                         icon: String::new(),
-                        options: choices.iter().map(|c| screens::climate_label(c)).collect(),
-                        current: now.map(screens::climate_label),
+                        options: choices.iter().map(|c| screens::choice_label(*list, c)).collect(),
+                        current: now.map(|now| screens::choice_label(*list, &now)),
                     };
                     Screen::OptionList { card: Cow::Owned(options), selected: *selected }
                 }
@@ -1806,10 +1813,6 @@ impl Runtime {
             },
             Mode::LightHue { slot, light, value } => match card(*slot)? {
                 Card::Lights(card) => Screen::LightHue { light: card.lights.get(*light)?, value: *value },
-                _ => return None,
-            },
-            Mode::ClimateSet { slot, target } => match card(*slot)? {
-                Card::Climate(card) => Screen::ClimateSet { card, target: *target },
                 _ => return None,
             },
             // Its track at rest, as its card shows it (the volume on the
@@ -1856,12 +1859,12 @@ impl Runtime {
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
             Mode::Glance => Screen::Glance { glance: machine.cards.glance.as_ref()?, cards: &machine.cards.cards,
                                              now: unix_now() as i64 },
-            Mode::Thermostat { target } => Screen::NestSet {
-                nest: machine.nest.as_ref()?, pulse: None,
-                target: machine::on_step(*target, machine.nest.as_ref()?.card.step),
+            Mode::Dial { of, target } => Screen::NestSet {
+                target: machine::on_step(*target, machine.climate(*of)?.step),
+                nest: Self::dial_nest(machine, *of)?, pulse: None,
                 setting: machine.set_at.is_some_and(|at| at.elapsed() < machine::SET_SHOWN), shown: None,
             },
-            Mode::Prompt { selected, .. } => Screen::ModePrompt { nest: machine.nest.as_ref()?, selected: *selected },
+            Mode::Prompt { of, selected, .. } => Screen::ModePrompt { nest: Self::dial_nest(machine, *of)?, selected: *selected },
             Mode::Settings { selected } => Screen::Settings { rows: machine.settings(), nest: machine.nest.as_ref(),
                                                               nest_dial: machine.nest_dial, selected: *selected },
             Mode::SettingSet { setting, value } => Screen::SettingSet { setting: *setting, nest: machine.nest.as_ref()?,
@@ -1878,18 +1881,22 @@ impl Runtime {
         let title = match &screen {
             Screen::LightDim { light, .. } => light.name.clone(),
             Screen::Volume { card, .. } | Screen::MediaCard { card, .. } => card.name.clone(),
-            Screen::ClimateSet { card, .. } => card.name.clone(),
             Screen::CoverSet { card, .. } => card.name.clone(),
             Screen::NestSet { nest, .. } => nest.card.name.clone(),
             Screen::AlarmView { card, .. } => card.name.clone(),
             Screen::ActionCard { card, .. } => card.name.clone(),
             _ => String::new(),
         };
-        let presets = match &screen {
-            Screen::ClimateSet { card, .. } => card.presets.clone(),
-            _ => Vec::new(),
+        // What each list is on now, so the menu says before it opens.
+        let now = |action: &Action| {
+            let (Action::Choose(list), Mode::Dial { of, .. }) = (action, view) else { return None };
+            if let (ClimateChoice::HotWater, Some(minutes)) = (list, self.machine.nest.as_ref()?.hot_water_boost) {
+                return Some(format!("{minutes} min left"));
+            }
+            let now = self.machine.choices(*of, *list).1.filter(|now| !now.is_empty())?;
+            Some(screens::choice_label(*list, &now))
         };
-        let items: Vec<(String, String, String)> = actions.iter().map(|action| menu_item(*action, &presets)).collect();
+        let items: Vec<(String, String, String)> = actions.iter().map(|action| menu_item(*action, now(action))).collect();
         let options: Vec<screens::Opt> = items.iter()
             .map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
         let canvas = screens::options(&self.fonts, &title, &options, selected, screens::accent(&screen));
@@ -2039,6 +2046,15 @@ impl Runtime {
         self.display.show(&frame);
     }
 
+    /// A thermostat's dial as the shared card draws it: this one's own, or a
+    /// climate card's as one.
+    fn dial_nest(machine: &Machine, of: Dial) -> Option<Cow<'_, Nest>> {
+        match of {
+            Dial::Nest => machine.nest.as_ref().map(Cow::Borrowed),
+            Dial::Card(_) => machine.climate(of).map(|card| Cow::Owned(Nest::of_card(card))),
+        }
+    }
+
     /// The thermostat's dial in its other colour, with the target on the
     /// other side of the temperature now: its still part and what it's kept
     /// by, unless it's kept already.
@@ -2047,7 +2063,7 @@ impl Runtime {
         let card = &nest.card;
         let now = card.current?;
         let other = if *target > now { now } else { (now + card.step).min(card.max) };
-        let other = Screen::NestSet { nest, target: other, pulse: None, setting: *setting, shown: None };
+        let other = Screen::NestSet { nest: Cow::Borrowed(nest.as_ref()), target: other, pulse: None, setting: *setting, shown: None };
         let key = screens::still_key(&other)?;
         if stills.contains_key(&key) {
             return None;
@@ -2154,8 +2170,8 @@ fn sweep_key(mode: &Mode) -> Option<SweepKey> {
         Mode::LightHue { slot, light, .. } => Some((4, slot, light)),
         Mode::CoverSet { slot, .. } => Some((5, slot, 0)),
         Mode::Volume { slot, .. } => Some((1, slot, 0)),
-        Mode::ClimateSet { slot, .. } => Some((2, slot, 0)),
-        Mode::Thermostat { .. } => Some((6, 0, 0)),
+        Mode::Dial { of: Dial::Card(slot), .. } => Some((2, slot, 0)),
+        Mode::Dial { of: Dial::Nest, .. } => Some((6, 0, 0)),
         Mode::SettingSet { setting, .. } => Some((7, setting as usize, 0)),
         _ => None,
     }
@@ -2166,7 +2182,6 @@ fn number(mode: &Mode) -> Option<f64> {
     Some(match *mode {
         Mode::LightDim { on, value, .. } => if on { value as f64 } else { 0.0 },
         Mode::Volume { value, .. } | Mode::CoverSet { value, .. } => value as f64,
-        Mode::ClimateSet { target, .. } => target,
         _ => return None,
     })
 }
@@ -2178,8 +2193,6 @@ fn with_number(mode: Mode, at: f64) -> Mode {
         Mode::LightDim { slot, light, .. } => Mode::LightDim { slot, light, on: true, value: percent },
         Mode::Volume { slot, .. } => Mode::Volume { slot, value: percent },
         Mode::CoverSet { slot, .. } => Mode::CoverSet { slot, value: percent },
-        // A temperature in its own steps: tenths, as it would show.
-        Mode::ClimateSet { slot, .. } => Mode::ClimateSet { slot, target: (at * 10.0).round() / 10.0 },
         other => other,
     }
 }
@@ -2193,15 +2206,15 @@ type Transition = motion::Kind;
 /// 2, and so on; a menu one deeper than its screen.
 fn depth(mode: &Mode, machine: &Machine) -> u8 {
     match mode {
-        Mode::LightList { .. } | Mode::ClimateSet { .. } | Mode::Volume { .. } | Mode::Camera { .. }
-        | Mode::OptionList { .. } | Mode::CoverSet { .. } | Mode::Thermostat { .. } | Mode::Settings { .. }
+        Mode::LightList { .. } | Mode::Dial { .. } | Mode::Volume { .. } | Mode::Camera { .. }
+        | Mode::OptionList { .. } | Mode::CoverSet { .. } | Mode::Settings { .. }
         | Mode::AlarmView { .. } | Mode::ActionView { .. } => 1,
         // A lamp's own card opens straight to its dimmer; a room's, from its list.
         Mode::LightDim { slot, .. } => match machine.cards.cards.get(*slot) {
             Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
             _ => 1,
         },
-        Mode::Members { .. } | Mode::ClimateList { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
+        Mode::Members { .. } | Mode::DialList { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
         | Mode::AlarmPad { .. } | Mode::AlarmOpen { .. } | Mode::AlarmModes { .. } => 2,
         Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => {
             depth(&Mode::LightDim { slot: *slot, light: *light, on: true, value: 0 }, machine) + 1
@@ -2443,8 +2456,8 @@ fn hold_state(hold: bool) {
 /// What shows, for tools that drive the unit's screen: they check where
 /// they are before each step, so a press never lands on the wrong card.
 /// An option of a device's: its icon, its name, and what a press on it
-/// does. `presets`: a thermostat's, by their place (Action::Preset).
-fn menu_item(action: Action, presets: &[String]) -> (String, String, String) {
+/// does. `now`: what a list is on now, in words.
+fn menu_item(action: Action, now: Option<String>) -> (String, String, String) {
     let (icon, name, under) = match action {
         Action::Back => ("mdi:arrow-left", "Back", "To the cards"),
         Action::Switch(true) => ("mdi:power", "Turn on", "Press to turn it on"),
@@ -2458,21 +2471,14 @@ fn menu_item(action: Action, presets: &[String]) -> (String, String, String) {
         Action::Members => ("mdi:format-list-bulleted", "Each light", "Press to switch each one"),
         Action::Open => ("mdi:arrow-up-bold", "Open", "Press to open it fully"),
         Action::Close => ("mdi:arrow-down-bold", "Close", "Press to close it"),
-        Action::Eco(true) => ("mdi:leaf", "Eco", "Press to turn Eco on"),
-        Action::Eco(false) => ("mdi:leaf", "Leave Eco", "Press to turn Eco off"),
-        Action::Power(true) => ("mdi:power", "Heating on", "Press to turn the heating on"),
-        Action::Power(false) => ("mdi:power", "Turn off", "Press to turn the heating off"),
-        Action::Boost(true) => ("mdi:water-boiler", "Boost", "Press for an hour of hot water"),
-        Action::Boost(false) => ("mdi:water-boiler", "Stop boost", "Press to stop the hot water"),
         Action::NestDial => ("mdi:thermometer", "Nest's dial", "Press for the Nest's own screens"),
         Action::Run => ("mdi:play", "Run", "Press to run it"),
-        Action::Modes => ("mdi:thermostat", "Mode", "Press to choose its mode"),
-        Action::Fans => ("mdi:fan", "Fan", "Press to choose its fan speed"),
-        Action::Preset(i) => {
-            let preset = presets.get(i as usize).cloned().unwrap_or_default();
-            let name = screens::capitalise(&preset.replace('_', " "));
-            let under = format!("Press for its {} preset", preset.replace('_', " "));
-            return (screens::preset_icon(&preset).to_owned(), name, under);
+        Action::Choose(list) => {
+            let under = match now {
+                Some(now) => format!("{now} · press to change"),
+                None => "Press to choose".to_owned(),
+            };
+            return (list.icon().to_owned(), list.title().to_owned(), under);
         }
     };
     (icon.to_owned(), name.to_owned(), under.to_owned())
@@ -2487,7 +2493,7 @@ fn mode_state(mode: &Mode) {
     let name = match mode {
         Mode::Chooser(index) => format!("Chooser {index}"),
         Mode::Settings { selected } => format!("Settings {selected}"),
-        Mode::Prompt { selected, .. } => format!("ModePrompt {selected}"),
+        Mode::Prompt { of: Dial::Nest, selected, .. } => format!("ModePrompt {selected}"),
         Mode::Menu { view, .. } => format!("Menu {}", format!("{view:?}").split([' ', '{', '(']).next().unwrap_or("")),
         other => format!("{other:?}").split([' ', '{', '(']).next().unwrap_or("").to_owned(),
     };
@@ -2721,6 +2727,10 @@ mod shots {
         let (x, w, h) = screens::PILL;
         motion::press(&mut list, motion::Pressed::Row(x, screens::LIST_TOP, w, h));
         save_panel(&list, "m-press-row");
+        // A dial pressed (its menu next).
+        let mut dial = load("9-ac-away");
+        motion::press(&mut dial, motion::Pressed::Screen);
+        save_panel(&dial, "m-press-dial");
     }
 
     #[test]
@@ -2741,12 +2751,12 @@ mod shots {
         let [Card::Lights(lights), Card::Climate(climate), Card::Media(media)] = &cards.cards[..] else { panic!() };
         let shots = [
             ("1-lights", Screen::LightsCard { card: lights }),
-            ("2-climate", Screen::ClimateCard { card: climate, target: None }),
+            ("2-climate", Screen::NestCard { nest: Cow::Owned(Nest::of_card(climate)), now: 0.0 }),
             ("3-media", Screen::MediaCard { card: media, volume: None, progress: Some(0.4) }),
             ("4-settings", Screen::SettingsCard),
             ("5-list", Screen::LightList { card: lights, selected: 0 }),
             ("6-dim", Screen::LightDim { light: &lights.lights[0], on: true, value: 60 }),
-            ("7-climate-set", Screen::ClimateSet { card: climate, target: 22.0 }),
+            ("7-climate-set", Screen::NestSet { nest: Cow::Owned(Nest::of_card(climate)), target: 22.0, pulse: None, setting: true, shown: None }),
             ("8-volume", Screen::Volume { card: media, value: 35 }),
         ];
         // An air conditioner: drying (no temperature), and its modes listed.
@@ -2757,8 +2767,14 @@ mod shots {
         let modes = model::OptionsCard { id: ac.id.clone(), name: format!("{} · Mode", ac.name), icon: String::new(),
                                          options: ac.modes.iter().map(|m| screens::climate_label(m)).collect(),
                                          current: Some(screens::climate_label(&ac.mode)) };
+        // Cooling, in its away preset: the preset under its number.
+        let away = Cards::parse(br#"{"cards":[{"kind":"climate","id":"climate.ac","name":"Office AC","mode":"cool",
+            "action":"cooling","target":21,"current":24.5,"preset":"away","preset_modes":["none","away","boost"]}]}"#).unwrap();
+        let [Card::Climate(away)] = &away.cards[..] else { panic!() };
         let shots = shots.into_iter().chain([
-            ("9-ac-dry", Screen::ClimateSet { card: ac, target: 22.0 }),
+            ("9-ac-away", Screen::NestCard { nest: Cow::Owned(Nest::of_card(away)), now: 0.0 }),
+            ("9-ac-away-set", Screen::NestSet { nest: Cow::Owned(Nest::of_card(away)), target: 21.0, pulse: None, setting: true, shown: None }),
+            ("9-ac-dry", Screen::NestSet { nest: Cow::Owned(Nest::of_card(ac)), target: 22.0, pulse: None, setting: true, shown: None }),
             ("9-ac-modes", Screen::OptionList { card: Cow::Owned(modes), selected: 3 }),
         ]);
         for (name, screen) in shots {
@@ -2887,17 +2903,17 @@ mod shots {
             ("t4-nest-off", state(serde_json::json!({"mode": "off", "action": "off"}))),
         ];
         for (name, nest) in &shots {
-            save(&screens::draw(&fonts, &Screen::NestCard { nest, now }, None), &format!("{out}/{name}.png"));
+            save(&screens::draw(&fonts, &Screen::NestCard { nest: Cow::Borrowed(nest), now }, None), &format!("{out}/{name}.png"));
         }
-        save(&screens::draw(&fonts, &Screen::NestSet { nest: &heating, target: 22.0, pulse: None, setting: true, shown: None }, None), &format!("{out}/t5-nest-set.png"));
-        let nest_options: Vec<(String, String, String)> = [Action::Back, Action::Eco(true), Action::Power(false), Action::Boost(false),
-            Action::NestDial].into_iter().map(|a| menu_item(a, &[])).collect();
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: Cow::Borrowed(&heating), target: 22.0, pulse: None, setting: true, shown: None }, None), &format!("{out}/t5-nest-set.png"));
+        let nest_options: Vec<(String, String, String)> = [Action::Back, Action::Choose(model::ClimateChoice::Mode), Action::Choose(model::ClimateChoice::Preset),
+            Action::Choose(model::ClimateChoice::HotWater), Action::NestDial].into_iter().map(|a| menu_item(a, None)).collect();
         let nest_options: Vec<screens::Opt> = nest_options.iter().map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
         save(&screens::options(&fonts, "Thermostat", &nest_options, 1, paint::HEAT), &format!("{out}/t6-nest-menu.png"));
         // Off: the ring turned asks for a mode.
         let off = &shots[3].1;
         for selected in [machine::PROMPT_ON, machine::PROMPT_CANCEL] {
-            save(&screens::draw(&fonts, &Screen::ModePrompt { nest: off, selected }, None),
+            save(&screens::draw(&fonts, &Screen::ModePrompt { nest: Cow::Borrowed(off), selected }, None),
                  &format!("{out}/t11-nest-off-prompt-{selected}.png"));
         }
         // Every device's options, one chosen: o<n>-<device>.png.
@@ -2927,11 +2943,13 @@ mod shots {
                   Opt { icon: "mdi:water-boiler", name: "Stop boost", under: "Press to stop the hot water" },
                   Opt { icon: "mdi:thermometer", name: "Nest's dial", under: "Press for the Nest's own screens" }],
              paint::HEAT, 1),
-            ("presets", "Living room",
-             vec![back("To the cards"), Opt { icon: "mdi:leaf", name: "Eco", under: "Press for its eco preset" },
-                  Opt { icon: "mdi:airplane", name: "Away", under: "Press for its away preset" },
-                  Opt { icon: "mdi:fire", name: "Boost", under: "Press for its boost preset" }],
-             paint::HEAT, 2),
+            ("ac", "Living room AC",
+             vec![back("To the cards"), Opt { icon: "mdi:thermostat", name: "Mode", under: "Cool · press to change" },
+                  Opt { icon: "mdi:fan", name: "Fan", under: "Auto · press to change" },
+                  Opt { icon: "mdi:tune-variant", name: "Preset", under: "Away · press to change" },
+                  Opt { icon: "mdi:arrow-oscillating", name: "Swing", under: "Swing · press to change" },
+                  Opt { icon: "mdi:arrow-left-right", name: "Horizontal swing", under: "Off · press to change" }],
+             paint::HEAT, 3),
             ("cover", "Bedroom blind",
              vec![back("To the cards"), Opt { icon: "mdi:arrow-up-bold", name: "Open", under: "Press to open it fully" },
                   Opt { icon: "mdi:arrow-down-bold", name: "Close", under: "Press to close it" }],
@@ -2960,26 +2978,26 @@ mod shots {
         let cold = state(serde_json::json!({"action": "heating", "target": 22.0, "current_temperature": 19.5,
             "time_to_target": "2026-11-08T21:38:00Z"}));
         for (name, phase) in [("p1-pulse-start", Some(0.15)), ("p2-pulse-mid", Some(0.4)), ("p3-pulse-fade", Some(0.85)), ("p0-rest", None)] {
-            save(&screens::draw(&fonts, &Screen::NestSet { nest: &cold, target: 22.0, pulse: phase, setting: false, shown: None }, None),
+            save(&screens::draw(&fonts, &Screen::NestSet { nest: Cow::Borrowed(&cold), target: 22.0, pulse: phase, setting: false, shown: None }, None),
                  &format!("{out}/{name}.png"));
         }
         let scheduled = state(serde_json::json!({"action": "heating", "target": 22.0, "current_temperature": 21.0,
             "time_to_target": "2026-11-08T21:38:00Z", "next_change": "18:00"}));
-        save(&screens::draw(&fonts, &Screen::NestCard { nest: &scheduled, now }, None), &format!("{out}/n1-card.png"));
-        save(&screens::draw(&fonts, &Screen::NestSet { nest: &scheduled, target: 22.5, pulse: None, setting: true, shown: None }, None),
+        save(&screens::draw(&fonts, &Screen::NestCard { nest: Cow::Borrowed(&scheduled), now }, None), &format!("{out}/n1-card.png"));
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: Cow::Borrowed(&scheduled), target: 22.5, pulse: None, setting: true, shown: None }, None),
              &format!("{out}/n2-set-up.png"));
-        save(&screens::draw(&fonts, &Screen::NestSet { nest: &scheduled, target: 20.0, pulse: None, setting: true, shown: None }, None),
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: Cow::Borrowed(&scheduled), target: 20.0, pulse: None, setting: true, shown: None }, None),
              &format!("{out}/n3-set-down.png"));
-        save(&screens::draw(&fonts, &Screen::NestSet { nest: &scheduled, target: 22.0, pulse: None, setting: false, shown: None }, None),
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: Cow::Borrowed(&scheduled), target: 22.0, pulse: None, setting: false, shown: None }, None),
              &format!("{out}/n4-open.png"));
         let level = state(serde_json::json!({"action": "idle", "target": 21.0, "current_temperature": 21.0, "next_change": "22:30"}));
-        save(&screens::draw(&fonts, &Screen::NestCard { nest: &level, now }, None), &format!("{out}/n5-at-target.png"));
+        save(&screens::draw(&fonts, &Screen::NestCard { nest: Cow::Borrowed(&level), now }, None), &format!("{out}/n5-at-target.png"));
         let warm = state(serde_json::json!({"action": "idle", "target": 21.0, "current_temperature": 22.5, "next_change": "22:30"}));
-        save(&screens::draw(&fonts, &Screen::NestCard { nest: &warm, now }, None), &format!("{out}/n6-above-target.png"));
-        save(&screens::draw(&fonts, &Screen::NestSet { nest: &warm, target: 22.5, pulse: None, setting: true, shown: Some((0.5, 22.0)) }, None),
+        save(&screens::draw(&fonts, &Screen::NestCard { nest: Cow::Borrowed(&warm), now }, None), &format!("{out}/n6-above-target.png"));
+        save(&screens::draw(&fonts, &Screen::NestSet { nest: Cow::Borrowed(&warm), target: 22.5, pulse: None, setting: true, shown: Some((0.5, 22.0)) }, None),
              &format!("{out}/n7-fading.png"));
         let mut zoomed = vec![0u8; (paint::SIZE * paint::SIZE * 4) as usize];
-        let frames: Vec<device::Frame> = [Screen::NestCard { nest: &cold, now }, Screen::SettingsCard,
+        let frames: Vec<device::Frame> = [Screen::NestCard { nest: Cow::Borrowed(&cold), now }, Screen::SettingsCard,
             Screen::ActionCard { card: &scene, done: false, opened: false }].iter().map(|screen| {
                 let mut frame = screens::draw(&fonts, screen, None).pixmap.data().to_vec();
                 zoom::round(&mut frame);

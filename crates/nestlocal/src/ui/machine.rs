@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::model::{AlarmCard, AlarmResult, Alert, Card, Cards, Code, Command, Far, Near, Nest, Wake};
+use super::model::{AlarmCard, AlarmResult, Alert, Card, Cards, ClimateCard, ClimateChoice, Code, Command, Far, Near, Nest, Wake};
 use crate::motion::Sensor;
 use crate::logf;
 
@@ -94,7 +94,6 @@ pub const SET_SHOWN: Duration = Duration::from_secs(3);
 /// and an older report arriving meanwhile doesn't put it back.
 pub const EXPECT: Duration = Duration::from_secs(4);
 /// The minutes a hot water boost runs from the thermostat's menu.
-pub const BOOST_MINUTES: u32 = 60;
 /// An alarm's code pad: the digits round the ring in rotary-phone order,
 /// then (when the code's length isn't known) a ✓ that sends it; the marker
 /// starts on 5.
@@ -201,21 +200,17 @@ pub enum Action {
     /// A media player's next and previous tracks.
     Next,
     Previous,
-    /// A thermostat's preset, by its place in its card's presets.
-    Preset(u8),
-    /// A climate's modes and its fan speeds, each a list to choose from.
-    Modes,
-    Fans,
+    /// A climate's modes, fan speeds, presets, swing or horizontal swing:
+    /// a list to choose from.
+    Choose(ClimateChoice),
     /// A light group's own lights, each to switch.
     Members,
     /// A cover opened or closed whole.
     Open,
     Close,
-    /// The thermostat: Eco on or off, heating on or off, a hot water boost
-    /// on or off, and Nest's own dial (its schedule, its menus).
-    Eco(bool),
-    Power(bool),
-    Boost(bool),
+    /// The thermostat's own, beyond what every thermostat card's menu has:
+    /// Nest's own dial (its schedule, its menus). (Its hot water boost is a
+    /// list, as a climate's are: Choose(HotWater).)
     NestDial,
     /// A scene, script or button run.
     Run,
@@ -229,6 +224,24 @@ pub const PROMPT_ON: usize = 1;
 #[cfg(test)]
 pub const PROMPT_OFF: usize = 2;
 pub const PROMPT_CANCEL: usize = 3;
+
+/// Which thermostat a dial is: this one, or a Home Assistant climate's
+/// card. Both are the same card, drawn and turned alike; only what a change
+/// sends differs (nestlocal's own commands, or Home Assistant's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dial {
+    Nest,
+    Card(usize),
+}
+
+impl Dial {
+    pub fn slot(self) -> Slot {
+        match self {
+            Dial::Nest => Slot::Thermostat,
+            Dial::Card(slot) => Slot::Card(slot),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Mode {
@@ -247,15 +260,14 @@ pub enum Mode {
     /// A light's white, in kelvin, and its colour, by hue: dials of their own.
     LightWarmth { slot: usize, light: usize, value: u16 },
     LightHue { slot: usize, light: usize, value: u16 },
-    ClimateSet { slot: usize, target: f64 },
     Volume { slot: usize, value: u8 },
     /// A camera, full screen, its picture refreshed while it shows.
     Camera { slot: usize },
     /// A select's options, `selected` highlighted (its last row Back).
     OptionList { slot: usize, selected: usize },
-    /// A climate's modes, or (`fans`) its fan speeds, listed as a select's
-    /// options are (its last row Back).
-    ClimateList { slot: usize, fans: bool, selected: usize },
+    /// A thermostat's modes, fan speeds, presets or swings, listed as a
+    /// select's options are (its last row Back).
+    DialList { of: Dial, list: ClimateChoice, selected: usize },
     /// A light group's own lights, `selected` highlighted (its last row Back).
     Members { slot: usize, selected: usize },
     /// A cover, the ring setting how open (percent).
@@ -263,16 +275,16 @@ pub enum Mode {
     /// The time, the weather and what's on, as someone comes near; a touch
     /// shows what waking does.
     Glance,
-    /// This thermostat, the ring setting its target (as it shows it).
-    Thermostat { target: f64 },
+    /// A thermostat's dial, the ring setting its target (as it shows it).
+    Dial { of: Dial, target: f64 },
     /// Its Settings, `selected` highlighted, and one set on its own dial.
     Settings { selected: usize },
     SettingSet { setting: Setting, value: f64 },
     /// Settings' Theme: the two side by side, `fledge` chosen.
     ThemePick { fledge: bool },
-    /// The thermostat off and its ring turned: change the mode? Over its dial
+    /// A thermostat off and its ring turned: change the mode? Over its dial
     /// at `target`, `selected` (PROMPT_ON..=PROMPT_CANCEL) highlighted.
-    Prompt { target: f64, selected: usize },
+    Prompt { of: Dial, target: f64, selected: usize },
     /// A notification over `back`, which shows again once it goes.
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -305,13 +317,12 @@ impl Mode {
     pub fn card_slot(&self) -> Option<Slot> {
         match self {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
-            | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
+            | Mode::LightHue { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
-            | Mode::ClimateList { slot, .. }
             | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
             | Mode::AlarmModes { slot, .. }
             | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
-            Mode::Thermostat { .. } | Mode::Prompt { .. } => Some(Slot::Thermostat),
+            Mode::Dial { of, .. } | Mode::DialList { of, .. } | Mode::Prompt { of, .. } => Some(of.slot()),
             Mode::Menu { view, .. } => view.card_slot(),
             _ => None,
         }
@@ -523,10 +534,7 @@ impl Machine {
     fn thermostat(&mut self) -> Mode {
         self.dial_offset = 0.0;
         match &self.nest {
-            Some(nest) if !self.nest_dial_shown() => {
-                let card = &nest.card;
-                Mode::Thermostat { target: card.target.unwrap_or((card.min + card.max) / 2.0) }
-            }
+            Some(_) if !self.nest_dial_shown() => self.dial_at(Dial::Nest),
             _ => Mode::Native,
         }
     }
@@ -574,11 +582,11 @@ impl Machine {
         let (deck, card) = (self.deck().len(), self.thermostat_card());
         let fine = |mode: &Mode, cards: &Cards| match mode {
             Mode::Chooser(index) => *index < deck,
-            Mode::Thermostat { .. } | Mode::Prompt { .. } => card,
+            Mode::Dial { of, .. } | Mode::DialList { of, .. } | Mode::Prompt { of, .. } => match of {
+                Dial::Nest => card,
+                Dial::Card(slot) => matches!(cards.cards.get(*slot), Some(Card::Climate(_))),
+            },
             Mode::LightList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(_))),
-            Mode::ClimateSet { slot, .. } | Mode::ClimateList { slot, .. } => {
-                matches!(cards.cards.get(*slot), Some(Card::Climate(_)))
-            }
             Mode::Volume { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Media(_))),
             Mode::Camera { slot } => matches!(cards.cards.get(*slot), Some(Card::Camera(_))),
             Mode::OptionList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Options(_))),
@@ -863,8 +871,8 @@ impl Machine {
                 if matches!(self.mode, Mode::Volume { .. }) {
                     self.volume_at = Some(now);
                 }
-                if let Mode::Thermostat { target } = self.mode {
-                    if self.nest.as_ref().is_some_and(|n| n.card.mode == "off") {
+                if let Mode::Dial { of, target } = self.mode {
+                    if self.climate(of).is_some_and(|c| c.mode == "off") {
                         // Nothing to set while it's off: a turn meant as one
                         // asks for a mode, as the Nest does.
                         if self.turn.abs() < PROMPT_TURN {
@@ -872,15 +880,15 @@ impl Machine {
                         }
                         self.turn = 0;
                         out.push(Effect::Click);
-                        self.mode = Mode::Prompt { target, selected: PROMPT_ON };
+                        self.mode = Mode::Prompt { of, target, selected: PROMPT_ON };
                         self.dirty = true;
                         self.sync(out);
                         return;
                     }
                 }
-                if let Mode::Thermostat { target } = self.mode {
+                if let Mode::Dial { of, target } = self.mode {
                     self.set_at = Some(now);
-                    self.turn_thermostat(target, out);
+                    self.turn_thermostat(of, target, out);
                     self.dirty = true;
                     self.sync(out);
                     return;
@@ -888,10 +896,10 @@ impl Machine {
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
                     Mode::Menu { .. } => MENU_STEP,
-                    Mode::LightList { .. } | Mode::OptionList { .. } | Mode::ClimateList { .. } | Mode::Members { .. }
+                    Mode::LightList { .. } | Mode::OptionList { .. } | Mode::DialList { .. } | Mode::Members { .. }
                     | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
                     | Mode::AlarmPad { .. } | Mode::AlarmModes { .. } => ROW_STEP,
-                    Mode::ClimateSet { .. } | Mode::Thermostat { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
+                    Mode::Dial { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
                 let steps = self.turn / step;
@@ -1099,23 +1107,10 @@ impl Machine {
                     self.mode = Mode::LightHue { slot, light, value };
                 }
             }
-            Mode::ClimateList { slot, fans, selected } => {
-                if let Some(Card::Climate(card)) = self.card(slot) {
-                    let rows = card.choices(fans).0.len() as i32 + 1;
-                    let selected = (selected as i32 + steps).clamp(0, rows - 1) as usize;
-                    self.mode = Mode::ClimateList { slot, fans, selected };
-                }
-            }
-            Mode::ClimateSet { slot, target } => {
-                // A mode with no temperature (dry, fan only): nothing to set.
-                match self.card(slot) {
-                    Some(Card::Climate(card)) if card.target.is_some() => {
-                        let target = (target + steps as f64 * card.step).clamp(card.min, card.max);
-                        self.pending = Some(Command::Temperature(card.id.clone(), target));
-                        self.mode = Mode::ClimateSet { slot, target };
-                    }
-                    _ => {}
-                }
+            Mode::DialList { of, list, selected } => {
+                let rows = self.choices(of, list).0.len() as i32 + 1;
+                let selected = (selected as i32 + steps).clamp(0, rows - 1) as usize;
+                self.mode = Mode::DialList { of, list, selected };
             }
             Mode::Volume { slot, value } => {
                 if let Some(Card::Media(card)) = self.card(slot) {
@@ -1149,10 +1144,10 @@ impl Machine {
                 let selected = (selected as i32 + steps).clamp(0, actions.len() as i32 - 1) as usize;
                 self.mode = Mode::Menu { view, actions, selected };
             }
-            Mode::Thermostat { .. } => {}
-            Mode::Prompt { target, selected } => {
+            Mode::Dial { .. } => {}
+            Mode::Prompt { of, target, selected } => {
                 let selected = (selected as i32 + steps).clamp(PROMPT_ON as i32, PROMPT_CANCEL as i32) as usize;
-                self.mode = Mode::Prompt { target, selected };
+                self.mode = Mode::Prompt { of, target, selected };
             }
             Mode::Settings { selected } => {
                 let rows = self.settings().len() as i32;
@@ -1198,9 +1193,7 @@ impl Machine {
                         Mode::LightDim { slot, light: 0, on: light.on, value: light.brightness.unwrap_or(100) }
                     }
                     Some(Card::Lights(_)) => Mode::LightList { slot, selected: 0 },
-                    Some(Card::Climate(card)) => {
-                        Mode::ClimateSet { slot, target: card.target.unwrap_or((card.min + card.max) / 2.0) }
-                    }
+                    Some(Card::Climate(_)) => self.dial_at(Dial::Card(slot)),
                     Some(Card::Media(card)) => Mode::Volume { slot, value: card.volume.unwrap_or(30) },
                     // A scene, script or button: its own screen, to run from.
                     Some(Card::Action(_)) => Mode::ActionView { slot },
@@ -1274,21 +1267,31 @@ impl Machine {
                                          actions: vec![Action::Back, Action::Play(!playing), Action::Previous, Action::Next],
                                          selected: 0 };
             }
-            view @ Mode::ClimateSet { slot, .. } => match self.card(slot) {
-                // Its modes, fan speeds and presets, where it has them; else done.
-                Some(Card::Climate(card)) if card.has_menu() => {
-                    let mut actions = vec![Action::Back];
-                    if card.modes.len() > 1 {
-                        actions.push(Action::Modes);
+            view @ Mode::Dial { of, .. } => {
+                // Its target goes now; then its menu: its modes, fan
+                // speeds, presets and swings, where it has them, each a
+                // list, and this thermostat's own extras.
+                if let Some(command) = self.pending.take() {
+                    self.sent_target(&command);
+                    out.push(Effect::Send(command));
+                }
+                let mut actions = vec![Action::Back];
+                if let Some(card) = self.climate(of) {
+                    actions.extend(ClimateChoice::ALL.into_iter().filter(|c| card.offers(*c)).map(Action::Choose));
+                }
+                if let (Dial::Nest, Some(nest)) = (of, &self.nest) {
+                    if nest.hot_water {
+                        actions.push(Action::Choose(ClimateChoice::HotWater));
                     }
-                    if !card.fan_modes.is_empty() {
-                        actions.push(Action::Fans);
-                    }
-                    actions.extend((0..card.presets.len().min(4)).map(|i| Action::Preset(i as u8)));
+                    actions.push(Action::NestDial);
+                }
+                if actions.len() == 1 {
+                    // Nothing to choose: done.
+                    self.go(Mode::Chooser(self.place(of.slot())), out);
+                } else {
                     self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
                 }
-                _ => self.go(Mode::Chooser(self.place(Slot::Card(slot))), out),
-            },
+            }
             Mode::Camera { slot } => self.go(Mode::Chooser(self.place(Slot::Card(slot))), out),
             Mode::OptionList { slot, selected } => {
                 if let Some(Card::Options(card)) = self.cards.cards.get_mut(slot) {
@@ -1299,15 +1302,12 @@ impl Machine {
                 }
                 self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
             }
-            Mode::ClimateList { slot, fans, selected } => {
-                if let Some(Card::Climate(card)) = self.card(slot) {
-                    if let Some(choice) = card.choices(fans).0.get(selected).cloned() {
-                        let id = card.id.clone();
-                        out.push(Effect::Send(if fans { Command::FanMode(id, choice) } else { Command::HvacMode(id, choice) }));
-                    }
+            Mode::DialList { of, list, selected } => {
+                if let Some(choice) = self.choices(of, list).0.get(selected).cloned() {
+                    self.choose(of, list, &choice, out);
                 }
                 // Back to its dial, the choice on it.
-                self.mode = self.climate_set(slot);
+                self.mode = self.dial_at(of);
             }
             Mode::Members { slot, selected } => {
                 let member = match self.cards.cards.get_mut(slot) {
@@ -1369,36 +1369,15 @@ impl Machine {
                 self.alarm_send(slot, Some(arm), code, true, out);
                 self.go(Mode::AlarmView { slot }, out);
             }
-            view @ Mode::Thermostat { .. } => {
-                // Its target goes now; then what else it does.
-                if let Some(command) = self.pending.take() {
-                    self.sent_target(&command);
-                    out.push(Effect::Send(command));
-                }
-                let Some(nest) = &self.nest else { return };
-                let on = nest.card.mode != "off";
-                let mut actions = vec![Action::Back];
-                if on {
-                    actions.push(Action::Eco(!nest.eco));
-                }
-                actions.push(Action::Power(!on));
-                if nest.hot_water {
-                    actions.push(Action::Boost(nest.hot_water_boost.is_none()));
-                }
-                actions.push(Action::NestDial);
-                self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
-            }
-            Mode::Prompt { target, selected } => {
+            Mode::Prompt { of, target, selected } => {
                 if selected == PROMPT_ON {
-                    if let Some(nest) = &mut self.nest {
-                        let mode = nest.on_mode();
-                        nest.card.mode = mode.to_owned();
-                        self.nest_command("mode", mode, out);
+                    if let Some(mode) = self.on_mode(of) {
+                        self.choose(of, ClimateChoice::Mode, &mode, out);
                     }
                 }
                 // On its dial: to set, once on.
-                let target = self.nest.as_ref().and_then(|n| n.card.target).unwrap_or(target);
-                self.mode = Mode::Thermostat { target };
+                let target = self.climate(of).and_then(|c| c.target).unwrap_or(target);
+                self.mode = Mode::Dial { of, target };
             }
             Mode::Settings { selected } => {
                 let Some(&setting) = self.settings().get(selected) else { return };
@@ -1500,9 +1479,10 @@ impl Machine {
     /// click): it clicks twice a step, its mark following the hand between
     /// (dial_offset, in steps); its target moves a whole step once the hand
     /// has gone one, as the Nest's does.
-    fn turn_thermostat(&mut self, target: f64, out: &mut Vec<Effect>) {
-        let Some(nest) = &self.nest else { return };
-        let card = &nest.card;
+    fn turn_thermostat(&mut self, of: Dial, target: f64, out: &mut Vec<Effect>) {
+        // A mode with no temperature (dry, fan only): nothing to set.
+        let Some(card) = self.climate(of).filter(|c| c.target.is_some()) else { return };
+        let (step, min, max, id) = (card.step, card.min, card.max, card.id.clone());
         let clicks = self.turn / CLIMATE_CLICK;
         if clicks == 0 {
             return;
@@ -1511,31 +1491,36 @@ impl Machine {
         let mut offset = self.dial_offset + clicks as f64 * CLIMATE_CLICK as f64 / CLIMATE_STEP as f64;
         let mut next = target;
         while offset >= 1.0 - 1e-9 {
-            next += card.step;
+            next += step;
             offset -= 1.0;
         }
         while offset <= -1.0 + 1e-9 {
-            next -= card.step;
+            next -= step;
             offset += 1.0;
         }
-        if next >= card.max || next <= card.min {
-            (next, offset) = (next.clamp(card.min, card.max), 0.0);
+        if next >= max || next <= min {
+            (next, offset) = (next.clamp(min, max), 0.0);
         }
         if next == target && offset == self.dial_offset {
             return;
         }
         out.push(Effect::Click);
         self.dial_offset = offset;
-        self.mode = Mode::Thermostat { target: next };
+        self.mode = Mode::Dial { of, target: next };
         if next == target {
             return;
         }
-        if nest.eco {
+        if of != Dial::Nest {
+            // A climate's: Home Assistant's set_temperature, as the ring rests.
+            self.pending = Some(Command::Temperature(id, next));
+            return;
+        }
+        if self.nest.as_ref().is_some_and(|n| n.eco) {
             // As on the Nest: setting a temperature leaves Eco.
             self.nest_command("preset", "none", out);
             if let Some(nest) = &mut self.nest {
                 nest.eco = false;
-                nest.card.preset = None;
+                nest.card.preset = Some("none".to_owned());
             }
         }
         if let Some(nest) = &self.nest {
@@ -1545,10 +1530,102 @@ impl Machine {
 
     /// The thermostat's target just sent: its card shows it at once.
     fn sent_target(&mut self, command: &Command) {
-        if let (Command::Nest(name, _), Mode::Thermostat { target }, Some(nest)) = (command, &self.mode, &mut self.nest) {
-            if name == "target" {
-                nest.card.target = Some(on_step(*target, nest.card.step));
+        let Mode::Dial { of, target } = self.mode else { return };
+        let sent = match command {
+            Command::Nest(name, _) => name == "target" && of == Dial::Nest,
+            Command::Temperature(..) => of != Dial::Nest,
+            _ => false,
+        };
+        if let (true, Some(card)) = (sent, self.climate_mut(of)) {
+            card.target = Some(on_step(target, card.step));
+        }
+    }
+
+    /// The card a thermostat's dial shows: this one's, or a climate's.
+    pub fn climate(&self, of: Dial) -> Option<&ClimateCard> {
+        match of {
+            Dial::Nest => self.nest.as_ref().map(|n| &n.card),
+            Dial::Card(slot) => match self.card(slot) {
+                Some(Card::Climate(card)) => Some(card),
+                _ => None,
+            },
+        }
+    }
+
+    fn climate_mut(&mut self, of: Dial) -> Option<&mut ClimateCard> {
+        match of {
+            Dial::Nest => self.nest.as_mut().map(|n| &mut n.card),
+            Dial::Card(slot) => match self.cards.cards.get_mut(slot) {
+                Some(Card::Climate(card)) => Some(card),
+                _ => None,
+            },
+        }
+    }
+
+    /// A thermostat's list: its options, and the one it's on. Its hot water
+    /// boost's are this thermostat's (off, or minutes, as nestlocal's
+    /// command takes them); a boost running is on none, so much being left.
+    pub fn choices(&self, of: Dial, list: ClimateChoice) -> (Vec<String>, Option<String>) {
+        if list == ClimateChoice::HotWater {
+            let Some(nest) = self.nest.as_ref().filter(|_| of == Dial::Nest) else { return (Vec::new(), None) };
+            let mut options = vec!["off".to_owned()];
+            options.extend(crate::bridge::HOT_WATER_BOOST_MINUTES.iter().map(|m| m.to_string()));
+            return (options, nest.hot_water_boost.is_none().then(|| "off".to_owned()));
+        }
+        match self.climate(of) {
+            Some(card) => {
+                let (options, now) = card.choices(list);
+                (options.to_vec(), now.map(str::to_owned))
             }
+            None => (Vec::new(), None),
+        }
+    }
+
+    /// A thermostat's dial, as it is now.
+    fn dial_at(&self, of: Dial) -> Mode {
+        let target = self.climate(of).map_or(0.0, |c| c.target.unwrap_or((c.min + c.max) / 2.0));
+        Mode::Dial { of, target }
+    }
+
+    /// The mode the off prompt's first row turns a thermostat on in: heat,
+    /// else cool (else its first mode).
+    fn on_mode(&self, of: Dial) -> Option<String> {
+        match of {
+            Dial::Nest => self.nest.as_ref().map(|n| n.on_mode().to_owned()),
+            Dial::Card(_) => self.climate(of).map(|c| Nest::of_card(c).on_mode().to_owned()),
+        }
+    }
+
+    /// `choice` set to `option` on a thermostat: sent as its own command
+    /// (nestlocal's, or Home Assistant's), and on its card at once.
+    fn choose(&mut self, of: Dial, choice: ClimateChoice, option: &str, out: &mut Vec<Effect>) {
+        match of {
+            Dial::Nest => {
+                let name = match choice {
+                    ClimateChoice::Mode => "mode",
+                    ClimateChoice::Fan => "fan_mode",
+                    ClimateChoice::Preset => "preset",
+                    ClimateChoice::HotWater => "hot_water_boost",
+                    // The Nest has no swing.
+                    ClimateChoice::Swing | ClimateChoice::SwingHorizontal => return,
+                };
+                self.nest_command(name, option, out);
+                if let Some(nest) = &mut self.nest {
+                    match choice {
+                        ClimateChoice::Preset => nest.eco = option == "eco",
+                        ClimateChoice::HotWater => nest.hot_water_boost = option.parse().ok(),
+                        _ => {}
+                    }
+                }
+            }
+            Dial::Card(_) => {
+                if let Some(card) = self.climate(of) {
+                    out.push(Effect::Send(Command::Climate(card.id.clone(), choice, option.to_owned())));
+                }
+            }
+        }
+        if let Some(card) = self.climate_mut(of) {
+            card.set(choice, option);
         }
     }
 
@@ -1588,53 +1665,12 @@ impl Machine {
                 }
                 self.mode = view;
             }
-            (Action::Preset(i), Mode::ClimateSet { slot, .. }) => {
-                if let Some(Card::Climate(card)) = self.cards.cards.get_mut(slot) {
-                    if let Some(preset) = card.presets.get(i as usize).cloned() {
-                        out.push(Effect::Send(Command::Preset(card.id.clone(), preset.clone())));
-                        card.preset = Some(preset);
-                    }
-                }
-                self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
-            }
-            (Action::Modes | Action::Fans, Mode::ClimateSet { slot, .. }) => {
-                let fans = action == Action::Fans;
-                let selected = match self.card(slot) {
-                    Some(Card::Climate(card)) => {
-                        let (choices, now) = card.choices(fans);
-                        choices.iter().position(|c| Some(c.as_str()) == now).unwrap_or(0)
-                    }
-                    _ => 0,
-                };
-                self.mode = Mode::ClimateList { slot, fans, selected };
+            (Action::Choose(list), Mode::Dial { of, .. }) => {
+                let (choices, now) = self.choices(of, list);
+                let selected = choices.iter().position(|c| Some(c) == now.as_ref()).unwrap_or(0);
+                self.mode = Mode::DialList { of, list, selected };
             }
             (Action::Members, Mode::LightDim { slot, .. }) => self.mode = Mode::Members { slot, selected: 0 },
-            (Action::Eco(on), Mode::Thermostat { .. }) => {
-                self.nest_command("preset", if on { "eco" } else { "none" }, out);
-                if let Some(nest) = &mut self.nest {
-                    nest.eco = on;
-                    nest.card.preset = on.then(|| "eco".to_owned());
-                }
-                self.go(Mode::Chooser(self.place(Slot::Thermostat)), out);
-            }
-            (Action::Power(on), view @ Mode::Thermostat { .. }) => {
-                if let Some(nest) = &mut self.nest {
-                    let mode = if on { nest.on_mode() } else { "off" };
-                    nest.card.mode = mode.to_owned();
-                    self.nest_command("mode", mode, out);
-                }
-                // On or off, it stays open: off, its dial shows the temperature
-                // now, and a turn asks for a mode.
-                self.mode = view;
-            }
-            (Action::Boost(on), view @ Mode::Thermostat { .. }) => {
-                let minutes = if on { BOOST_MINUTES.to_string() } else { "OFF".to_owned() };
-                self.nest_command("hot_water_boost", minutes, out);
-                if let Some(nest) = &mut self.nest {
-                    nest.hot_water_boost = on.then_some(BOOST_MINUTES);
-                }
-                self.mode = view;
-            }
             (Action::NestDial, _) => self.go(Mode::Native, out),
             (Action::Run, view @ Mode::ActionView { slot }) => {
                 self.run(slot, out);
@@ -1731,8 +1767,8 @@ impl Machine {
             self.go(Mode::AlarmView { slot }, out);
             return;
         }
-        if matches!(self.mode, Mode::Thermostat { .. } | Mode::ClimateSet { .. } | Mode::AlarmView { .. }
-                    | Mode::Camera { .. } | Mode::OptionList { .. } | Mode::ClimateList { .. } | Mode::Members { .. }) {
+        if matches!(self.mode, Mode::Dial { .. } | Mode::AlarmView { .. }
+                    | Mode::Camera { .. } | Mode::OptionList { .. } | Mode::DialList { .. } | Mode::Members { .. }) {
             // An open card with no main action to hold for: nothing. Its
             // menu's Back (or a press, on a camera) goes back.
             return;
@@ -1746,9 +1782,9 @@ impl Machine {
         }
         let back = match self.mode.clone() {
             // Held: as Cancel.
-            Mode::Prompt { target, .. } => {
+            Mode::Prompt { of, target, .. } => {
                 out.push(Effect::Click);
-                self.mode = Mode::Thermostat { target };
+                self.mode = Mode::Dial { of, target };
                 self.dirty = true;
                 return;
             }
@@ -1781,14 +1817,6 @@ impl Machine {
     }
 
     /// A climate's dial, on its target as it is now.
-    fn climate_set(&self, slot: usize) -> Mode {
-        let target = match self.card(slot) {
-            Some(Card::Climate(card)) => card.target.unwrap_or((card.min + card.max) / 2.0),
-            _ => 0.0,
-        };
-        Mode::ClimateSet { slot, target }
-    }
-
     /// A light's dimmer, as it is now.
     fn dimmer(&self, slot: usize, light: usize) -> Mode {
         let (on, value) = match self.card(slot) {
@@ -2109,16 +2137,11 @@ impl Machine {
                     }
                 }
             }
-            Command::HvacMode(id, value) | Command::FanMode(id, value) => {
-                let fans = matches!(command, Command::FanMode(..));
+            Command::Climate(id, choice, value) => {
                 for card in cards.iter_mut() {
                     if let Card::Climate(card) = card {
                         if card.id == *id {
-                            if fans {
-                                card.fan_mode = Some(value.clone());
-                            } else {
-                                card.mode = value.clone();
-                            }
+                            card.set(*choice, value);
                         }
                     }
                 }
@@ -2237,7 +2260,7 @@ impl Machine {
         }
         // The thermostat's target once the ring rests; Home Assistant's
         // devices as it turns.
-        let settling = matches!(self.mode, Mode::Thermostat { .. }) && idle < SETTLE;
+        let settling = matches!(self.mode, Mode::Dial { .. }) && idle < SETTLE;
         if self.pending.is_some() && now.duration_since(self.last_sent) >= SEND_EVERY && !settling {
             self.last_sent = now;
             let command = self.pending.take().unwrap();
@@ -2944,17 +2967,23 @@ mod tests {
     }
 
     #[test]
-    fn a_thermostat_s_presets_and_a_speaker_s_tracks_are_in_their_menus() {
+    fn a_thermostat_s_presets_are_a_list_and_a_speaker_s_tracks_are_in_its_menu() {
         let mut rig = deck_of(br#"{"cards":[
             {"kind":"climate","id":"climate.kitchen","name":"Kitchen","target":19,"presets":["eco","away"]},
             {"kind":"media","id":"media_player.speaker","name":"Speaker","state":"playing","volume":30}]}"#);
         rig.turn(CARD_STEP);
         rig.press();
         rig.press();
-        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1..] == [Action::Preset(0), Action::Preset(1)]));
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1..] == [Action::Choose(ClimateChoice::Preset)]));
         rig.rows(1);
-        assert_eq!(Rig::sends(&rig.press()), vec![Command::Preset("climate.kitchen".into(), "eco".into())]);
-        assert_eq!(rig.machine.mode, Mode::Chooser(1));
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Card(0), list: ClimateChoice::Preset, selected: 0 });
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Climate("climate.kitchen".into(), ClimateChoice::Preset, "eco".into())]);
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(0), target: 19.0 }, "still on its card");
+        assert!(matches!(rig.machine.card(0), Some(Card::Climate(c)) if c.active_preset() == Some("eco")), "its dial says so");
+
+        let mut rig = deck_of(br#"{"cards":[
+            {"kind":"media","id":"media_player.speaker","name":"Speaker","state":"playing","volume":30}]}"#);
         rig.turn(CARD_STEP);
         rig.press();
         rig.press();
@@ -2964,36 +2993,90 @@ mod tests {
     }
 
     #[test]
-    fn an_air_conditioner_s_modes_and_fan_speeds_are_lists_off_its_menu() {
+    fn an_air_conditioner_s_mode_fan_preset_and_swings_are_lists_off_its_menu() {
         let mut rig = deck_of(br#"{"cards":[
             {"kind":"climate","id":"climate.ac","name":"AC","mode":"cool","target":22,"presets":["away","boost"],
-             "modes":["off","cool","dry","fan_only"],"fan_modes":["auto","low","high"],"fan_mode":"auto"}]}"#);
+             "preset_modes":["none","away","boost"],"preset":"none",
+             "modes":["off","cool","dry","fan_only"],"fan_modes":["auto","low","high"],"fan_mode":"auto",
+             "swing_modes":["off","swing"],"swing_mode":"off",
+             "swing_horizontal_modes":["off","swing","left"],"swing_horizontal_mode":"swing"}]}"#);
         rig.turn(CARD_STEP);
         rig.press();
         rig.press();
         let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!("its menu") };
-        assert_eq!(actions[1..], [Action::Modes, Action::Fans, Action::Preset(0), Action::Preset(1)]);
+        assert_eq!(actions[1..], ClimateChoice::ALL.map(Action::Choose));
         rig.rows(2);
         rig.press();
-        assert_eq!(rig.machine.mode, Mode::ClimateList { slot: 0, fans: true, selected: 0 }, "on the speed it's at");
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Card(0), list: ClimateChoice::Fan, selected: 0 }, "on the speed it's at");
         rig.turn(2 * ROW_STEP);
-        assert_eq!(Rig::sends(&rig.press()), vec![Command::FanMode("climate.ac".into(), "high".into())]);
-        assert_eq!(rig.machine.mode, Mode::ClimateSet { slot: 0, target: 22.0 }, "back to its dial");
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Climate("climate.ac".into(), ClimateChoice::Fan, "high".into())]);
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(0), target: 22.0 }, "back to its dial");
         rig.press();
         rig.rows(1);
         rig.press();
-        assert_eq!(rig.machine.mode, Mode::ClimateList { slot: 0, fans: false, selected: 1 }, "on cool");
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Card(0), list: ClimateChoice::Mode, selected: 1 }, "on cool");
+        rig.turn(ROW_STEP);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Climate("climate.ac".into(), ClimateChoice::Mode, "dry".into())]);
+        assert_eq!(Command::Climate("climate.ac".into(), ClimateChoice::Mode, "dry".into()).payload(),
+                   serde_json::json!({"id": "climate.ac", "action": "hvac_mode", "option": "dry"}));
+        // Its presets, none among them, on the one it's in.
+        rig.press();
+        rig.rows(3);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Card(0), list: ClimateChoice::Preset, selected: 0 }, "on none");
+        rig.turn(ROW_STEP);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Climate("climate.ac".into(), ClimateChoice::Preset, "away".into())]);
+        assert!(matches!(rig.machine.mode, Mode::Dial { of: Dial::Card(0), .. }), "still on its card");
+        assert!(matches!(rig.machine.card(0), Some(Card::Climate(c)) if c.active_preset() == Some("away")));
+        // Swing and horizontal swing.
+        rig.press();
+        rig.rows(4);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Card(0), list: ClimateChoice::Swing, selected: 0 });
         rig.turn(ROW_STEP);
         let sent = rig.press();
-        assert_eq!(Rig::sends(&sent), vec![Command::HvacMode("climate.ac".into(), "dry".into())]);
-        assert_eq!(Command::HvacMode("climate.ac".into(), "dry".into()).payload(),
-                   serde_json::json!({"id": "climate.ac", "action": "hvac_mode", "option": "dry"}));
+        assert_eq!(Rig::sends(&sent), vec![Command::Climate("climate.ac".into(), ClimateChoice::Swing, "swing".into())]);
+        assert_eq!(Command::Climate("climate.ac".into(), ClimateChoice::Swing, "swing".into()).payload()["action"], "swing_mode");
+        rig.press();
+        rig.rows(5);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Card(0), list: ClimateChoice::SwingHorizontal, selected: 1 });
+        rig.turn(ROW_STEP);
+        assert_eq!(Command::Climate("climate.ac".into(), ClimateChoice::SwingHorizontal, "left".into()).payload()["action"],
+                   "swing_horizontal_mode");
+        assert_eq!(Rig::sends(&rig.press()),
+                   vec![Command::Climate("climate.ac".into(), ClimateChoice::SwingHorizontal, "left".into())]);
         // Back on the last row: no command.
         rig.press();
         rig.rows(1);
         rig.press();
         rig.turn(10 * ROW_STEP);
         assert!(Rig::sends(&rig.press()).is_empty());
+    }
+
+    #[test]
+    fn an_air_conditioner_s_dial_turns_and_asks_for_a_mode_as_the_nest_s_does() {
+        let mut rig = deck_of(br#"{"cards":[
+            {"kind":"climate","id":"climate.ac","name":"AC","mode":"cool","target":22,"current":24,
+             "modes":["off","cool","heat","dry"]}]}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(0), target: 22.0 });
+        assert!(Rig::sends(&rig.turn(CLIMATE_STEP * 2)).is_empty(), "nothing sent while the ring turns");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(0), target: 23.0 }, "a step a turn, as the Nest's");
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Temperature("climate.ac".into(), 23.0)], "the press sends it first");
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1..] == [Action::Choose(ClimateChoice::Mode)]));
+        // Off: a turn asks for a mode; its first row turns it on.
+        rig.rows(1);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Card(0), list: ClimateChoice::Mode, selected: 1 }, "on cool");
+        rig.rows(-1);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Climate("climate.ac".into(), ClimateChoice::Mode, "off".into())]);
+        assert!(Rig::sends(&rig.turn(PROMPT_TURN)).is_empty());
+        assert_eq!(rig.machine.mode, Mode::Prompt { of: Dial::Card(0), target: 23.0, selected: PROMPT_ON });
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Climate("climate.ac".into(), ClimateChoice::Mode, "heat".into())],
+                   "heat, as the Nest's: it can");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(0), target: 23.0 });
     }
 
     #[test]
@@ -3006,7 +3089,7 @@ mod tests {
         assert!(Rig::sends(&rig.turn(4 * CLIMATE_STEP)).is_empty());
         assert_eq!(rig.machine.mode, before);
         rig.press();
-        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1..] == [Action::Modes]),
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1..] == [Action::Choose(ClimateChoice::Mode)]),
                 "only its modes");
     }
 
@@ -3264,7 +3347,7 @@ mod tests {
         let mut rig = Rig::with(cards_waking("1"));
         rig.lit = false;
         assert_eq!(rig.press(), vec![Effect::WakeDisplay, Effect::Own(true)]);
-        assert_eq!(rig.machine.mode, Mode::ClimateSet { slot: 1, target: 19.0 }, "the card opened");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 19.0 }, "the card opened");
     }
 
     #[test]
@@ -3377,15 +3460,15 @@ mod tests {
     fn the_thermostat_card_sets_its_target_once_the_ring_rests() {
         let mut rig = nest_rig();
         assert!(rig.press().is_empty(), "our own dial: the display and ring kept");
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 });
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 });
         rig.turn(CLIMATE_STEP * 3);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 21.5 });
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 21.5 });
         assert!(sent(&rig.wait(SETTLE / 2)).is_empty(), "not while it turns");
         assert_eq!(sent(&rig.wait(SETTLE)), vec![("target".into(), "21.5".into())]);
         assert_eq!(rig.machine.nest.as_ref().unwrap().card.target, Some(21.5), "its card shows it at once");
         rig.turn(-CLIMATE_STEP * 40);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 9.0 }, "no lower than the Nest goes");
-        assert!(rig.long().is_empty() && rig.machine.mode == Mode::Thermostat { target: 9.0 },
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 9.0 }, "no lower than the Nest goes");
+        assert!(rig.long().is_empty() && rig.machine.mode == Mode::Dial { of: Dial::Nest, target: 9.0 },
                 "held: nothing, as it has no switch");
         assert_eq!(sent(&rig.press()), vec![("target".into(), "9".into())], "a press sends it, then its menu");
         rig.press();
@@ -3398,7 +3481,7 @@ mod tests {
         rig.press();
         let effects = rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
         assert_eq!(effects, vec![Effect::Click], "a click, nothing sent");
-        assert_eq!((&rig.machine.mode, rig.machine.dial_offset), (&Mode::Thermostat { target: 20.0 }, 0.5),
+        assert_eq!((&rig.machine.mode, rig.machine.dial_offset), (&Mode::Dial { of: Dial::Nest, target: 20.0 }, 0.5),
                    "still 20, the mark half way to the next step");
         assert!(sent(&rig.wait(SETTLE * 2)).is_empty(), "nothing sent");
         assert_eq!(rig.machine.dial_offset, 0.5, "at rest, the mark stays where the hand left it");
@@ -3429,15 +3512,19 @@ mod tests {
     }
 
     #[test]
-    fn turning_the_thermostat_off_keeps_it_open() {
+    fn turning_the_thermostat_off_from_its_modes_keeps_it_open() {
         let mut rig = nest_rig();
         rig.press();
         rig.press();
-        rig.rows(2);
+        rig.rows(1);
         let Mode::Menu { actions, selected, .. } = rig.machine.mode.clone() else { panic!() };
-        assert_eq!(actions[selected], Action::Power(false));
+        assert_eq!(actions[selected], Action::Choose(ClimateChoice::Mode));
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Nest, list: ClimateChoice::Mode, selected: 1 }, "on heat");
+        rig.rows(-1);
         assert_eq!(sent(&rig.press()), vec![("mode".into(), "off".into())]);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "still on the thermostat");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 }, "still on the thermostat");
+        assert_eq!(rig.machine.nest.as_ref().unwrap().card.mode, "off", "its dial says so at once");
     }
 
     #[test]
@@ -3445,39 +3532,39 @@ mod tests {
         let mut rig = nest_rig();
         rig.machine.set_nest(nest(serde_json::json!({"mode": "off"})));
         rig.press();
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 });
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 });
         rig.turn(PROMPT_TURN - 1);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "a hand coming off the ring: no question");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 }, "a hand coming off the ring: no question");
         rig.press();
         rig.input(Input::LongPress);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "its menu, and out of it");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 }, "its menu, and out of it");
         rig.turn(PROMPT_TURN - 1);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "nor what was turned before a press");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 }, "nor what was turned before a press");
         assert!(sent(&rig.turn(1)).is_empty(), "nothing set");
-        assert_eq!(rig.machine.mode, Mode::Prompt { target: 20.0, selected: PROMPT_ON }, "Heat, Off, Cancel; Heat chosen");
+        assert_eq!(rig.machine.mode, Mode::Prompt { of: Dial::Nest, target: 20.0, selected: PROMPT_ON }, "Heat, Off, Cancel; Heat chosen");
         rig.rows(5);
-        assert_eq!(rig.machine.mode, Mode::Prompt { target: 20.0, selected: PROMPT_CANCEL }, "no further than Cancel");
+        assert_eq!(rig.machine.mode, Mode::Prompt { of: Dial::Nest, target: 20.0, selected: PROMPT_CANCEL }, "no further than Cancel");
         assert!(sent(&rig.press()).is_empty(), "Cancel: nothing sent");
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "back on its dial, still off");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 }, "back on its dial, still off");
         rig.turn(PROMPT_TURN);
         rig.rows(1);
-        assert_eq!(rig.machine.mode, Mode::Prompt { target: 20.0, selected: PROMPT_OFF });
+        assert_eq!(rig.machine.mode, Mode::Prompt { of: Dial::Nest, target: 20.0, selected: PROMPT_OFF });
         assert!(sent(&rig.press()).is_empty(), "Off: left off");
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 });
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 });
         rig.turn(PROMPT_TURN);
         rig.input(Input::LongPress);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "held: as Cancel");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 }, "held: as Cancel");
         rig.turn(PROMPT_TURN);
         rig.rows(-3);
-        assert_eq!(rig.machine.mode, Mode::Prompt { target: 20.0, selected: PROMPT_ON }, "the question isn't a row");
+        assert_eq!(rig.machine.mode, Mode::Prompt { of: Dial::Nest, target: 20.0, selected: PROMPT_ON }, "the question isn't a row");
         assert_eq!(sent(&rig.press()), vec![("mode".into(), "heat".into())], "Heat: on");
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "on its dial to set");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 }, "on its dial to set");
         rig.turn(CLIMATE_STEP * 2);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 21.0 }, "on, the ring sets it");
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 21.0 }, "on, the ring sets it");
     }
 
     #[test]
-    fn turning_in_eco_leaves_it_and_its_menu_switches_it() {
+    fn turning_in_eco_leaves_it_and_its_presets_choose_it() {
         let mut rig = nest_rig();
         rig.machine.set_nest(nest(serde_json::json!({"preset": "eco"})));
         rig.press();
@@ -3486,15 +3573,26 @@ mod tests {
         let effects = rig.press();
         assert_eq!(sent(&effects), vec![("target".into(), "20.5".into())], "the press sends the target first");
         let Mode::Menu { actions, .. } = &rig.machine.mode else { panic!("{:?}", rig.machine.mode) };
-        assert_eq!(actions, &vec![Action::Back, Action::Eco(true), Action::Power(false), Action::Boost(true), Action::NestDial]);
+        assert_eq!(actions, &vec![Action::Back, Action::Choose(ClimateChoice::Mode), Action::Choose(ClimateChoice::Preset),
+                                  Action::Choose(ClimateChoice::HotWater), Action::NestDial],
+                   "the menu every thermostat has, and its own; no fan, as it has none");
+        rig.rows(2);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Nest, list: ClimateChoice::Preset, selected: 0 }, "on none");
         rig.rows(1);
         assert_eq!(sent(&rig.press()), vec![("preset".into(), "eco".into())]);
-        assert_eq!(rig.machine.mode, Mode::Chooser(0), "Eco: back to the cards");
-        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.5 }, "Eco: still on its dial");
+        assert!(rig.machine.nest.as_ref().unwrap().eco);
+        // Its hot water boost: for how long, from a list.
         rig.press();
         rig.rows(3);
-        assert_eq!(sent(&rig.press()), vec![("hot_water_boost".into(), "60".into())]);
-        assert_eq!(rig.machine.nest.as_ref().unwrap().hot_water_boost, Some(60));
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::DialList { of: Dial::Nest, list: ClimateChoice::HotWater, selected: 0 }, "on off");
+        assert_eq!(rig.machine.choices(Dial::Nest, ClimateChoice::HotWater).0, ["off", "30", "60", "120"]);
+        rig.rows(3);
+        assert_eq!(sent(&rig.press()), vec![("hot_water_boost".into(), "120".into())]);
+        assert_eq!(rig.machine.nest.as_ref().unwrap().hot_water_boost, Some(120));
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.5 }, "still on its dial");
         rig.press();
         rig.rows(4);
         assert_eq!(rig.press(), vec![Effect::Own(false), Effect::Hold(false)], "Nest's own dial");
@@ -3554,7 +3652,7 @@ mod tests {
         rig.machine.set_nest(nest(serde_json::json!({"temperature_scale": "F", "target": 68.0})));
         rig.press();
         rig.turn(CLIMATE_STEP * 2);
-        assert_eq!(rig.machine.mode, Mode::Thermostat { target: 70.0 });
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 70.0 });
         assert_eq!(sent(&rig.wait(SETTLE)), vec![("target".into(), "21".into())]);
     }
 
@@ -3684,7 +3782,7 @@ mod tests {
         rig.turn(CARD_STEP * 2);
         rig.press();
         rig.turn(CLIMATE_STEP * 3);
-        assert_eq!(rig.machine.mode, Mode::ClimateSet { slot: 1, target: 20.5 });
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 20.5 });
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Temperature("climate.kitchen".into(), 20.5)],
                    "done sends what is still waiting");
         assert_eq!(rig.machine.mode, Mode::Chooser(2));
@@ -3791,7 +3889,7 @@ mod tests {
     fn not_a_thermostat_has_no_card_and_no_heating_settings() {
         let mut rig = nest_rig();
         rig.press();
-        assert!(matches!(rig.machine.mode, Mode::Thermostat { .. }));
+        assert!(matches!(rig.machine.mode, Mode::Dial { of: Dial::Nest, .. }));
         rig.machine.set_nest(nest(serde_json::json!({"acting": false, "mode": "off"})));
         assert_eq!(rig.machine.mode, Mode::Home, "its screen goes with its role");
         assert!(!rig.machine.deck().contains(&Slot::Thermostat));

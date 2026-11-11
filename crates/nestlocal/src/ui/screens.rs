@@ -4,7 +4,7 @@
 
 use super::icons;
 use super::machine::Setting;
-use super::model::{ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, ClimateCard, CoverCard, Glance, Light, LightsCard,
+use super::model::{ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, ClimateCard, ClimateChoice, CoverCard, Glance, Light, LightsCard,
                    MediaCard, Nest, OptionsCard};
 use super::paint::{self, *};
 
@@ -12,7 +12,6 @@ use std::borrow::Cow;
 
 pub enum Screen<'a> {
     LightsCard { card: &'a LightsCard },
-    ClimateCard { card: &'a ClimateCard, target: Option<f64> },
     /// `progress`: how far through its track (0..1), for its bar.
     MediaCard { card: &'a MediaCard, volume: Option<u8>, progress: Option<f32> },
     SettingsCard,
@@ -56,18 +55,19 @@ pub enum Screen<'a> {
     /// A light's white (kelvin) and colour (hue, degrees) dials.
     LightWarmth { light: &'a Light, value: u16 },
     LightHue { light: &'a Light, value: u16 },
-    ClimateSet { card: &'a ClimateCard, target: f64 },
     Volume { card: &'a MediaCard, value: u8 },
-    /// This thermostat: its card (`now`, Unix seconds, for its time to
-    /// temperature), and its dial setting `target`.
-    NestCard { nest: &'a Nest, now: f64 },
+    /// A thermostat: its card (`now`, Unix seconds, for its time to
+    /// temperature), and its dial setting `target`. This one's own, or a
+    /// Home Assistant climate's as one (Nest::of_card): every thermostat is
+    /// the same card.
+    NestCard { nest: Cow<'a, Nest>, now: f64 },
     /// `pulse`: how far a pulse from now to the target has run (0..1).
     /// `setting`: the ring just turned, so it says what it's set to.
     /// `shown`: how far the temperature now's number has faded in (0..1),
     /// as the target leaves it or comes to it; None, as it stands.
     /// With it, a target on the side it shows (it stays where it was as it
     /// fades, rather than jumping across as the target passes).
-    NestSet { nest: &'a Nest, target: f64, pulse: Option<f32>, setting: bool, shown: Option<(f32, f64)> },
+    NestSet { nest: Cow<'a, Nest>, target: f64, pulse: Option<f32>, setting: bool, shown: Option<(f32, f64)> },
     /// Its Settings, `selected` highlighted; `nest_dial`, Nest's own dial
     /// in place of its card.
     Settings { rows: Vec<Setting>, nest: Option<&'a Nest>, nest_dial: bool, selected: usize },
@@ -78,7 +78,7 @@ pub enum Screen<'a> {
     ThemePick { fledge: bool },
     /// The thermostat off and its ring turned: the Nest's question, and Heat
     /// (Cool), Off and Cancel listed as Settings are, `selected` from 1.
-    ModePrompt { nest: &'a Nest, selected: usize },
+    ModePrompt { nest: Cow<'a, Nest>, selected: usize },
 }
 
 const HALF: f32 = 240.0;
@@ -131,12 +131,6 @@ fn pill_words_at(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8;
 pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
     match screen {
         Screen::LightsCard { card } => lights_card(fonts, card),
-        Screen::ClimateCard { card, target } => {
-            let target = target.or(card.target);
-            let mut p = climate_still(fonts, card, target, false);
-            climate_moving(&mut p, None, fonts, card, target, None, None, None);
-            p
-        }
         Screen::MediaCard { card, volume, progress } => media_card(fonts, card, volume.or(card.volume), *progress),
         Screen::SettingsCard => settings_card(fonts),
         Screen::ActionCard { card, done, opened } => action_card(fonts, card, *done, *opened),
@@ -176,11 +170,10 @@ pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
         Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on, true),
         Screen::LightWarmth { light, .. } => light_dial_still(fonts, light, "Warmth"),
         Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour"),
-        Screen::ClimateSet { card, target } => climate_still(fonts, card, card.target.map(|_| *target), true),
         Screen::Volume { card, .. } => volume_still(fonts, card),
         Screen::CoverSet { card, .. } => cover_still(fonts, card, true),
         Screen::NestSet { nest, target, setting, .. } => {
-            nest_still(fonts, &predicted(nest, *target), Some(*target), *setting, unix_now())
+            nest_still(fonts, &setting_to(nest, *target, *setting), nest.card.target.map(|_| *target), *setting, unix_now())
         }
         Screen::SettingSet { setting, .. } => setting_still(fonts, *setting),
         _ => draw(fonts, screen, None),
@@ -194,14 +187,12 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
         Screen::LightDim { light, on, value } => light_dim_moving(p, live.as_deref_mut(), fonts, light, *on, *value, sweep),
         Screen::LightWarmth { light, value } => warmth_moving(p, live.as_deref_mut(), fonts, light, *value, sweep),
         Screen::LightHue { value, .. } => hue_moving(p, live.as_deref_mut(), fonts, *value, sweep),
-        Screen::ClimateSet { card, target } => {
-            // A mode with no temperature (dry, fan only): nothing to set.
-            climate_moving(p, live.as_deref_mut(), fonts, card, card.target.map(|_| *target), sweep, None, None)
-        }
         Screen::Volume { value, .. } => volume_moving(p, live.as_deref_mut(), fonts, *value, sweep),
         Screen::CoverSet { card, value } => cover_moving(p, live.as_deref_mut(), fonts, card, *value, sweep),
-        Screen::NestSet { nest, target, pulse, shown, .. } => {
-            climate_moving(p, live.as_deref_mut(), fonts, &predicted(nest, *target).card, Some(*target), sweep, *pulse, *shown)
+        Screen::NestSet { nest, target, pulse, shown, setting } => {
+            // A mode with no temperature (dry, fan only): nothing to set.
+            let target = nest.card.target.map(|_| *target);
+            climate_moving(p, live.as_deref_mut(), fonts, &setting_to(nest, target.unwrap_or(0.0), *setting).card, target, sweep, *pulse, *shown)
         }
         Screen::SettingSet { setting, nest, value } => setting_moving(p, live.as_deref_mut(), fonts, *setting, nest, *value, sweep),
         _ => {}
@@ -222,19 +213,18 @@ pub fn still_key(screen: &Screen) -> Option<String> {
         }
         Screen::LightWarmth { light, .. } => Some(format!("warmth {}", light.id)),
         Screen::LightHue { light, .. } => Some(format!("hue {}", light.id)),
-        Screen::ClimateSet { card, .. } => Some(format!("set {} {} {} {:?} {:?}", card.name, card.mode, card.action,
-                                                        card.current, card.has_menu())),
         Screen::Volume { card, .. } => Some(format!("volume {} {}", card.name, card.state)),
         Screen::CoverSet { card, .. } => Some(format!("cover {} {} {} {} {}", card.id, card.name, card.icon, card.state,
                                                      card.positionable)),
         Screen::NestSet { nest, target, setting, .. } => {
-            let nest = predicted(nest, *target);
+            let nest = setting_to(nest, *target, *setting);
             // Turning only changes it in Eco (its leaf gives way).
             let setting = *setting && nest.eco;
             // (The temperature now's number is drawn with the ring, so which
             // side of its tick it's on doesn't change this.)
-            Some(format!("nest {:?} {:?} {} {:?} {} {setting} {:?}", nest.card.action, nest.card.current,
-                nest.eco, nest.hot_water_boost,
+            Some(format!("nest {} {:?} {} {:?} {:?} {:?} {} {:?} {} {} {setting} {:?}", nest.card.id, nest.card.name,
+                nest.card.mode, nest.card.target.is_some(), nest.card.action, nest.card.current, nest.eco,
+                nest.card.active_preset(), nest.hot_water_boost.unwrap_or(0),
                 (nest.time_to_target.unwrap_or(0.0) - unix_now()).max(0.0) as i64 / 60, nest.next_change))
         }
         Screen::SettingSet { setting, .. } => Some(format!("setting {setting:?}")),
@@ -370,6 +360,11 @@ fn light_card(fonts: &Fonts, card: &LightsCard, light: &Light) -> Canvas {
 }
 
 pub fn climate_colours(card: &ClimateCard) -> ([u8; 3], bool) {
+    if card.mode == "off" {
+        // Off is off, whatever its action last said (some integrations
+        // leave it at heating).
+        return (BLACK, false);
+    }
     match card.action.as_str() {
         "heating" | "preheating" => (HEAT, true),
         "cooling" => (COOL, true),
@@ -420,6 +415,17 @@ fn now_label(p: &mut Canvas, fonts: &Fonts, card: &ClimateCard, target: Option<f
     }
 }
 
+/// One of a thermostat's lists' options in words: a hot water boost's
+/// minutes as a time ("1 hour"), else as climate_label says.
+pub fn choice_label(list: ClimateChoice, option: &str) -> String {
+    match (list, option.parse::<u32>()) {
+        (ClimateChoice::HotWater, Ok(60)) => "1 hour".to_owned(),
+        (ClimateChoice::HotWater, Ok(m)) if m % 60 == 0 => format!("{} hours", m / 60),
+        (ClimateChoice::HotWater, Ok(m)) => format!("{m} min"),
+        _ => climate_label(option),
+    }
+}
+
 /// A climate mode or fan speed as Home Assistant names it, in words:
 /// heat_cool "Heat/cool", fan_only "Fan only".
 pub fn climate_label(name: &str) -> String {
@@ -429,30 +435,6 @@ pub fn climate_label(name: &str) -> String {
     }
 }
 
-fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, setting: bool) -> Canvas {
-    let (background, active) = climate_colours(card);
-    let mut p = paint::face(background);
-    let text_colour = if active { WHITE } else { GREY };
-    label(&mut p, fonts, 150.0, &card.name, text_colour);
-    if card.mode == "off" || (target.is_none() && card.mode.is_empty()) {
-        paint::text(&mut p, fonts.digits(), 96.0, HALF, 300.0, "OFF", 0.0, WHITE);
-    } else if target.is_none() {
-        // A mode with no temperature to set (dry, fan only): its name.
-        line(&mut p, fonts, 290.0, &climate_label(&card.mode), WHITE);
-    }
-    let bottom = if setting {
-        if card.has_menu() { "Press for options".to_owned() } else { "Press when done".to_owned() }
-    } else {
-        let now = card.current.map(|t| format!("{t:.1}° now")).unwrap_or_default();
-        let state = match card.action.as_str() {
-            "" => card.mode.replace('_', " "),
-            action => action.to_owned(),
-        };
-        [now, state].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
-    };
-    line(&mut p, fonts, 366.0, &bottom, if active { [255, 225, 205] } else { GREY });
-    p
-}
 
 /// The ring's ticks on the heating orange, as the Nest's (on cooling blue,
 /// a lighter blue).
@@ -740,8 +722,7 @@ fn theme_preview(fonts: &Fonts, theme: paint::Theme) -> (Vec<u8>, u32) {
     paint::set_theme(theme);
     let card = ClimateCard { id: "preview".into(), name: String::new(), icon: String::new(), mode: "heat".into(),
                              action: "heating".into(), target: Some(22.0), current: Some(20.5), min: 9.0, max: 32.0,
-                             step: 0.5, presets: Vec::new(), preset: None, modes: Vec::new(),
-                             fan_modes: Vec::new(), fan_mode: None };
+                             step: 0.5, ..ClimateCard::default() };
     let mut p = paint::face(climate_colours(&card).0);
     climate_moving(&mut p, None, fonts, &card, card.target, None, None, Some((0.0, 22.0)));
     let rgb = p.rgb_upright();
@@ -811,6 +792,16 @@ fn nest_eta(nest: &Nest, now: f64) -> Option<String> {
 /// soon as the target is above the temperature now (cooling below, when it
 /// cools), idle else, as the Nest's dial turns orange, blue or black as the
 /// ring passes it, before nlclient has said.
+/// A thermostat as its dial shows it set to `target`: predicted while the
+/// ring sets it (`setting`, or a target it hasn't taken yet), so its colour
+/// follows the hand; else as it reports, so the dial glows as its card does.
+fn setting_to(nest: &Nest, target: f64, setting: bool) -> Cow<'_, Nest> {
+    match nest.card.target {
+        Some(t) if !setting && (t - target).abs() < 1e-6 => Cow::Borrowed(nest),
+        _ => Cow::Owned(predicted(nest, target)),
+    }
+}
+
 pub fn predicted(nest: &Nest, target: f64) -> Nest {
     let mut nest = nest.clone();
     let card = &mut nest.card;
@@ -832,12 +823,22 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
     let (background, active) = climate_colours(card);
     let mut p = paint::face(background);
     let soft = if active { [255, 225, 205] } else { GREY };
-    let off = card.mode == "off";
-    if off {
+    // At the foot, in the ring's gap: a hot water boost running, else
+    // which thermostat this is.
+    match nest.hot_water_boost {
+        Some(minutes) => line(&mut p, fonts, 392.0, &format!("Hot water boost · {minutes} min"), soft),
+        None => line(&mut p, fonts, 392.0, &card.name, soft),
+    }
+    if card.mode == "off" {
         paint::text(&mut p, fonts.digits(), 96.0, HALF, NUMBER_BASELINE - 18.0, "OFF", 0.0, WHITE);
         return p;
     }
-    let _ = target;
+    if target.is_none() {
+        // A mode with no temperature to set (dry, fan only): its name in
+        // the number's place.
+        let mode = paint::fit(fonts.digits(), 64.0, &climate_label(&card.mode), 0.0, 300.0);
+        paint::text(&mut p, fonts.digits(), 64.0, HALF, NUMBER_BASELINE - 30.0, &mode, 0.0, WHITE);
+    }
     if nest.eco && !setting {
         icon(&mut p, "mdi:leaf", "eco", HALF, 148.0, 40.0, if active { WHITE } else { ECO });
     } else {
@@ -850,7 +851,12 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
                 None => nest_doing(nest).to_owned(),
             }),
             "heating" | "cooling" => nest_eta(nest, now).or_else(|| Some(nest_doing(nest).to_owned())),
-            _ => Some(if card.mode == "cool" { "Cool set to" } else { "Heat set to" }.to_owned()),
+            _ if target.is_none() => None,
+            _ => Some(match card.mode.as_str() {
+                "cool" => "Cool set to",
+                "heat" => "Heat set to",
+                _ => "Set to",
+            }.to_owned()),
         };
         let state_icon = match card.action.as_str() {
             "heating" => Some("mdi:fire"),
@@ -866,12 +872,16 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
             };
             dial_words(&mut p, fonts, ABOVE_BASELINE, &above, tint, state_icon);
         }
-        if let Some(until) = &nest.next_change {
-            dial_words(&mut p, fonts, UNDER_BASELINE, &format!("Until {until}"), soft, None);
+        // Under it, the preset it's in (away, boost, ...) and until when
+        // the schedule keeps it there.
+        let under: Vec<String> = [
+            card.active_preset().map(climate_label),
+            nest.next_change.as_ref().map(|until| format!("Until {until}")),
+        ].into_iter().flatten().collect();
+        if !under.is_empty() {
+            let icon_name = card.active_preset().map(preset_icon);
+            dial_words(&mut p, fonts, UNDER_BASELINE, &under.join(" · "), soft, icon_name);
         }
-    }
-    if let Some(minutes) = nest.hot_water_boost {
-        line(&mut p, fonts, 392.0, &format!("Hot water boost · {minutes} min"), soft);
     }
     p
 }
@@ -1862,9 +1872,8 @@ pub fn accent(screen: &Screen) -> [u8; 3] {
     match screen {
         Screen::LightDim { light, .. } => light.colour(),
         Screen::Volume { .. } | Screen::MediaCard { .. } => MEDIA,
-        Screen::ClimateSet { card, .. } if card.mode == "cool" => COOL,
         Screen::NestSet { nest, .. } if nest.card.mode == "cool" => COOL,
-        Screen::ClimateSet { .. } | Screen::NestSet { .. } => HEAT,
+        Screen::NestSet { .. } => HEAT,
         Screen::CoverSet { .. } => COVER,
         Screen::ActionCard { .. } => ACTION,
         Screen::AlarmView { .. } => ALARM_ARMED,
@@ -1922,6 +1931,32 @@ fn alarm_open(fonts: &Fonts, card: &AlarmCard, arm: &AlarmMode, sensors: &[Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dial_predicts_only_while_its_target_is_being_set() {
+        let card = super::ClimateCard { mode: "heat".into(), action: "idle".into(), target: Some(21.0), current: Some(20.8),
+                                        ..Default::default() };
+        let nest = super::Nest::of_card(&card);
+        assert_eq!(super::setting_to(&nest, 21.0, false).card.action, "idle", "at rest: as it reports, as its card shows");
+        assert_eq!(super::setting_to(&nest, 21.0, true).card.action, "heating", "the ring just turned: predicted");
+        assert_eq!(super::setting_to(&nest, 22.0, false).card.action, "heating", "a target it hasn't taken yet");
+    }
+
+    #[test]
+    fn an_off_thermostat_never_glows_whatever_its_action_says() {
+        let card = |mode: &str| super::ClimateCard { mode: mode.into(), action: "heating".into(), ..Default::default() };
+        assert_eq!(super::climate_colours(&card("heat")), (super::HEAT, true));
+        assert_eq!(super::climate_colours(&card("off")), (super::BLACK, false));
+    }
+
+    #[test]
+    fn a_hot_water_boost_s_minutes_read_as_a_time() {
+        use super::super::model::ClimateChoice::{HotWater, Mode};
+        let label = |list, o: &str| super::choice_label(list, o);
+        assert_eq!([label(HotWater, "off"), label(HotWater, "30"), label(HotWater, "60"), label(HotWater, "120")],
+                   ["Off", "30 min", "1 hour", "2 hours"]);
+        assert_eq!(label(Mode, "fan_only"), "Fan only");
+    }
+
     #[test]
     fn the_glance_counts_lights_switches_and_fans_apart() {
         let on = |ids: &[&str]| {

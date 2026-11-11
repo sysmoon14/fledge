@@ -278,9 +278,9 @@ fn ui_film() {
         let [Card::Lights(lamp), Card::Climate(kitchen), Card::Media(speaker)] = &cards.cards[..] else { panic!() };
         let thermostat = nest(target, 21.0);
         Deck::new(fonts, &[
-            ("Thermostat", Screen::NestCard { nest: &thermostat, now: now as f64 }),
+            ("Thermostat", Screen::NestCard { nest: std::borrow::Cow::Borrowed(&thermostat), now: now as f64 }),
             ("Reading Lamp", Screen::LightsCard { card: lamp }),
-            ("Kitchen", Screen::ClimateCard { card: kitchen, target: None }),
+            ("Kitchen", Screen::NestCard { nest: std::borrow::Cow::Owned(Nest::of_card(kitchen)), now: 0.0 }),
             ("Kitchen speaker", Screen::MediaCard { card: speaker, volume: None, progress: Some(0.4) }),
             ("Goodnight", Screen::ActionCard { card: &scene, done: false, opened: false }),
             ("Bedroom blind", Screen::CoverCard { card: &blind }),
@@ -315,14 +315,14 @@ fn ui_film() {
         let dim = |value: f32| (Screen::LightDim { light, on: true, value: value.round() as u8 }, value / 100.0);
         let zone = |value: f32| {
             let target = (value as f64 * 2.0).round() / 2.0;
-            (Screen::ClimateSet { card: kitchen, target }, ((value as f64 - kitchen.min) / (kitchen.max - kitchen.min)) as f32)
+            (Screen::NestSet { nest: std::borrow::Cow::Owned(Nest::of_card(kitchen)), target, pulse: None, setting: true, shown: None }, ((value as f64 - kitchen.min) / (kitchen.max - kitchen.min)) as f32)
         };
         let volume = |value: f32| (Screen::Volume { card: speaker, value: value.round() as u8 }, value / 100.0);
         let thermostat = nest(20.0, 21.0);
         let set = |value: f32| {
             let target = (value as f64 * 2.0).round() / 2.0;
             let card = &thermostat.card;
-            (Screen::NestSet { nest: &thermostat, target, pulse: None, setting: true, shown: None },
+            (Screen::NestSet { nest: std::borrow::Cow::Borrowed(&thermostat), target, pulse: None, setting: true, shown: None },
              ((value as f64 - card.min) / (card.max - card.min)) as f32)
         };
         if fledge {
@@ -390,7 +390,7 @@ fn ui_film() {
             let set = |value: f32| {
                 let target = (value as f64 * 2.0).round() / 2.0;
                 let card = &thermostat.card;
-                (Screen::NestSet { nest: &thermostat, target, pulse: None, setting: true, shown: None },
+                (Screen::NestSet { nest: std::borrow::Cow::Borrowed(&thermostat), target, pulse: None, setting: true, shown: None },
                  ((value as f64 - card.min) / (card.max - card.min)) as f32)
             };
             let settled = deck(&fonts, 40, 23.0, 52, 21.5);

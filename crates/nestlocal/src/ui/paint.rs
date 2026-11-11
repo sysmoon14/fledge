@@ -124,8 +124,14 @@ pub fn face(background: [u8; 3]) -> Canvas {
     let mut p = canvas(FACE);
     glow(&mut p, FACE_LIFT, 240.0, 210.0, 330.0, 0.7);
     if background != BLACK {
-        let strength = if background == HEAT { 0.62 } else { 0.42 };
-        glow(&mut p, background, 240.0, 272.0, 300.0, strength);
+        // Cooling glows a lighter, cyan-leaning blue, near as strongly as
+        // heating's orange: COOL itself reads dark and muddy as a glow.
+        let (c, strength) = match background {
+            HEAT => (HEAT, 0.62),
+            COOL => (COOL_GLOW, 0.9),
+            other => (other, 0.42),
+        };
+        glow(&mut p, c, 240.0, 272.0, 300.0, strength);
     }
     // A few backgrounds in all (black, heating, cooling): the oldest goes
     // once there are more.
@@ -174,6 +180,8 @@ pub const DIM: [u8; 3] = [92, 96, 104];
 pub const BLACK: [u8; 3] = [0, 0, 0];
 pub const HEAT: [u8; 3] = [241, 90, 0];
 pub const COOL: [u8; 3] = [26, 111, 216];
+/// Fledge's cooling glow, behind the dial (paint::face).
+const COOL_GLOW: [u8; 3] = [20, 160, 255];
 pub const MEDIA: [u8; 3] = [63, 209, 195];
 pub const SELECT: [u8; 3] = [26, 115, 232];
 

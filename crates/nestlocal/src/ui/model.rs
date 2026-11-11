@@ -171,6 +171,8 @@ impl Cards {
     }
 }
 
+// A climate card's lists make it the largest; a deck holds a handful.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Card {
@@ -461,7 +463,7 @@ pub struct Light {
     pub hue: Option<u16>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct ClimateCard {
     pub id: String,
     #[serde(default)]
@@ -484,9 +486,13 @@ pub struct ClimateCard {
     pub max: f64,
     #[serde(default = "temp_step")]
     pub step: f64,
-    /// Its presets (eco, away, ...) and the one it's in, for its menu.
+    /// Its presets (eco, away, ...) but none, and the one it's in. Home
+    /// Assistant's whole list, none included, is `preset_modes` (Fledge
+    /// 0.18.0 on); a list of its own off its menu.
     #[serde(default)]
     pub presets: Vec<String>,
+    #[serde(default)]
+    pub preset_modes: Vec<String>,
     #[serde(default)]
     pub preset: Option<String>,
     /// Its modes (heat, cool, dry, fan_only, off, ...) and fan speeds, each
@@ -497,21 +503,126 @@ pub struct ClimateCard {
     pub fan_modes: Vec<String>,
     #[serde(default)]
     pub fan_mode: Option<String>,
+    /// Its swing (up and down) and horizontal swing, as fan speeds are.
+    #[serde(default)]
+    pub swing_modes: Vec<String>,
+    #[serde(default)]
+    pub swing_mode: Option<String>,
+    #[serde(default)]
+    pub swing_horizontal_modes: Vec<String>,
+    #[serde(default)]
+    pub swing_horizontal_mode: Option<String>,
+}
+
+/// What a climate card's menu chooses from a list: its mode, fan speed,
+/// preset, swing or horizontal swing, in the menu's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClimateChoice {
+    Mode,
+    Fan,
+    Preset,
+    Swing,
+    SwingHorizontal,
+    /// This thermostat's hot water boost, for how long (off, or minutes):
+    /// its own, beyond what a climate has (not in ALL).
+    HotWater,
+}
+
+impl ClimateChoice {
+    pub const ALL: [ClimateChoice; 5] = [ClimateChoice::Mode, ClimateChoice::Fan, ClimateChoice::Preset,
+                                         ClimateChoice::Swing, ClimateChoice::SwingHorizontal];
+
+    /// Its command's action, as Fledge reads it.
+    pub fn action(self) -> &'static str {
+        match self {
+            ClimateChoice::Mode => "hvac_mode",
+            ClimateChoice::Fan => "fan_mode",
+            ClimateChoice::Preset => "preset",
+            ClimateChoice::Swing => "swing_mode",
+            ClimateChoice::SwingHorizontal => "swing_horizontal_mode",
+            ClimateChoice::HotWater => "hot_water_boost",
+        }
+    }
+
+    /// Its name, as Home Assistant's more-info shows it.
+    pub fn title(self) -> &'static str {
+        match self {
+            ClimateChoice::Mode => "Mode",
+            ClimateChoice::Fan => "Fan",
+            ClimateChoice::Preset => "Preset",
+            ClimateChoice::Swing => "Swing",
+            ClimateChoice::SwingHorizontal => "Horizontal swing",
+            ClimateChoice::HotWater => "Hot water boost",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            ClimateChoice::Mode => "mdi:thermostat",
+            ClimateChoice::Fan => "mdi:fan",
+            ClimateChoice::Preset => "mdi:tune-variant",
+            ClimateChoice::Swing => "mdi:arrow-oscillating",
+            ClimateChoice::SwingHorizontal => "mdi:arrow-left-right",
+            ClimateChoice::HotWater => "mdi:water-boiler",
+        }
+    }
 }
 
 impl ClimateCard {
-    /// Whether a press on its screen has a menu to open: presets, modes to
-    /// change between or fan speeds.
-    pub fn has_menu(&self) -> bool {
-        !self.presets.is_empty() || self.modes.len() > 1 || !self.fan_modes.is_empty()
+    /// Its action as its mode allows: off while off, and idle if it says
+    /// it's cooling in heat (heating in cool), as an integration can leave
+    /// a stale action behind. Every view of it then glows alike.
+    pub fn settle_action(&mut self) {
+        let can = |modes: &[&str]| modes.contains(&self.mode.as_str());
+        let fits = match self.action.as_str() {
+            _ if self.mode == "off" => false,
+            "heating" | "preheating" => can(&["heat", "heat_cool", "auto"]),
+            "cooling" => can(&["cool", "heat_cool", "auto"]),
+            _ => true,
+        };
+        if !fits {
+            self.action = if self.mode == "off" { "off" } else { "idle" }.into();
+        }
     }
 
-    /// Its modes (`fans` false) or its fan speeds, and the one it's in.
-    pub fn choices(&self, fans: bool) -> (&[String], Option<&str>) {
-        if fans {
-            (&self.fan_modes, self.fan_mode.as_deref())
-        } else {
-            (&self.modes, Some(self.mode.as_str()))
+    /// Whether its menu lists `choice`: modes to change between, else any.
+    pub fn offers(&self, choice: ClimateChoice) -> bool {
+        let (list, _) = self.choices(choice);
+        if choice == ClimateChoice::Mode { list.len() > 1 } else { !list.is_empty() }
+    }
+
+    /// Its options for `choice`, and the one it's in. Presets are Home
+    /// Assistant's whole list where Fledge sends it (none, to leave one),
+    /// else the ones it has.
+    pub fn choices(&self, choice: ClimateChoice) -> (&[String], Option<&str>) {
+        match choice {
+            ClimateChoice::Mode => (&self.modes, Some(self.mode.as_str())),
+            ClimateChoice::Fan => (&self.fan_modes, self.fan_mode.as_deref()),
+            ClimateChoice::Preset if !self.preset_modes.is_empty() => {
+                (&self.preset_modes, Some(self.preset.as_deref().unwrap_or("none")))
+            }
+            ClimateChoice::Preset => (&self.presets, self.preset.as_deref()),
+            ClimateChoice::Swing => (&self.swing_modes, self.swing_mode.as_deref()),
+            ClimateChoice::SwingHorizontal => (&self.swing_horizontal_modes, self.swing_horizontal_mode.as_deref()),
+            ClimateChoice::HotWater => (&[], None),
+        }
+    }
+
+    /// The preset it's in, if one (not none): its dial says so.
+    pub fn active_preset(&self) -> Option<&str> {
+        self.preset.as_deref().filter(|p| !p.is_empty() && *p != "none")
+    }
+
+    /// `choice` set to `option`, as Home Assistant will soon say.
+    pub fn set(&mut self, choice: ClimateChoice, option: &str) {
+        let option = option.to_owned();
+        match choice {
+            ClimateChoice::Mode => self.mode = option,
+            ClimateChoice::Fan => self.fan_mode = Some(option),
+            ClimateChoice::Preset => self.preset = Some(option),
+            ClimateChoice::Swing => self.swing_mode = Some(option),
+            ClimateChoice::SwingHorizontal => self.swing_horizontal_mode = Some(option),
+            ClimateChoice::HotWater => {}
         }
     }
 }
@@ -551,7 +662,7 @@ pub struct Nest {
 
 impl Nest {
     /// From the state Home Assistant's entities read (bridge::state), plus
-    /// can_heat, can_cool, has_hot_water_control, version and update.
+    /// can_heat, can_cool, has_hot_water_control, has_fan, version and update.
     pub fn from_state(s: &serde_json::Map<String, Value>) -> Nest {
         let number = |k: &str| s.get(k).and_then(Value::as_f64);
         let on = |k: &str| s.get(k).and_then(Value::as_bool).unwrap_or(false);
@@ -559,6 +670,14 @@ impl Nest {
         let fahrenheit = text("temperature_scale") == "F";
         let (min, max, step) = if fahrenheit { (48.0, 90.0, 1.0) } else { (9.0, 32.0, 0.5) };
         let eco = text("preset") == "eco";
+        let (can_heat, can_cool) = (on("can_heat"), on("can_cool"));
+        // Its modes, presets and fan as its Home Assistant entity lists them
+        // (bridge.rs), for the menu every thermostat card shares.
+        let mut modes = vec!["off".to_owned()];
+        modes.extend([("heat", can_heat), ("cool", can_cool), ("heat_cool", can_heat && can_cool)]
+            .into_iter().filter(|(_, can)| *can).map(|(mode, _)| mode.to_owned()));
+        // The bridge always says a fan mode (auto); only one with a fan has one.
+        let fan_mode = s.get("fan_mode").and_then(Value::as_str).map(str::to_owned).filter(|_| on("has_fan"));
         let card = ClimateCard {
             id: "nest".into(),
             name: "Thermostat".into(),
@@ -568,12 +687,15 @@ impl Nest {
             target: number("target"),
             current: number("current_temperature"),
             min, max, step,
-            presets: Vec::new(),
-            preset: eco.then(|| "eco".to_owned()),
-            modes: Vec::new(),
-            fan_modes: Vec::new(),
-            fan_mode: None,
+            preset: Some(if eco { "eco" } else { "none" }.to_owned()),
+            preset_modes: vec!["none".into(), "eco".into()],
+            modes,
+            fan_modes: if fan_mode.is_some() { vec!["auto".into(), "on".into()] } else { Vec::new() },
+            fan_mode,
+            ..ClimateCard::default()
         };
+        let mut card = card;
+        card.settle_action();
         let boost = s.get("hot_water_boost").and_then(|v| match v {
             Value::String(m) => m.parse().ok(),
             Value::Number(m) => m.as_u64().map(|m| m as u32),
@@ -584,8 +706,8 @@ impl Nest {
         Nest {
             card, eco, time_to_target,
             humidity: number("current_humidity"),
-            can_heat: on("can_heat"),
-            can_cool: on("can_cool"),
+            can_heat,
+            can_cool,
             fahrenheit,
             hot_water: on("has_hot_water_control"),
             hot_water_boost: boost,
@@ -603,14 +725,38 @@ impl Nest {
         }
     }
 
+    /// A Home Assistant climate's card drawn as this thermostat's is: its
+    /// own, without what only the Nest knows (its schedule, when it'll get
+    /// there, hot water, its own Eco).
+    pub fn of_card(card: &ClimateCard) -> Nest {
+        let can = |mode: &str| card.modes.iter().any(|m| m == mode || m == "heat_cool");
+        Nest {
+            card: card.clone(), eco: false, time_to_target: None, humidity: None,
+            can_heat: can("heat"), can_cool: can("cool"), fahrenheit: false,
+            hot_water: false, hot_water_boost: None, hot_water_schedule: false, eco_low: None, eco_high: None,
+            learning: false, home_away: false, early_on: false, sunblock: false,
+            version: String::new(), update: None, next_change: None, acting: true,
+        }
+    }
+
     /// A temperature as shown, in °C for its commands.
     pub fn celsius(&self, shown: f64) -> f64 {
         if self.fahrenheit { ((shown - 32.0) / 1.8 * 2.0).round() / 2.0 } else { shown }
     }
 
     /// Its heating mode's name for the mode command: heat, else cool.
-    pub fn on_mode(&self) -> &'static str {
-        if self.can_heat || !self.can_cool { "heat" } else { "cool" }
+    pub fn on_mode(&self) -> &str {
+        if self.can_heat || !self.can_cool {
+            // One that can neither (a fan, a dehumidifier): its first mode.
+            if !self.can_heat {
+                if let Some(mode) = self.card.modes.iter().find(|m| *m != "off") {
+                    return mode;
+                }
+            }
+            "heat"
+        } else {
+            "cool"
+        }
     }
 }
 
@@ -755,6 +901,11 @@ impl Cards {
             Card::Unknown => false,
             _ => true,
         });
+        for card in &mut cards.cards {
+            if let Card::Climate(card) = card {
+                card.settle_action();
+            }
+        }
         Ok(cards)
     }
 }
@@ -820,11 +971,9 @@ pub enum Command {
     AlertDismissed(String),
     Next(String),
     Previous(String),
-    /// A thermostat's preset, by name.
-    Preset(String, String),
-    /// A climate's mode (cool, dry, ...) and fan speed, by Home Assistant's names.
-    HvacMode(String, String),
-    FanMode(String, String),
+    /// A climate's mode (cool, dry, ...), fan speed, preset or swing, by
+    /// Home Assistant's names.
+    Climate(String, ClimateChoice, String),
     /// A select's option.
     Select(String, String),
     /// A cover's position, percent open; or open or closed whole.
@@ -858,9 +1007,7 @@ impl Command {
             Command::AlertDismissed(id) => json!({"id": id, "action": "alert_dismissed"}),
             Command::Next(id) => json!({"id": id, "action": "next"}),
             Command::Previous(id) => json!({"id": id, "action": "previous"}),
-            Command::Preset(id, o) => json!({"id": id, "action": "preset", "option": o}),
-            Command::HvacMode(id, o) => json!({"id": id, "action": "hvac_mode", "option": o}),
-            Command::FanMode(id, o) => json!({"id": id, "action": "fan_mode", "option": o}),
+            Command::Climate(id, choice, o) => json!({"id": id, "action": choice.action(), "option": o}),
             Command::Select(id, o) => json!({"id": id, "action": "select", "option": o}),
             Command::Position(id, p) => json!({"id": id, "action": "position", "value": p}),
             Command::Open(id) => json!({"id": id, "action": "open"}),
@@ -895,6 +1042,33 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_climate_s_action_that_its_mode_rules_out_reads_as_idle() {
+        let card = |mode: &str, action: &str| {
+            let payload = format!(r#"{{"cards":[{{"kind":"climate","id":"climate.ac","mode":"{mode}","action":"{action}"}}]}}"#);
+            match &Cards::parse(payload.as_bytes()).unwrap().cards[0] {
+                Card::Climate(card) => card.action.clone(),
+                _ => panic!(),
+            }
+        };
+        assert_eq!(card("heat", "cooling"), "idle", "a stale cooling in heat");
+        assert_eq!(card("cool", "heating"), "idle");
+        assert_eq!(card("off", "heating"), "off");
+        assert_eq!(card("heat", "heating"), "heating");
+        assert_eq!(card("heat_cool", "cooling"), "cooling");
+        assert_eq!(card("dry", "drying"), "drying");
+    }
+
+    #[test]
+    fn the_nest_s_own_card_lists_a_fan_only_when_it_has_one() {
+        let state = |fan: bool| serde_json::json!({"mode": "heat", "fan_mode": "auto", "can_heat": true, "has_fan": fan});
+        let without = Nest::from_state(state(false).as_object().unwrap());
+        assert!(!without.card.offers(ClimateChoice::Fan), "the bridge says auto even without a fan");
+        let with = Nest::from_state(state(true).as_object().unwrap());
+        assert_eq!(with.card.choices(ClimateChoice::Fan), (&["auto".to_owned(), "on".to_owned()][..], Some("auto")));
+        assert_eq!(with.card.choices(ClimateChoice::Preset).0, ["none", "eco"]);
+    }
 
     #[test]
     fn parses_the_blueprints_cards() {

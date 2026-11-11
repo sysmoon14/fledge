@@ -1172,6 +1172,7 @@ impl crate::ui::Sender for Bridge {
         s.insert("can_heat".into(), truthy(sh.get("can_heat")).into());
         s.insert("can_cool".into(), truthy(sh.get("can_cool")).into());
         s.insert("has_hot_water_control".into(), truthy(dev.get("has_hot_water_control")).into());
+        s.insert("has_fan".into(), truthy(dev.get("has_fan")).into());
         s.insert("version".into(), crate::update::VERSION.into());
         s.insert("acting".into(), self.role.acting().into());
         let newer = self.updates().and_then(|u| u.latest.lock().unwrap().clone())

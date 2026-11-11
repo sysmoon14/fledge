@@ -36,7 +36,9 @@ NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause", "pa
          "window-shutter-open", "blinds", "blinds-open", "water-boiler", "fire", "snowflake",
          # The thermostat's own Settings.
          "home-account", "calendar-clock", "clock-fast", "temperature-celsius", "update", "chevron-right",
-         "check", "dots-horizontal", "information-outline"}
+         "check", "dots-horizontal", "information-outline",
+         # An AC's swing, horizontal swing and presets.
+         "arrow-oscillating", "arrow-left-right", "tune-variant"}
 
 # Home Assistant's Material Symbols sets, by its prefixes.
 SETS = {"outlined": "m3o", "rounded": "m3r", "sharp": "m3s"}

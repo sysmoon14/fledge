@@ -253,9 +253,15 @@ pub enum Pressed {
     Card(f32),
     /// A list's highlighted row: its pill (x, y, w, h) as it stands.
     Row(f32, f32, f32, f32),
-    /// The whole screen, a little.
+    /// A screen of its own (a dial, a device): softly inside its ring,
+    /// most in the middle, nothing out by the ring or round it.
     Screen,
 }
+
+/// How far in a pressed screen lifts (just inside a dial's ring), and how
+/// much at its middle (of 256).
+const PRESS_RADIUS: f32 = 196.0;
+const PRESS_LIFT: f32 = 26.0;
 
 /// `frame` with `pressed` lit a little towards white.
 pub fn press(frame: &mut [u8], pressed: Pressed) {
@@ -266,7 +272,19 @@ pub fn press(frame: &mut [u8], pressed: Pressed) {
     };
     let pixels = frame.as_chunks_mut::<4>().0;
     match pressed {
-        Pressed::Screen => pixels.iter_mut().for_each(|p| lift(p, 14)),
+        Pressed::Screen => {
+            // Lifting the whole square greyed the dark round the ring.
+            for r in 0..SIDE {
+                let dx = r as f32 + 0.5 - CENTRE;
+                for c in 0..SIDE {
+                    let dy = c as f32 + 0.5 - CENTRE;
+                    let near = 1.0 - (dx * dx + dy * dy) / (PRESS_RADIUS * PRESS_RADIUS);
+                    if near > 0.0 {
+                        lift(&mut pixels[r * SIDE + c], (PRESS_LIFT * near) as u32);
+                    }
+                }
+            }
+        }
         Pressed::Card(radius) => {
             for r in 0..SIDE {
                 let dx = r as f32 + 0.5 - CENTRE;
