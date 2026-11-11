@@ -175,7 +175,7 @@ pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
         Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour"),
         Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), true),
         Screen::Volume { card, .. } => volume_still(fonts, card),
-        Screen::CoverSet { card, .. } => cover_still(fonts, card),
+        Screen::CoverSet { card, .. } => cover_still(fonts, card, true),
         Screen::NestSet { nest, target, setting, .. } => {
             nest_still(fonts, &predicted(nest, *target), Some(*target), *setting, unix_now())
         }
@@ -352,7 +352,7 @@ fn light_card(fonts: &Fonts, card: &LightsCard, light: &Light) -> Canvas {
         light.icon = card.icon.clone();
     }
     let value = light.brightness.unwrap_or(100);
-    // Among the cards, no hold hint: a hold there goes back.
+    // Among the cards, no hold hint: a hold there puts the screen away.
     let mut p = light_dim_still(fonts, &light, light.on, false);
     if light.dimmable {
         light_dim_moving(&mut p, None, fonts, &light, light.on, value, None);
@@ -606,7 +606,7 @@ fn action_card(fonts: &Fonts, card: &ActionCard, done: bool, opened: bool) -> Ca
     }
     let name = paint::fit(fonts.regular(), 40.0, &card.name, 0.0, 330.0);
     paint::text(&mut p, fonts.regular(), 40.0, HALF, 288.0, &name, 0.0, WHITE);
-    let hint = if done { "Done" } else if opened { "Hold to run · press for more" } else { "" };
+    let hint = if done { "Done" } else if opened { "Hold to run" } else { "" };
     line(&mut p, fonts, 330.0, hint, if done { ACTION } else { GREY });
     p
 }
@@ -673,7 +673,7 @@ fn wrap(font: &ab_glyph::FontArc, size: f32, text: &str, width: f32, lines: usiz
 /// hold to put it away.
 fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
     let mut p = paint::face(BLACK);
-    let hint = "Press · hold to dismiss";
+    let hint = "Hold to dismiss";
     match &alert.art {
         Some(art) => {
             paint::picture(&mut p, &art.rgb, art.size, HALF, HALF, 0.0);
@@ -1248,7 +1248,7 @@ fn big_text_on(pixmap: &mut Canvas, live: Option<&mut paint::Live>, fonts: &Font
 fn volume_still(fonts: &Fonts, card: &MediaCard) -> Canvas {
     let mut p = paint::face(BLACK);
     label(&mut p, fonts, 150.0, &card.name, MEDIA);
-    let action = if card.state == "playing" { "Volume · hold to pause" } else { "Volume · hold to play" };
+    let action = if card.state == "playing" { "Hold to pause" } else { "Hold to play" };
     line(&mut p, fonts, 366.0, action, GREY);
     p
 }
@@ -1454,7 +1454,6 @@ fn options_card(fonts: &Fonts, card: &OptionsCard) -> Canvas {
     label(&mut p, fonts, 232.0, &card.name, GREY);
     let current = paint::fit(fonts.regular(), 40.0, card.current.as_deref().unwrap_or("—"), 0.0, 330.0);
     paint::text(&mut p, fonts.regular(), 40.0, HALF, 292.0, &current, 0.0, WHITE);
-    line(&mut p, fonts, 334.0, "Press to choose", GREY);
     p
 }
 
@@ -1518,13 +1517,15 @@ fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer)
 /// open or closed in words if it doesn't, so opening it moves nothing.
 fn cover_card(fonts: &Fonts, card: &CoverCard) -> Canvas {
     let open = card.state == "open" || card.state == "opening";
-    let mut p = cover_still(fonts, card);
+    let mut p = cover_still(fonts, card, false);
     let value = card.position.unwrap_or(if open { 100 } else { 0 });
     cover_moving(&mut p, None, fonts, card, value, None);
     p
 }
 
-fn cover_still(fonts: &Fonts, card: &CoverCard) -> Canvas {
+/// `opened`: its own screen, which says what a hold does; among the cards,
+/// no hint.
+fn cover_still(fonts: &Fonts, card: &CoverCard, opened: bool) -> Canvas {
     let mut p = paint::face(BLACK);
     let open = card.state == "open" || card.state == "opening";
     let name = if open { "mdi:window-shutter-open" } else { "mdi:window-shutter" };
@@ -1541,7 +1542,10 @@ fn cover_still(fonts: &Fonts, card: &CoverCard) -> Canvas {
         };
         paint::text(&mut p, fonts.regular(), 80.0, HALF, NUMBER_BASELINE - 12.0, &words, 0.0, WHITE);
     }
-    line(&mut p, fonts, 366.0, if card.positionable { "How open · press for more" } else { "Press to open or close" }, GREY);
+    if opened {
+        let open = card.state == "open" || card.state == "opening";
+        line(&mut p, fonts, 366.0, if open { "Hold to close" } else { "Hold to open" }, GREY);
+    }
     p
 }
 
