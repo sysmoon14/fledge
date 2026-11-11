@@ -904,18 +904,27 @@ pub fn line(canvas: &mut Canvas, x1: f32, y1: f32, x2: f32, y2: f32, width: f32,
     canvas.pixmap.stroke_path(&path, &paint(c), &stroke, transform, None);
 }
 
-/// How the night's glance draws each channel (red, green, blue): dimmer,
-/// and warmer as blue goes most.
-const WARM_DIM: [f32; 3] = [0.62, 0.48, 0.32];
+/// How the night's glance draws each channel (red, green, blue) against
+/// its level: warmer, as blue goes most.
+const WARM: [f32; 3] = [1.0, 0.774, 0.516];
+/// The night's level where Home Assistant gives none.
+pub const DIM_LEVEL: f32 = 0.62;
+
+/// Each channel's share at `level` (0.1 to 1: how bright red stays).
+fn warm_dim_scale(level: f32) -> [f32; 3] {
+    WARM.map(|w| w * level.clamp(0.1, 1.0))
+}
 
 /// Colour `c` dimmed and warmed as warm_dim draws it.
-pub fn warmed(c: [u8; 3]) -> [u8; 3] {
-    [0, 1, 2].map(|k| (c[k] as f32 * WARM_DIM[k]).round() as u8)
+pub fn warmed(c: [u8; 3], level: f32) -> [u8; 3] {
+    let scale = warm_dim_scale(level);
+    [0, 1, 2].map(|k| (c[k] as f32 * scale[k]).round() as u8)
 }
 
 /// The whole canvas dimmer and warmer: the glance at night.
-pub fn warm_dim(canvas: &mut Canvas) {
-    let scale = canvas.rgb([0, 1, 2]).map(|k| WARM_DIM[k as usize]);
+pub fn warm_dim(canvas: &mut Canvas, level: f32) {
+    let warm = warm_dim_scale(level);
+    let scale = canvas.rgb([0, 1, 2]).map(|k| warm[k as usize]);
     for pixel in canvas.pixmap.data_mut().as_chunks_mut::<4>().0 {
         for k in 0..3 {
             pixel[k] = (pixel[k] as f32 * scale[k]) as u8;

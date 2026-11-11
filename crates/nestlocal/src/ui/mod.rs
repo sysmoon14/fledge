@@ -69,7 +69,10 @@ use crate::logf;
 ///  11  the glance's layouts, 12-hour clock, lines and night
 ///      (glance.layout/clock/lines/big/event/colour/night/dim), and a glance
 ///      to try for a while (<base>/set/glance_try)
-pub const PROTOCOL: u32 = 11;
+///  12  the glance's lines close up past one with nothing to say; the
+///      date in Home Assistant's words and order (glance.words/date_order);
+///      how dim the night's glance is (glance.dim_level)
+pub const PROTOCOL: u32 = 12;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -2942,6 +2945,12 @@ mod shots {
             ("g6-agenda", r#"{"layout":"agenda","event":{"title":"Dentist","start":1794180600},"lines":[{"kind":"weather"}]}"#),
             ("g7-analog-night", r#"{"layout":"analog","night":true,"dim":true,"lines":[{"kind":"date"}]}"#),
             ("g9-analog-crossed", r#"{"layout":"analog","offset":-9780,"lines":[{"kind":"date"}]}"#),
+            ("ga-clock-words", r#"{"layout":"clock","date_order":"mdy","night":true,"dim":true,"dim_level":0.35,
+                "words":{"days":["dimanche","lundi","mardi","mercredi","jeudi","vendredi","samedi"],
+                "days_short":["dim.","lun.","mar.","mer.","jeu.","ven.","sam."],
+                "months":["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"],
+                "months_short":["janv.","févr.","mars","avr.","mai","juin","juil.","août","sept.","oct.","nov.","déc."]},
+                "lines":[{"kind":"date"},{"text":""},{"icon":"mdi:calendar","text":"Zażółć gęślą jaźń · août"}]}"#),
             ("g8-clock-lines", r#"{"layout":"clock","lines":[{"kind":"inside"},{"kind":"heating"},{"icon":"mdi:calendar","text":"16:30 Dentist"}]}"#),
         ];
         for (name, json) in glances {

@@ -110,6 +110,37 @@ pub struct Glance {
     pub night: bool,
     #[serde(default)]
     pub dim: bool,
+    /// How bright the dimmed glance stays, 0.1 to 1 (protocol 12).
+    #[serde(default)]
+    pub dim_level: Option<f32>,
+    /// The date's words in Home Assistant's language (protocol 12);
+    /// English without, or where they aren't all there.
+    #[serde(default)]
+    pub words: Option<Words>,
+    /// The date's order: "mdy" for November 8, else 8 November.
+    #[serde(default)]
+    pub date_order: Option<String>,
+}
+
+/// The names of the days (Sunday first) and months, long and short.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Words {
+    #[serde(default)]
+    pub days: Vec<String>,
+    #[serde(default)]
+    pub days_short: Vec<String>,
+    #[serde(default)]
+    pub months: Vec<String>,
+    #[serde(default)]
+    pub months_short: Vec<String>,
+}
+
+impl Words {
+    /// Whether every name is there.
+    fn whole(&self) -> bool {
+        let named = |names: &[String], n: usize| names.len() == n && names.iter().all(|name| !name.trim().is_empty());
+        named(&self.days, 7) && named(&self.days_short, 7) && named(&self.months, 12) && named(&self.months_short, 12)
+    }
 }
 
 /// The glance's layouts: something large, and lines under it.
@@ -235,6 +266,16 @@ pub struct Event {
 }
 
 impl Glance {
+    /// The date's words, if Home Assistant sent them all.
+    pub fn words(&self) -> Option<&Words> {
+        self.words.as_ref().filter(|words| words.whole())
+    }
+
+    /// Whether the month comes before the day's number.
+    pub fn month_first(&self) -> bool {
+        self.date_order.as_deref() == Some("mdy")
+    }
+
     /// Its lines, as many as its layout has room for: the date, the
     /// weather and what's on where Home Assistant sent none.
     pub fn lines(&self) -> Vec<Line> {

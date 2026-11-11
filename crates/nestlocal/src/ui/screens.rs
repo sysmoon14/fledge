@@ -1384,8 +1384,8 @@ fn line_said(line: &Line, at: &GlanceIn) -> Option<Said> {
     };
     let clock = &at.glance.clock;
     match kind {
-        "date" => said(date(at.days()), None, None),
-        "date_short" => said(short_date(at.days()), None, None),
+        "date" => said(glance_date(at.glance, at.days(), false), None, None),
+        "date_short" => said(glance_date(at.glance, at.days(), true), None, None),
         "time" => said(clock.time(at.minutes(), true), Some("mdi:clock-outline"), None),
         "whats_on" => said(whats_on(at.cards), None, None),
         "weather" => {
@@ -1432,14 +1432,15 @@ fn weather_words(weather: &Weather) -> String {
 
 /// Each of the glance's lines worked out, in their places.
 fn glance_lines(at: &GlanceIn) -> Vec<(Slot, Option<Said>)> {
-    let lines = at.glance.lines();
-    slots(at.glance.layout).iter().enumerate()
-        .map(|(i, slot)| {
+    // A line with nothing to say takes no place: those after it close up.
+    let said: Vec<Said> = at.glance.lines().iter().filter_map(|line| line_said(line, at)).collect();
+    slots(at.glance.layout).iter().zip(said.into_iter().map(Some).chain(std::iter::repeat_with(|| None)))
+        .map(|(slot, said)| {
             let mut slot = *slot;
             if at.glance.layout == Layout::Analog {
                 slot.y = analog_line(at.minutes());
             }
-            (slot, lines.get(i).and_then(|line| line_said(line, at)))
+            (slot, said)
         }).collect()
 }
 
@@ -1499,7 +1500,7 @@ pub fn glance_key(at: &GlanceIn) -> String {
 
 /// Colour `c` as the glance draws it: dimmer and warmer at night.
 fn glance_colour(at: &GlanceIn, c: [u8; 3]) -> [u8; 3] {
-    if at.glance.dim { paint::warmed(c) } else { c }
+    if at.glance.dim { paint::warmed(c, at.glance.dim_level.unwrap_or(paint::DIM_LEVEL)) } else { c }
 }
 
 /// The glance's pill line, `offset` pixels along, over glance_still
@@ -1607,7 +1608,7 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
         glance_line(&mut p, fonts, slot, &said, coloured);
     }
     if glance.dim {
-        paint::warm_dim(&mut p);
+        paint::warm_dim(&mut p, glance.dim_level.unwrap_or(paint::DIM_LEVEL));
     }
     p
 }
@@ -1714,8 +1715,8 @@ fn event_when(event: &model::Event, at: &GlanceIn) -> String {
     let day = match days {
         ..=0 => "today".to_owned(),
         1 => "tomorrow".to_owned(),
-        2..=6 => date(local.div_euclid(86_400)).split(' ').next().unwrap_or_default().to_owned(),
-        _ => short_date(local.div_euclid(86_400)),
+        2..=6 => weekday(at.glance, local.div_euclid(86_400)),
+        _ => glance_date(at.glance, local.div_euclid(86_400), true),
     };
     if event.all_day {
         return format!("All day · {day}");
@@ -1755,19 +1756,13 @@ fn analog_hands(p: &mut Canvas, minutes: i64) {
     paint::circle(p, HALF, HALF, 9.0, colour(FLEDGE_ON));
 }
 
-/// "Wed 11 Nov" from days since 1970.
-fn short_date(days: i64) -> String {
-    let long = date(days);
-    let mut words = long.split(' ');
-    let (day, number, month) = (words.next().unwrap_or_default(), words.next().unwrap_or_default(), words.next().unwrap_or_default());
-    format!("{} {number} {}", &day[..3.min(day.len())], &month[..3.min(month.len())])
-}
+const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                            "October", "November", "December"];
 
-/// "Sunday 8 November" from days since 1970.
-fn date(days: i64) -> String {
-    const DAYS: [&str; 7] = ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"];
-    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
-                                "October", "November", "December"];
+/// The day of the week (0 Sunday), the day of the month and the month
+/// (0 January) of `days` since 1970.
+fn civil(days: i64) -> (usize, i64, usize) {
     // Howard Hinnant's civil_from_days.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -1777,7 +1772,31 @@ fn date(days: i64) -> String {
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    format!("{} {} {}", DAYS[days.rem_euclid(7) as usize], day, MONTHS[(month - 1) as usize])
+    ((days + 4).rem_euclid(7) as usize, day, (month - 1) as usize)
+}
+
+/// The day of the week in the glance's words.
+fn weekday(glance: &Glance, days: i64) -> String {
+    let (weekday, _, _) = civil(days);
+    glance.words().map_or(DAYS[weekday].to_owned(), |words| words.days[weekday].clone())
+}
+
+/// The date as the glance says it: "Sunday 8 November" ("Sun 8 Nov"
+/// `short`), the month first where Home Assistant asks ("Sunday, November
+/// 8"), in its words where it sent them.
+fn glance_date(glance: &Glance, days: i64, short: bool) -> String {
+    let (weekday, day, month) = civil(days);
+    let (day_name, month_name) = match (glance.words(), short) {
+        (Some(words), false) => (words.days[weekday].clone(), words.months[month].clone()),
+        (Some(words), true) => (words.days_short[weekday].clone(), words.months_short[month].clone()),
+        (None, false) => (DAYS[weekday].to_owned(), MONTHS[month].to_owned()),
+        (None, true) => (DAYS[weekday][..3].to_owned(), MONTHS[month][..3].to_owned()),
+    };
+    if glance.month_first() {
+        format!("{day_name}, {month_name} {day}")
+    } else {
+        format!("{day_name} {day} {month_name}")
+    }
 }
 
 /// An MDI weather icon for Home Assistant's condition.
@@ -2305,7 +2324,7 @@ fn alarm_open(fonts: &Fonts, card: &AlarmCard, arm: &AlarmMode, sensors: &[Strin
 #[cfg(test)]
 mod tests {
     use super::super::model::{Cards, Event, Glance, Line, Nest};
-    use super::{event_when, line_said, short_date, GlanceIn, Said};
+    use super::{event_when, glance_date, line_said, GlanceIn, Said};
 
     /// Sunday 8 November 2026, 21:13 UTC.
     const NOW: i64 = 1_794_172_380;
@@ -2364,7 +2383,31 @@ mod tests {
         assert_eq!(event(NOW - 60, false), "22:12 · now");
         assert_eq!(event(NOW + 12 * 3600, false), "10:13 · tomorrow");
         assert_eq!(event(NOW + 3 * 86_400, true), "All day · Wednesday");
-        assert_eq!(short_date(20_400), "Sat 8 Nov");
+        assert_eq!(glance_date(&glance("{}"), 20_400, true), "Sat 8 Nov");
+    }
+
+    #[test]
+    fn the_date_in_home_assistant_s_words_and_order() {
+        let french = glance(r#"{"words":{"days":["dimanche","lundi","mardi","mercredi","jeudi","vendredi","samedi"],
+            "days_short":["dim.","lun.","mar.","mer.","jeu.","ven.","sam."],
+            "months":["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"],
+            "months_short":["janv.","févr.","mars","avr.","mai","juin","juil.","août","sept.","oct.","nov.","déc."]}}"#);
+        assert_eq!(glance_date(&french, 20_765, false), "dimanche 8 novembre");
+        assert_eq!(glance_date(&french, 20_765, true), "dim. 8 nov.");
+        let american = glance(r#"{"date_order":"mdy"}"#);
+        assert_eq!(glance_date(&american, 20_765, false), "Sunday, November 8");
+        assert_eq!(glance_date(&american, 20_765, true), "Sun, Nov 8");
+        let short = glance(r#"{"words":{"days":["a"],"days_short":[],"months":[],"months_short":[]}}"#);
+        assert_eq!(glance_date(&short, 20_765, false), "Sunday 8 November", "not all there: English");
+    }
+
+    #[test]
+    fn a_line_with_nothing_to_say_takes_no_place() {
+        let g = glance(r#"{"lines":[{"text":""},{"kind":"weather"},{"kind":"date"},{"text":"Bins tomorrow"}]}"#);
+        let at = GlanceIn { glance: &g, cards: &[], nest: None, now: NOW };
+        let said: Vec<Option<String>> = super::glance_lines(&at).into_iter().map(|(_, said)| said.map(|s| s.text)).collect();
+        assert_eq!(said, [Some("Sunday 8 November".to_owned()), None, None],
+                   "the empty line and the weather nobody chose gone, the date first; three places only");
     }
 
     #[test]
@@ -2443,6 +2486,7 @@ mod tests {
 
     #[test]
     fn the_glance_s_date_is_the_calendar_s() {
+        let date = |days| glance_date(&Glance::default(), days, false);
         assert_eq!(date(0), "Thursday 1 January");
         assert_eq!(date(20_765), "Sunday 8 November");
         assert_eq!(date(19_782), "Thursday 29 February", "a leap day");
