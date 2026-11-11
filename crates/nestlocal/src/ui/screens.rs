@@ -1842,14 +1842,33 @@ pub fn accent(screen: &Screen) -> [u8; 3] {
     }
 }
 
-/// An alarm's modes to arm to, Back first.
+/// An alarm's options, as its state offers them: Back, then its modes to
+/// arm to (violet), Disarm (green) or Cancel (amber).
 fn alarm_modes(fonts: &Fonts, card: &AlarmCard, selected: usize) -> Canvas {
-    let names: Vec<String> = card.modes.iter().map(|m| card.mode_name(&m.mode)).collect();
-    let under = if card.wants_digits() { "Press, then the code" } else { "Press to arm" };
-    let mut items = vec![Opt { icon: "mdi:arrow-left", name: "Back", under: "To the alarm" }];
-    items.extend(card.modes.iter().zip(&names).map(|(m, name)| Opt { icon: alarm_mode_icon(&m.mode), name, under }));
+    use super::machine::{alarm_options, AlarmOption};
+    let choices = alarm_options(card);
+    let names: Vec<String> = choices.iter().map(|o| match o {
+        AlarmOption::Arm(i) => card.modes.get(*i as usize).map_or(String::new(), |m| card.mode_name(&m.mode)),
+        _ => String::new(),
+    }).collect();
+    let code = card.wants_digits();
+    let items: Vec<Opt> = choices.iter().zip(&names).map(|(option, name)| match option {
+        AlarmOption::Back => Opt { icon: "mdi:arrow-left", name: "Back", under: "To the cards" },
+        AlarmOption::Arm(i) => Opt {
+            icon: card.modes.get(*i as usize).map_or("mdi:shield-lock", |m| alarm_mode_icon(&m.mode)), name,
+            under: if code { "Press, then the code" } else { "Press to arm" },
+        },
+        AlarmOption::Disarm => Opt { icon: "mdi:shield-lock-open", name: "Disarm",
+                                     under: if code { "Press, then the code" } else { "Press to disarm" } },
+        AlarmOption::Cancel => Opt { icon: "mdi:window-close", name: "Cancel", under: "Press to stop it arming" },
+    }).collect();
+    let accent = match choices.get(selected.min(choices.len() - 1)) {
+        Some(AlarmOption::Disarm) => ECO,
+        Some(AlarmOption::Cancel) => AMBER,
+        _ => ALARM_ARMED,
+    };
     let title = if card.name.is_empty() { "Alarm" } else { card.name.as_str() };
-    options(fonts, title, &items, selected, ALARM_ARMED)
+    options(fonts, title, &items, selected, accent)
 }
 
 /// Arming refused with a door or window open: what's open, and arming

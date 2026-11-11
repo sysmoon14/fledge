@@ -95,6 +95,31 @@ pub const BOOST_MINUTES: u32 = 60;
 /// starts on 5.
 pub const DIGITS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 pub const PAD_START: u8 = 4;
+/// One of an alarm's options, as its state offers them (alarm_options).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AlarmOption {
+    /// Back to the cards.
+    Back,
+    /// Armed to one of its modes, by its place in its card's.
+    Arm(u8),
+    Disarm,
+    /// The exit delay stopped: disarmed again.
+    Cancel,
+}
+
+/// An alarm's options, Back first: disarmed, its modes; arming, Cancel;
+/// armed, coming in or going off, Disarm.
+pub fn alarm_options(card: &AlarmCard) -> Vec<AlarmOption> {
+    let mut options = vec![AlarmOption::Back];
+    match card.state.as_str() {
+        "disarmed" => options.extend((0..card.modes.len().min(5)).map(|i| AlarmOption::Arm(i as u8))),
+        "arming" => options.push(AlarmOption::Cancel),
+        _ if card.armed().is_some() || card.urgent() => options.push(AlarmOption::Disarm),
+        _ => {}
+    }
+    options
+}
+
 /// The most digits a code takes before it goes by itself.
 pub const CODE_MAX: usize = 12;
 /// How long an alarm command waits for Home Assistant's answer, and how
@@ -244,8 +269,8 @@ pub enum Mode {
     ActionView { slot: usize },
     /// An alarm opened: its state, a countdown while one runs.
     AlarmView { slot: usize },
-    /// Its modes to arm to round the ring, Back first: `selected` 0 is Back,
-    /// then its modes in order.
+    /// Its options round the ring (alarm_options): Back first, then its
+    /// modes to arm to, Disarm or Cancel, as its state has them.
     AlarmModes { slot: usize, selected: usize },
     /// Its code pad: to arm to its mode `arm` (by place), else to disarm;
     /// the marker on digit `at` (10: the ✓), `entered` so far.
@@ -509,7 +534,7 @@ impl Machine {
                 matches!(cards.cards.get(*slot), Some(Card::Alarm(_)))
             }
             Mode::AlarmModes { slot, selected } => {
-                matches!(cards.cards.get(*slot), Some(Card::Alarm(a)) if *selected <= a.modes.len())
+                matches!(cards.cards.get(*slot), Some(Card::Alarm(a)) if *selected < alarm_options(a).len())
             }
             Mode::ActionView { slot } => matches!(cards.cards.get(*slot), Some(Card::Action(_))),
             Mode::Members { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(c)) if !c.members.is_empty()),
@@ -963,7 +988,7 @@ impl Machine {
                 }
             }
             Mode::AlarmModes { slot, selected } => {
-                let last = self.alarm(slot).map_or(0, |card| card.modes.len()) as i32;
+                let last = self.alarm(slot).map_or(1, |card| alarm_options(card).len()) as i32 - 1;
                 if (selected as i32 + steps).clamp(0, last) == selected as i32 || self.alarm_wait.is_some() {
                     return;
                 }
@@ -1066,7 +1091,7 @@ impl Machine {
                 self.mode = Mode::AlarmPad { slot, arm, at, entered };
             }
             Mode::AlarmModes { slot, selected } => {
-                let last = self.alarm(slot).map_or(0, |card| card.modes.len()) as i32;
+                let last = self.alarm(slot).map_or(1, |card| alarm_options(card).len()) as i32 - 1;
                 self.mode = Mode::AlarmModes { slot, selected: (selected as i32 + steps).clamp(0, last) as usize };
             }
             Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance
@@ -1207,8 +1232,16 @@ impl Machine {
             }
             Mode::Menu { view, actions, selected } => self.act(*view, actions[selected], out),
             Mode::AlarmView { slot } => self.alarm_press(slot, out),
-            Mode::AlarmModes { slot, selected: 0 } => self.go(Mode::AlarmView { slot }, out),
-            Mode::AlarmModes { slot, selected } => self.alarm_arm(slot, (selected - 1) as u8, out),
+            Mode::AlarmModes { slot, selected } => {
+                let option = self.alarm(slot).and_then(|card| alarm_options(card).get(selected).copied());
+                match option {
+                    Some(AlarmOption::Back) => self.go(Mode::Chooser(self.place(Slot::Card(slot))), out),
+                    Some(AlarmOption::Arm(arm)) => self.alarm_arm(slot, arm, out),
+                    Some(AlarmOption::Disarm) => self.alarm_disarm(slot, out),
+                    Some(AlarmOption::Cancel) => self.alarm_cancel(slot, out),
+                    None => self.go(Mode::AlarmView { slot }, out),
+                }
+            }
             view @ Mode::ActionView { .. } => {
                 self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Run], selected: 0 };
             }
@@ -1591,6 +1624,12 @@ impl Machine {
             self.go(Mode::AlarmView { slot }, out);
             return;
         }
+        if matches!(self.mode, Mode::Thermostat { .. } | Mode::ClimateSet { .. } | Mode::AlarmView { .. }
+                    | Mode::Camera { .. } | Mode::OptionList { .. } | Mode::Members { .. }) {
+            // An open card with no main action to hold for: nothing. Its
+            // menu's Back (or a press, on a camera) goes back.
+            return;
+        }
         if let Mode::AlarmOpen { slot, .. } = self.mode {
             // Held: left disarmed.
             out.push(Effect::Click);
@@ -1682,44 +1721,45 @@ impl Machine {
         }
     }
 
-    /// An alarm pressed (its card, or opened): what its state asks for.
-    /// Disarmed, its modes to arm to; arming, the exit delay cancelled
-    /// (with the code just entered, if it took one); armed, coming in or
-    /// going off, disarmed, through the code pad if it wants a code.
+    /// The open alarm pressed: its options (Back, then what its state
+    /// offers), except while someone is coming in or it's going off, when
+    /// the press goes straight to disarming it.
     fn alarm_press(&mut self, slot: usize, out: &mut Vec<Effect>) {
         let Some(card) = self.alarm(slot).cloned() else { return };
         if self.alarm_wait.is_some() {
             return self.go(Mode::AlarmView { slot }, out);
         }
-        let pad = Mode::AlarmPad { slot, arm: None, at: PAD_START, entered: Code::default() };
-        match card.state.as_str() {
-            "disarmed" if !card.modes.is_empty() => {
-                self.go(Mode::AlarmModes { slot, selected: 0 }, out);
-            }
-            "arming" => {
-                match self.alarm_code.as_ref().map(|(code, _)| code.clone()) {
-                    Some(code) => self.alarm_send(slot, None, Some(code), false, out),
-                    None if card.wants_digits() => return self.go(pad, out),
-                    None if card.wants_text() => {
-                        self.alarm_note = Some(("Disarm it from Home Assistant".into(), self.last_input));
-                    }
-                    None => self.alarm_send(slot, None, None, false, out),
-                }
+        if card.urgent() {
+            return self.alarm_disarm(slot, out);
+        }
+        self.go(Mode::AlarmModes { slot, selected: 0 }, out);
+    }
+
+    /// Disarm chosen: the code pad if the alarm wants a code, else
+    /// disarmed now, its own screen showing it come about.
+    fn alarm_disarm(&mut self, slot: usize, out: &mut Vec<Effect>) {
+        let Some(card) = self.alarm(slot).cloned() else { return };
+        if card.wants_digits() {
+            self.alarm_note = None;
+            return self.go(Mode::AlarmPad { slot, arm: None, at: PAD_START, entered: Code::default() }, out);
+        }
+        if card.wants_text() {
+            self.alarm_note = Some(("Disarm it from Home Assistant".into(), self.last_input));
+        } else {
+            self.alarm_send(slot, None, None, false, out);
+        }
+        self.go(Mode::AlarmView { slot }, out);
+    }
+
+    /// Cancel chosen while it arms: with the code just entered to arm, if it
+    /// took one; else as Disarm.
+    fn alarm_cancel(&mut self, slot: usize, out: &mut Vec<Effect>) {
+        match self.alarm_code.as_ref().map(|(code, _)| code.clone()) {
+            Some(code) => {
+                self.alarm_send(slot, None, Some(code), false, out);
                 self.go(Mode::AlarmView { slot }, out);
             }
-            _ if card.armed().is_some() || card.urgent() => {
-                if card.wants_digits() {
-                    self.alarm_note = None;
-                    return self.go(pad, out);
-                }
-                if card.wants_text() {
-                    self.alarm_note = Some(("Disarm it from Home Assistant".into(), self.last_input));
-                } else {
-                    self.alarm_send(slot, None, None, false, out);
-                }
-                self.go(Mode::AlarmView { slot }, out);
-            }
-            _ => self.go(Mode::AlarmView { slot }, out),
+            None => self.alarm_disarm(slot, out),
         }
     }
 
@@ -2537,7 +2577,11 @@ mod tests {
     fn an_armed_alarm_disarms_with_its_code_from_the_pad() {
         let mut rig = alarm_rig("armed_away", "");
         rig.press();
-        assert_eq!(rig.machine.mode, pad(None, PAD_START, ""), "the pad, on 5");
+        assert_eq!(rig.machine.mode, Mode::AlarmModes { slot: 0, selected: 0 }, "its options: Back, Disarm");
+        rig.rows(5);
+        assert_eq!(rig.machine.mode, Mode::AlarmModes { slot: 0, selected: 1 });
+        rig.press();
+        assert_eq!(rig.machine.mode, pad(None, PAD_START, ""), "Disarm: the pad, on 5");
         rig.turn(-ROW_STEP * 9);
         assert_eq!(rig.machine.mode, pad(None, 0, ""), "it stops at 1");
         rig.enter("12");
@@ -2556,6 +2600,8 @@ mod tests {
     #[test]
     fn a_code_not_accepted_clears_the_pad_and_too_many_lock_it() {
         let mut rig = alarm_rig("armed_home", "");
+        rig.press();
+        rig.rows(1);
         rig.press();
         rig.enter("9999");
         rig.answer(r#"{"alarm":"alarm_control_panel.house","ok":false,"error":"rejected","tries":2}"#);
@@ -2576,6 +2622,8 @@ mod tests {
         let mut rig = deck_of(json.as_bytes());
         rig.turn(CARD_STEP);
         rig.press();
+        rig.press();
+        rig.rows(1);
         rig.press();
         rig.enter("12345");
         assert_eq!(rig.machine.pad_positions(0), 11);
@@ -2622,6 +2670,22 @@ mod tests {
         let sent = Rig::sends(&rig.press());
         assert_eq!(sent, vec![Command::AlarmArm { id: "alarm_control_panel.house".into(), mode: "home".into(),
                                                    code: Some(Code("1234".into())), force: true }]);
+    }
+
+    #[test]
+    fn an_open_card_without_a_switch_ignores_a_hold_and_leaves_by_its_back() {
+        let mut rig = alarm_rig("armed_away", "");
+        assert!(rig.long().is_empty() && rig.machine.mode == Mode::AlarmView { slot: 0 }, "held: nothing");
+        rig.press();
+        assert!(rig.long().iter().all(|e| *e == Effect::Click), "its options: a hold closes them");
+        assert_eq!(rig.machine.mode, Mode::AlarmView { slot: 0 });
+        rig.press();
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "Back: to the cards");
+        let mut rig = deck_of(br#"{"cards":[{"kind":"camera","id":"camera.front","name":"Front"}]}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert!(rig.long().is_empty() && rig.machine.mode == Mode::Camera { slot: 0 }, "a camera: nothing");
     }
 
     #[test]
@@ -3000,8 +3064,11 @@ mod tests {
         assert_eq!(rig.machine.nest.as_ref().unwrap().card.target, Some(21.5), "its card shows it at once");
         rig.turn(-CLIMATE_STEP * 40);
         assert_eq!(rig.machine.mode, Mode::Thermostat { target: 9.0 }, "no lower than the Nest goes");
-        assert_eq!(sent(&rig.long()), vec![("target".into(), "9".into())], "going back sends it");
-        assert_eq!(rig.machine.mode, Mode::Chooser(0));
+        assert!(rig.long().is_empty() && rig.machine.mode == Mode::Thermostat { target: 9.0 },
+                "held: nothing, as it has no switch");
+        assert_eq!(sent(&rig.press()), vec![("target".into(), "9".into())], "a press sends it, then its menu");
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(0), "its menu's Back");
     }
 
     #[test]
@@ -3167,7 +3234,7 @@ mod tests {
         rig.press();
         rig.turn(CLIMATE_STEP * 2);
         assert_eq!(rig.machine.mode, Mode::Thermostat { target: 70.0 });
-        assert_eq!(sent(&rig.long()), vec![("target".into(), "21".into())]);
+        assert_eq!(sent(&rig.wait(SETTLE)), vec![("target".into(), "21".into())]);
     }
 
     #[test]
