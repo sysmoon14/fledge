@@ -488,7 +488,7 @@ mod tests {
             fields!{"target_temperature_type" => "range", "target_temperature" => 21.0,
                     "target_temperature_low" => 19.0, "target_temperature_high" => 24.2,
                     "can_heat" => true, "can_cool" => true, "hvac_ac_state" => true});
-        t.nest.bridge.occupancy.detected(chrono::Utc::now().timestamp());
+        t.nest.bridge.occupancy.sensed(chrono::Utc::now().timestamp());
         assert_eq!(t.occupied_heating_setpoint(ctx(1)).unwrap(), 1900);
         assert_eq!(t.occupied_cooling_setpoint(ctx(1)).unwrap(), 2400);
         assert_eq!(t.system_mode(ctx(1)).unwrap(), SystemModeEnum::Auto);

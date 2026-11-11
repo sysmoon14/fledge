@@ -870,7 +870,7 @@ mod tests {
         assert_eq!(n.read(1, THERMOSTAT, 0x001C), Some(Value::Enum8(0x03)));
         assert_eq!(n.read(1, THERMOSTAT, 0x0029), Some(Value::Bitmap16(0x0006)));
         assert_eq!(n.read(1, THERMOSTAT, 0x0002), Some(Value::Bitmap8(0))); // no motion: unoccupied
-        n.bridge.occupancy.detected(chrono::Utc::now().timestamp());
+        n.bridge.occupancy.sensed(chrono::Utc::now().timestamp());
         assert_eq!(n.read(1, THERMOSTAT, 0x0002), Some(Value::Bitmap8(1)));
     }
 

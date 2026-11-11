@@ -61,7 +61,7 @@ pub struct Bridge {
     wwn_boiler: bool,
     /// The stand-in sensor, with -external-temperature (sensor/).
     pub sensor: OnceLock<Arc<crate::sensor::Sensor>>,
-    /// Motion seen lately, from nlclient's event log (occupancy.rs).
+    /// Someone about lately: motion.rs's events, held (occupancy.rs).
     pub occupancy: Arc<Occupancy>,
     mqtt: OnceLock<mqtt::Client>,
     announced: Mutex<Option<BTreeMap<String, String>>>, // discovery topic -> config last published
@@ -275,11 +275,13 @@ impl Bridge {
         self.publish_state();
     }
 
-    /// A sensor event from motion.rs. Not retained: Home Assistant clears
-    /// the sensor after its hold (off_delay), and an old ON must not come
-    /// back when it restarts.
-    pub fn sensor_event(&self, sensor: crate::motion::Sensor) {
+    /// A sensor event from motion.rs, sensed at `at` (seconds since 1970).
+    /// Not retained: Home Assistant clears the sensor after its hold
+    /// (off_delay), and an old ON must not come back when it restarts. Every
+    /// event keeps the unit occupied too (occupancy.rs).
+    pub fn sensor_event(&self, sensor: crate::motion::Sensor, at: i64) {
         self.publish(&format!("{}/{}", self.base, sensor.key()), false, b"ON");
+        self.occupancy.sensed(at);
     }
 
     /// The ambient light sensor's reading from motion.rs, on <base>/light
@@ -1367,7 +1369,7 @@ pub mod tests {
         let [motion, near] = announced(&b).map(Option::unwrap);
         assert_eq!((&motion["device_class"], &motion["off_delay"], &motion["state_topic"]),
                    (&json!("motion"), &json!(30), &json!("nestlocal/S/motion")));
-        assert_eq!((&near["device_class"], &near["off_delay"]), (&json!("occupancy"), &json!(10)));
+        assert_eq!((&near["device_class"], &near["off_delay"]), (&json!("presence"), &json!(10)));
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let light = configs.iter().find(|(t, _)| t.ends_with("/light_level/config")).map(|(_, c)| serde_json::from_str::<Value>(c).unwrap()).unwrap();
         assert_eq!((&light["state_topic"], &light["value_template"]), (&json!("nestlocal/S/light"), &json!("{{ value_json.visible }}")));

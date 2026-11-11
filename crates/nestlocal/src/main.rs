@@ -241,9 +241,6 @@ async fn run(config: flags::Config) {
     if let (Some(bridge), Some(sensor)) = (&bridge, &sensor) {
         bridge.attach_sensor(sensor.clone());
     }
-    if let Some(bridge) = &bridge {
-        occupancy::watch(bridge.occupancy.clone(), occupancy::EVENT_LOG.into());
-    }
     let mut broker_port = None;
     if let (false, Some(bridge)) = (config.mqtt.is_empty(), &bridge) {
         let password = match config.mqtt_password_file.as_str() {

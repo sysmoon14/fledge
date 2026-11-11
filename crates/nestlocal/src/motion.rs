@@ -1,6 +1,7 @@
-//! Motion and near presence, from the sensors on the backplate: nlclient
+//! Motion and someone close, from the sensors on the backplate: nlclient
 //! keeps them to itself but logs each event in /media/log/nlclient, and
-//! nestlocal follows that log.
+//! nestlocal follows that log. This is the one place nestlocal learns of
+//! people about: each event also keeps Occupancy on (occupancy.rs).
 //!
 //! - "publishing pir msg true": the PIR, which sees motion across the room
 //!   (what lights Farsight). nlclient only looks while Farsight is on.
@@ -17,6 +18,11 @@
 //!   terminals: on, vi 10.97 V and vo 4.64 V; off, vi 0.24-0.33 V and vo
 //!   0.001-0.002 V. vo is the backplate powering the display: all or
 //!   nothing, so it says whether the unit has external power.
+//!
+//! - nlclient's event log (occupancy::EVENT_LOG) "RealTimeOccupancy" lines:
+//!   motion too, a line per 30-second slot with some, so possibly late.
+//!   They count as Motion for Home Assistant and Occupancy, but don't wake
+//!   the screen: the PIR line above does that on time.
 //!
 //! Each event is published as ON; Home Assistant clears the sensor itself
 //! (off_delay) after its hold without another, so a sensor clears on time
@@ -43,7 +49,7 @@ const POLL: Duration = Duration::from_millis(300);
 pub enum Sensor {
     /// The PIR: motion anywhere in view.
     Motion,
-    /// The near-field proximity sensor: someone in front of the unit.
+    /// The thermopile's approach reading: someone close to the unit.
     Near,
 }
 
@@ -60,14 +66,14 @@ impl Sensor {
     pub fn name(self) -> &'static str {
         match self {
             Sensor::Motion => "Motion",
-            Sensor::Near => "Near presence",
+            Sensor::Near => "Someone close",
         }
     }
 
     pub fn device_class(self) -> &'static str {
         match self {
             Sensor::Motion => "motion",
-            Sensor::Near => "occupancy",
+            Sensor::Near => "presence",
         }
     }
 
@@ -197,10 +203,22 @@ pub fn start(bridge: Arc<Bridge>) {
         return;
     };
     logf!("motion: following {LOG}");
+    // Opened as it appears: nlclient makes it on its first event.
+    let mut events: Option<Follower> = None;
     bridge.has_sensors();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(POLL).await;
+            bridge.occupancy.update(chrono::Utc::now().timestamp());
+            let events = match &mut events {
+                Some(follower) => Some(follower),
+                None => {
+                    events = Follower::open(crate::occupancy::EVENT_LOG.into());
+                    events.as_mut()
+                }
+            };
+            let late = events.map(|f| f.lines()).unwrap_or_default().iter()
+                .filter_map(|l| crate::occupancy::detection(l)).max();
             let mut seen = Vec::new();
             let lines = log.lines();
             if lines.iter().any(|l| nest_alert(l)) {
@@ -225,9 +243,13 @@ pub fn start(bridge: Arc<Bridge>) {
                     seen.push(sensor);
                 }
             }
-            for sensor in seen {
-                bridge.sensor_event(sensor);
+            let now = chrono::Utc::now().timestamp();
+            for &sensor in &seen {
+                bridge.sensor_event(sensor, now);
                 crate::ui::sensed(sensor);
+            }
+            if let Some(at) = late.filter(|_| !seen.contains(&Sensor::Motion)) {
+                bridge.sensor_event(Sensor::Motion, at);
             }
             if let Some((visible, infrared)) = light {
                 bridge.light(visible, infrared);
@@ -249,7 +271,7 @@ mod tests {
     const READING: &str = "2026-11-06 23:12:08.476949 09AB01AC36230301 nlclient[500:bckpla] (2) backplate controller: pir 7954; px1 65389/0, px2 65389/0; alv 0, alir 0";
 
     #[test]
-    fn the_pir_is_motion_and_the_approach_reading_near_presence() {
+    fn the_pir_is_motion_and_the_approach_reading_someone_close() {
         assert_eq!(event(PIR), Some(Sensor::Motion));
         assert_eq!(event(APPROACH), Some(Sensor::Near));
         assert_eq!(reading(APPROACH), Some(Event::Approach(435)));
