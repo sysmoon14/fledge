@@ -70,7 +70,9 @@ fi
 # --- the commit ----------------------------------------------------------------
 git update-index -q --refresh
 git diff-index --quiet HEAD -- || fail "the tree has uncommitted changes"
-branch=$(git symbolic-ref --short HEAD) || fail "not on a branch"
+# RELEASE_BRANCH=main releases a checkout of origin/main that isn't on main
+# (a clean worktree, while main's own checkout has work in progress).
+branch=${RELEASE_BRANCH:-$(git symbolic-ref --short HEAD)} || fail "not on a branch"
 git fetch -q origin "$branch" || fail "cannot fetch origin $branch"
 [ "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" ] || fail "HEAD is not origin/$branch: push it first"
 repo=$(git remote get-url origin | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')
