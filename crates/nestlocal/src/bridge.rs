@@ -436,6 +436,9 @@ impl Bridge {
     fn changed(&self, o: &Object) {
         self.publish_raw(o);
         self.publish_state();
+        if o.key == format!("device.{}", self.serial) {
+            self.keep_farsight();
+        }
     }
 
     fn publish_raw(&self, o: &Object) {

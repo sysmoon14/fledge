@@ -412,6 +412,10 @@ pub struct Machine {
     pub rests: bool,
     /// When the thermostat last saw someone close.
     near_at: Option<Instant>,
+    /// Lit by the Nest for someone across the room and kept dark, as Home
+    /// Assistant asks (Far::Dark): the backlight goes off until anything
+    /// shows (backlight_off).
+    kept_dark: bool,
     /// Each alarm's state as last heard, by entity: one coming to need
     /// whoever's there (its entry delay, going off) takes the screen.
     alarm_states: std::collections::HashMap<String, String>,
@@ -440,7 +444,7 @@ impl Machine {
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
-            rests: false, near_at: None, floor: None, alarm_states: Default::default(), alarm_takeover: None,
+            rests: false, near_at: None, kept_dark: false, floor: None, alarm_states: Default::default(), alarm_takeover: None,
             alarm_code: None, alarm_arming: None, alarm_wait: None, alarm_note: None, alarm_locked: None,
             alarm_open: Vec::new(), alarm_drawn: None, expected: Vec::new(),
         }
@@ -697,9 +701,19 @@ impl Machine {
         if !matches!(mode, Mode::Home | Mode::Chooser(_)) {
             self.turn = 0;
         }
+        if mode != Mode::Home {
+            self.kept_dark = false;
+        }
         self.mode = mode;
         self.dirty = true;
         self.sync(out);
+    }
+
+    /// Whether the display's backlight should be off: lit for someone
+    /// across the room, kept dark as asked, and still nothing to show. A
+    /// black screen with the backlight on visibly glows; off, it's dark.
+    pub fn backlight_off(&self) -> bool {
+        self.kept_dark && self.mode == Mode::Home
     }
 
     /// Hands the display and the ring over as what the UI shows now needs.
@@ -724,6 +738,8 @@ impl Machine {
     pub fn input(&mut self, input: Input, now: Instant, lit: bool, out: &mut Vec<Effect>) {
         let pause = now.duration_since(self.last_input);
         self.last_input = now;
+        // A hand on it: whatever it does shows, lit.
+        self.kept_dark = false;
         match (&self.mode, input) {
             (Mode::Idle, _) => return,
             // A notification: a press answers it, a long press puts it away.
@@ -2036,6 +2052,10 @@ impl Machine {
             self.dirty = true;
         }
         let idle = now.duration_since(self.last_input);
+        if !lit {
+            // Out: the next light starts with the backlight on, as nlclient's own.
+            self.kept_dark = false;
+        }
         if self.was_lit.replace(lit) == Some(false) && lit && self.mode == Mode::Home {
             // Lit by itself, as someone came near: for someone close, what
             // Home Assistant asked for them; across the room, the glance,
@@ -2045,7 +2065,7 @@ impl Machine {
             match if close { if self.cards.near() == Near::Glance { Far::Glance } else { Far::Wake } } else { self.cards.far() } {
                 Far::Glance => self.go(Mode::Glance, out),
                 Far::Wake => self.wake(out),
-                Far::Dark => {}
+                Far::Dark => self.kept_dark = true,
             }
             return;
         }
@@ -3010,6 +3030,45 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Home, "lit across the room: black, as asked");
         rig.machine.sensed(Sensor::Near, rig.now, true, &mut out);
         assert_eq!(rig.machine.mode, Mode::Home, "close: nothing, as asked");
+    }
+
+    #[test]
+    fn staying_dark_turns_the_backlight_off_until_something_shows() {
+        let (mut rig, _) = holding(presence("dark", "wake"));
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        assert!(!rig.machine.backlight_off());
+        rig.lit = true;
+        rig.tick();
+        assert!(rig.machine.mode == Mode::Home && rig.machine.backlight_off(), "lit across the room: dark, backlight off");
+        let mut out = vec![];
+        rig.machine.sensed(Sensor::Near, rig.now, true, &mut out);
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)) && !rig.machine.backlight_off(), "close: the cards, lit");
+        // Lit again across the room, then a hand on the ring.
+        rig.lit = false;
+        rig.wait(Duration::from_secs(30));
+        rig.lit = true;
+        rig.wait(Duration::from_secs(3));
+        assert!(rig.machine.backlight_off());
+        rig.input(Input::Turn(10));
+        assert!(!rig.machine.backlight_off(), "a turn shows something");
+        // Put out by nlclient: the backlight goes back on for its next light.
+        let (mut rig, _) = holding(presence("dark", "none"));
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        rig.lit = true;
+        rig.tick();
+        rig.machine.sensed(Sensor::Near, rig.now, true, &mut out);
+        assert!(rig.machine.backlight_off(), "close up, nothing: still dark");
+        rig.lit = false;
+        rig.tick();
+        assert!(!rig.machine.backlight_off());
+        let (mut rig, _) = holding(presence("glance", "wake"));
+        rig.lit = false;
+        rig.wait(Duration::from_secs(5));
+        rig.lit = true;
+        rig.tick();
+        assert!(!rig.machine.backlight_off(), "the glance: lit");
     }
 
     #[test]

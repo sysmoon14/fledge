@@ -134,6 +134,19 @@ impl Beeper {
     }
 }
 
+/// Switches the display's backlight on or off (bl_power), leaving its
+/// brightness, which nlclient sets and lit() reads, as it is: off, a lit
+/// display is truly dark, where black pixels still glow.
+pub fn backlight(on: bool) {
+    let Ok(dir) = std::fs::read_dir("/sys/class/backlight") else { return };
+    for entry in dir.flatten() {
+        // FB_BLANK_UNBLANK, FB_BLANK_POWERDOWN.
+        if let Err(e) = std::fs::write(entry.path().join("bl_power"), if on { "0" } else { "4" }) {
+            crate::logf!("ui: backlight {}: {e}", entry.path().display());
+        }
+    }
+}
+
 /// Whether the display is lit.
 pub fn lit() -> bool {
     let Ok(dir) = std::fs::read_dir("/sys/class/backlight") else { return true };

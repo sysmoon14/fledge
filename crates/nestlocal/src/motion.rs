@@ -20,9 +20,11 @@
 //!   nothing, so it says whether the unit has external power.
 //!
 //! - nlclient's event log (occupancy::EVENT_LOG) "RealTimeOccupancy" lines:
-//!   motion too, a line per 30-second slot with some, so possibly late.
-//!   They count as Motion for Home Assistant and Occupancy, but don't wake
-//!   the screen: the PIR line above does that on time.
+//!   motion too, a line per 30-second slot with some, so possibly late:
+//!   with Farsight off nlclient writes them, and asleep it writes them only
+//!   at its next wake. One under Motion's hold old counts as Motion; older
+//!   ones only keep Occupancy on. Neither wakes the screen: the PIR line
+//!   above does that on time.
 //!
 //! Each event is published as ON; Home Assistant clears the sensor itself
 //! (off_delay) after its hold without another, so a sensor clears on time
@@ -154,6 +156,13 @@ pub fn nest_alert(line: &str) -> bool {
     line.contains("alert manager: showing alert:")
 }
 
+/// Whether an event log line's motion, sensed at `at`, is recent enough to
+/// be Motion now: within Motion's own hold. Older ones, written at a wake
+/// long after (Farsight off, the unit asleep), only keep Occupancy on.
+fn fresh(at: i64, now: i64) -> bool {
+    now - at <= Sensor::Motion.hold() as i64
+}
+
 /// Reads what was appended to a log since the last read, whole lines only,
 /// starting from wherever the log ended when it was first opened.
 struct Follower {
@@ -249,7 +258,12 @@ pub fn start(bridge: Arc<Bridge>) {
                 crate::ui::sensed(sensor);
             }
             if let Some(at) = late.filter(|_| !seen.contains(&Sensor::Motion)) {
-                bridge.sensor_event(Sensor::Motion, at);
+                if fresh(at, now) {
+                    bridge.sensor_event(Sensor::Motion, at);
+                } else {
+                    // Written at a wake long after: someone was about, not now.
+                    bridge.occupancy.sensed(at);
+                }
             }
             if let Some((visible, infrared)) = light {
                 bridge.light(visible, infrared);
@@ -307,6 +321,12 @@ mod tests {
         assert!(nest_alert("2026-11-09 12:00:00.000000 09AB01AC36230301 nlclient[500:main] (2) alert manager: showing alert: heatlinkbattery"));
         assert!(!nest_alert("alert manager: queuing alert type:heatlinkbattery"));
         assert!(!nest_alert(PIR));
+    }
+
+    #[test]
+    fn only_a_recent_event_log_line_is_motion_now() {
+        assert!(fresh(1000, 1000) && fresh(1000, 1030));
+        assert!(!fresh(1000, 1031), "75 s late, as the unit woke: Occupancy only");
     }
 
     #[test]

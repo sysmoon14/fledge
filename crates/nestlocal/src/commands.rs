@@ -58,6 +58,19 @@ fn shared(fields: Fields) -> Result<Change, String> {
     Ok(Some(("shared".into(), fields)))
 }
 
+/// What the device bucket needs for the Nest to keep watching: Farsight on
+/// (a display, any: Fledge draws over it) and waking on approach.
+fn farsight_fields(device: &Fields) -> Fields {
+    let mut fields = Fields::new();
+    if matches!(device.get("farsight_screen").and_then(Value::as_str), Some("none")) {
+        fields.insert("farsight_screen".into(), "target_temp".into());
+    }
+    if device.get("should_wake_on_approach").and_then(Value::as_bool) == Some(false) {
+        fields.insert("should_wake_on_approach".into(), true.into());
+    }
+    fields
+}
+
 fn device(fields: Fields) -> Result<Change, String> {
     Ok(Some(("device".into(), fields)))
 }
@@ -101,6 +114,7 @@ impl Bridge {
             if let Err(e) = self.ui.configure(payload) {
                 logf!("mqtt: ui: {e}");
             }
+            self.keep_farsight();
             return;
         }
         if name == "screen_on" {
@@ -178,6 +192,25 @@ impl Bridge {
             self.store.merge(key, fields, 0, 0, false);
         }
         Ok(())
+    }
+
+    /// With Home Assistant's cards on the screen, Fledge decides what
+    /// someone across the room or close brings (ui::model::Far, Near), so
+    /// the Nest keeps watching for both: Farsight on, and waking on
+    /// approach. Then Motion and Someone close always report at once; the
+    /// screen stays dark, where asked, with its backlight off
+    /// (ui::Machine::backlight_off). Put back if changed on the Nest.
+    pub fn keep_farsight(&self) {
+        if !self.ui.has_presence() {
+            return;
+        }
+        let key = format!("device.{}", self.serial);
+        let Some(device) = self.store.get(&key) else { return };
+        let fields = farsight_fields(&device.value);
+        if !fields.is_empty() {
+            logf!("fledge: keeping the Nest watching for Fledge -> {key} {}", Value::Object(fields.clone()));
+            self.store.merge(&key, &fields, 0, 0, false);
+        }
     }
 
     fn display_change(&self, key: &str, fields: &Fields) -> bool {
@@ -682,6 +715,15 @@ mod tests {
         assert_eq!(pushed[0].key, "custom_schedule.hotwater");
         assert_eq!(pushed[0].value["intervals"][0]["start_time"], json!(23400));
         assert!(b.store.get("device.S").is_none(), "nothing else written");
+    }
+
+    #[test]
+    fn the_nest_keeps_watching_for_fledge() {
+        let on = |v: Value| super::farsight_fields(v.as_object().unwrap());
+        assert!(on(json!({"farsight_screen": "target_temp", "should_wake_on_approach": true})).is_empty());
+        assert!(on(json!({})).is_empty(), "nothing said yet: nothing to put back");
+        assert_eq!(Value::Object(on(json!({"farsight_screen": "none", "should_wake_on_approach": false}))),
+                   json!({"farsight_screen": "target_temp", "should_wake_on_approach": true}));
     }
 
     #[test]

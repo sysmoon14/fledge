@@ -115,6 +115,12 @@ impl Cards {
         self.thermostat.unwrap_or(0)
     }
 
+    /// Whether Home Assistant said what someone across the room or close
+    /// brings (protocol 6 on).
+    pub fn has_presence(&self) -> bool {
+        self.presence.is_some()
+    }
+
     /// What someone across the room brings: the glance if Home Assistant
     /// sent one, else waking, unless it says.
     pub fn far(&self) -> Far {

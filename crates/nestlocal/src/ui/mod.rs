@@ -116,6 +116,12 @@ impl Ui {
         Ok(())
     }
 
+    /// Whether Home Assistant's cards say what someone across the room or
+    /// close brings: then Fledge, not the Nest, decides (keep_farsight).
+    pub fn has_presence(&self) -> bool {
+        self.cards.lock().unwrap().1.has_presence()
+    }
+
     /// Takes a media player's album art (<base>/set/art/<entity id>): a
     /// PNG, or nothing for none.
     pub fn set_art(&self, entity: &str, payload: &[u8]) -> Result<(), String> {
@@ -229,6 +235,8 @@ pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
         };
         // An owner file from before a restart names a pid that may be reused.
         device::own(false);
+        // One left off by a nestlocal that stopped would keep the Nest dark.
+        device::backlight(true);
         device::favour();
         paint::for_panel();
         let _ = std::thread::Builder::new().name("ui-warm".into()).spawn(paint::warm);
@@ -290,6 +298,8 @@ struct Runtime {
     /// (SEEN_FAR, SEEN_NEAR).
     nest_alerts: u64,
     seen: (u64, u64),
+    /// Whether the backlight was last switched off (Machine::backlight_off).
+    backlight_off: bool,
     /// Whether nlclient was last told the display rests (device::rest), and
     /// the owner's heartbeat, last beaten when.
     rest: bool,
@@ -519,7 +529,7 @@ impl Runtime {
             cards: Default::default(), shrunk: Default::default(), zoom: 1.0,
             drawn: Default::default(), stale: Default::default(), progress_checked: Instant::now(), showed: false,
             wakes: 0, kept_on: Instant::now(),
-            alerts: 0, alarm_results: 0, ran: None, glance_minute: 0, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
+            alerts: 0, alarm_results: 0, ran: None, glance_minute: 0, backlight_off: false, nest_alerts: NEST_ALERTS.load(std::sync::atomic::Ordering::Relaxed),
             seen: (SEEN_FAR.load(std::sync::atomic::Ordering::Relaxed), SEEN_NEAR.load(std::sync::atomic::Ordering::Relaxed)),
             rest: false, black: false, beat: 0, last_beat: now,
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, ticker: None, last_frame: now,
@@ -736,6 +746,12 @@ impl Runtime {
             }
             let display = &mut self.display;
             self.machine.tick(now, lit, &mut || home_dial(display), &mut effects);
+            let off = self.machine.backlight_off();
+            if off != self.backlight_off {
+                // Kept dark for someone across the room: off, not black.
+                self.backlight_off = off;
+                device::backlight(!off);
+            }
             if std::mem::discriminant(&before) != std::mem::discriminant(&self.machine.mode)
                 || matches!(self.machine.mode, Mode::Chooser(_) | Mode::Settings { .. }) && before != self.machine.mode {
                 mode_state(&self.machine.mode);
