@@ -130,10 +130,13 @@ def command(payload: Mapping[str, Any], lights: Sequence[str], climates: Sequenc
     if not isinstance(entity, str):
         return None
     if entity in lights:
+        # light.* goes through the light domain so integrations that act on
+        # light.turn_on (Adaptive Lighting, for one) see the call.
+        domain = "light" if entity.startswith("light.") else "homeassistant"
         if what == "off":
-            return Call("homeassistant", "turn_off", entity, {})
+            return Call(domain, "turn_off", entity, {})
         if what == "on":
-            return Call("homeassistant", "turn_on", entity, {})
+            return Call(domain, "turn_on", entity, {})
         if what == "brightness" and entity.startswith("light.") and 1 <= value <= 100:
             return Call("light", "turn_on", entity, {"brightness_pct": round(value)})
     if entity in climates and what == "temperature" and 5 <= value <= 35:

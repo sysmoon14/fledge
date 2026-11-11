@@ -71,7 +71,7 @@ actions:
           - choose:
               - conditions: "{{ not turn_on }}"
                 sequence:
-                  - action: homeassistant.turn_off
+                  - action: "{{ 'light' if entity.startswith('light.') else 'homeassistant' }}.turn_off"
                     target:
                       entity_id: "{{ entity }}"
               - conditions: "{{ entity.startswith('light.') and 1 <= brightness <= 100 }}"
@@ -82,7 +82,7 @@ actions:
                     data:
                       brightness_pct: "{{ brightness }}"
             default:
-              - action: homeassistant.turn_on
+              - action: "{{ 'light' if entity.startswith('light.') else 'homeassistant' }}.turn_on"
                 target:
                   entity_id: "{{ entity }}"
     default:

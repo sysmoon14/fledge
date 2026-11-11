@@ -109,12 +109,12 @@ actions:
           - choose:
               - conditions: "{{ entity in lights and what == 'off' }}"
                 sequence:
-                  - action: homeassistant.turn_off
+                  - action: "{{ 'light' if entity.startswith('light.') else 'homeassistant' }}.turn_off"
                     target:
                       entity_id: "{{ entity }}"
               - conditions: "{{ entity in lights and what == 'on' }}"
                 sequence:
-                  - action: homeassistant.turn_on
+                  - action: "{{ 'light' if entity.startswith('light.') else 'homeassistant' }}.turn_on"
                     target:
                       entity_id: "{{ entity }}"
               - conditions: "{{ entity in lights and what == 'brightness' and entity.startswith('light.') and 1 <= value <= 100 }}"
