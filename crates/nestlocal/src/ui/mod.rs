@@ -344,6 +344,8 @@ struct Runtime {
     /// The cards drawn are out of date (a device changed on its own
     /// screen): drawn again when the cards next show.
     cards_stale: bool,
+    /// What the thermostat's own card (home) was last drawn from.
+    home_from: Option<Nest>,
     /// Whether the thermostat's dial says what it's set to (machine.set_at).
     set_words: bool,
     /// Whether a media player's page shows its volume large (the ring just
@@ -523,7 +525,7 @@ impl Runtime {
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, ticker: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(), spent: Default::default(), paced: Default::default(),
             pressed: None, back_chosen: None, back_since: None, native_input: now, settings_checked: now, settings_seen: 0, native_settings: false,
-            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
+            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, home_from: None, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
             recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
             dial: None, last_dial: now - Duration::from_secs(60), count: None, press_lit: false,
         }
@@ -826,6 +828,13 @@ impl Runtime {
             if self.cards_stale && self.machine.position().is_some() {
                 self.cards_stale = false;
                 self.revalidate();
+            }
+            if self.machine.position().is_some() && self.machine.own_thermostat() && self.home.is_some()
+                && !self.moving() && self.home_from.as_ref() != self.machine.nest.as_ref() {
+                // The thermostat changed from its own dial (its target, Eco):
+                // its card shows it before the cards do, not when its state
+                // next differs from what the dial already set.
+                self.draw_home();
             }
             if self.machine.owns() {
                 let started = Instant::now();
@@ -1666,7 +1675,11 @@ impl Runtime {
                 self.sender.nest_command(&name, &arg);
                 self.refresh_nest();
             }
-            Effect::Send(command) => self.sender.send(&command),
+            Effect::Send(command) => {
+                // Its card shows it at once, not when Home Assistant reports it.
+                self.machine.sent(&command, Instant::now());
+                self.sender.send(&command)
+            }
         }
     }
 
@@ -1691,6 +1704,7 @@ impl Runtime {
     /// The thermostat's own card, as the first of the cards.
     fn draw_home(&mut self) {
         let Some(nest) = &self.machine.nest else { return };
+        self.home_from = Some(nest.clone());
         let screen = Screen::NestCard { nest, now: unix_now() };
         let mut frame = prof::time(prof::Part::Draw, || device::frame(screens::draw(&self.fonts, &screen, None)));
         prof::time(prof::Part::Round, || zoom::round(&mut frame));

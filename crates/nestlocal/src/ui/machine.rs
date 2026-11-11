@@ -88,6 +88,11 @@ pub const SETTLE: Duration = Duration::from_millis(700);
 pub const VOLUME_SHOWN: Duration = Duration::from_millis(1500);
 /// How long the thermostat's dial says "Heat set to" after the ring turns.
 pub const SET_SHOWN: Duration = Duration::from_secs(3);
+/// How long a value the thermostat sent (a light's brightness, a speaker's
+/// volume, a blind's position) stands on its card over what Home Assistant
+/// last said, while Home Assistant catches up: the card shows it at once,
+/// and an older report arriving meanwhile doesn't put it back.
+pub const EXPECT: Duration = Duration::from_secs(4);
 /// The minutes a hot water boost runs from the thermostat's menu.
 pub const BOOST_MINUTES: u32 = 60;
 /// An alarm's code pad: the digits round the ring in rotary-phone order,
@@ -424,6 +429,8 @@ pub struct Machine {
     /// What's open, as arming was refused for it.
     pub alarm_open: Vec<String>,
     alarm_drawn: Option<Instant>,
+    /// Values sent to Home Assistant's devices, and when (EXPECT).
+    expected: Vec<(Command, Instant)>,
 }
 
 impl Machine {
@@ -435,7 +442,7 @@ impl Machine {
             nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
             rests: false, near_at: None, floor: None, alarm_states: Default::default(), alarm_takeover: None,
             alarm_code: None, alarm_arming: None, alarm_wait: None, alarm_note: None, alarm_locked: None,
-            alarm_open: Vec::new(), alarm_drawn: None,
+            alarm_open: Vec::new(), alarm_drawn: None, expected: Vec::new(),
         }
     }
 
@@ -520,6 +527,10 @@ impl Machine {
     /// New cards from Home Assistant: keeps the mode if what it shows exists.
     pub fn set_cards(&mut self, cards: Cards, out: &mut Vec<Effect>) {
         self.cards = cards;
+        // What was just sent stands until Home Assistant has caught up.
+        for (command, _) in self.expected.clone() {
+            self.apply_sent(&command);
+        }
         self.alarms_changed(out);
         let count = self.cards.cards.len();
         let fine = |mode: &Mode, cards: &Cards| match mode {
@@ -1933,11 +1944,86 @@ impl Machine {
         }
     }
 
+    /// A command went to Home Assistant: a value it sets shows on its card
+    /// at once, and stands for EXPECT.
+    pub fn sent(&mut self, command: &Command, now: Instant) {
+        if self.apply_sent(command) {
+            let same = |c: &Command| std::mem::discriminant(c) == std::mem::discriminant(command)
+                && c.payload()["id"] == command.payload()["id"];
+            self.expected.retain(|(c, _)| !same(c));
+            if matches!(command, Command::On(_) | Command::Off(_)) {
+                // On and off replace each other, and a brightness.
+                let id = command.payload()["id"].clone();
+                self.expected.retain(|(c, _)| !(matches!(c, Command::On(_) | Command::Off(_) | Command::Brightness(..))
+                                                && c.payload()["id"] == id));
+            }
+            self.expected.push((command.clone(), now));
+            self.dirty = true;
+        }
+    }
+
+    /// Puts a value sent onto its card; false for a command that sets none.
+    fn apply_sent(&mut self, command: &Command) -> bool {
+        fn lights(cards: &mut [Card], id: &str, f: impl Fn(&mut super::model::Light)) {
+            for card in cards {
+                if let Card::Lights(card) = card {
+                    for light in card.lights.iter_mut().chain(card.members.iter_mut()).filter(|l| l.id == id) {
+                        f(light);
+                    }
+                }
+            }
+        }
+        let cards = &mut self.cards.cards;
+        match command {
+            Command::On(id) => lights(cards, id, |l| l.on = true),
+            Command::Off(id) => lights(cards, id, |l| l.on = false),
+            Command::Brightness(id, value) => lights(cards, id, |l| {
+                l.on = true;
+                l.brightness = Some(*value);
+            }),
+            Command::Kelvin(id, value) => lights(cards, id, |l| {
+                l.kelvin = Some(*value);
+                l.hue = None;
+            }),
+            Command::Hue(id, value) => lights(cards, id, |l| l.hue = Some(*value)),
+            Command::Volume(id, value) => {
+                for card in cards.iter_mut() {
+                    if let Card::Media(card) = card {
+                        if card.id == *id {
+                            card.volume = Some(*value);
+                        }
+                    }
+                }
+            }
+            Command::Temperature(id, value) => {
+                for card in cards.iter_mut() {
+                    if let Card::Climate(card) = card {
+                        if card.id == *id {
+                            card.target = Some(*value);
+                        }
+                    }
+                }
+            }
+            Command::Position(id, value) => {
+                for card in cards.iter_mut() {
+                    if let Card::Cover(card) = card {
+                        if card.id == *id {
+                            card.position = Some(*value);
+                        }
+                    }
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// Time passing: going back when left alone, keeping nlclient's display
     /// awake under a card, sending what turning asked for. `home_dial` says
     /// whether nlclient shows its home dial (only asked for when it matters).
     pub fn tick(&mut self, now: Instant, lit: bool, home_dial: &mut dyn FnMut() -> bool, out: &mut Vec<Effect>) {
         self.alarm_tick(now, lit, out);
+        self.expected.retain(|(_, at)| now.duration_since(*at) < EXPECT);
         if let Mode::Alert { id, .. } = &self.mode {
             let dark = !lit && !self.lighting.is_some_and(|until| now < until);
             if dark || self.alert_until.is_some_and(|until| now >= until) {
@@ -2686,6 +2772,32 @@ mod tests {
         rig.turn(CARD_STEP);
         rig.press();
         assert!(rig.long().is_empty() && rig.machine.mode == Mode::Camera { slot: 0 }, "a camera: nothing");
+    }
+
+    #[test]
+    fn a_value_sent_shows_on_its_card_until_home_assistant_catches_up() {
+        let mut rig = Rig::woken();
+        rig.turn(CARD_STEP * 3);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 2, value: 30 });
+        for _ in 0..10 {
+            rig.turn(VALUE_STEP);
+        }
+        let sent = Rig::sends(&rig.wait(SEND_EVERY));
+        assert_eq!(sent, vec![Command::Volume("media_player.speaker".into(), 40)]);
+        rig.machine.sent(&sent[0], rig.now);
+        let volume = |rig: &Rig| match &rig.machine.cards.cards[2] { Card::Media(m) => m.volume, _ => None };
+        assert_eq!(volume(&rig), Some(40), "its card shows it at once");
+        rig.machine.set_cards(cards(), &mut vec![]);
+        assert_eq!(volume(&rig), Some(40), "an older report from Home Assistant doesn't put it back");
+        rig.wait(EXPECT);
+        rig.machine.set_cards(cards(), &mut vec![]);
+        assert_eq!(volume(&rig), Some(30), "after a while, Home Assistant's word stands");
+        rig.machine.sent(&Command::Brightness("light.lamp".into(), 20), rig.now);
+        rig.machine.sent(&Command::Off("light.lamp".into()), rig.now);
+        rig.machine.set_cards(cards(), &mut vec![]);
+        let lamp = match &rig.machine.cards.cards[0] { Card::Lights(c) => c.lights[0].clone(), _ => unreachable!() };
+        assert!(!lamp.on, "off after a brightness: off stands, not the brightness");
     }
 
     #[test]
