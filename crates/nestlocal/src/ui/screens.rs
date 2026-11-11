@@ -8,6 +8,8 @@ use super::model::{ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, Cl
                    MediaCard, Nest, OptionsCard};
 use super::paint::{self, *};
 
+use std::borrow::Cow;
+
 pub enum Screen<'a> {
     LightsCard { card: &'a LightsCard },
     ClimateCard { card: &'a ClimateCard, target: Option<f64> },
@@ -24,7 +26,8 @@ pub enum Screen<'a> {
     Alert { alert: &'a Alert },
     /// A select's card, and its options listed.
     OptionsCard { card: &'a OptionsCard },
-    OptionList { card: &'a OptionsCard, selected: usize },
+    /// (A climate's modes and fan speeds are listed as one, made for it.)
+    OptionList { card: Cow<'a, OptionsCard>, selected: usize },
     /// A light group's own lights, listed to switch.
     Members { card: &'a LightsCard, selected: usize },
     /// A cover's card, and its position on the ring.
@@ -173,7 +176,7 @@ pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
         Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on, true),
         Screen::LightWarmth { light, .. } => light_dial_still(fonts, light, "Warmth"),
         Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour"),
-        Screen::ClimateSet { card, target } => climate_still(fonts, card, Some(*target), true),
+        Screen::ClimateSet { card, target } => climate_still(fonts, card, card.target.map(|_| *target), true),
         Screen::Volume { card, .. } => volume_still(fonts, card),
         Screen::CoverSet { card, .. } => cover_still(fonts, card, true),
         Screen::NestSet { nest, target, setting, .. } => {
@@ -191,7 +194,10 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
         Screen::LightDim { light, on, value } => light_dim_moving(p, live.as_deref_mut(), fonts, light, *on, *value, sweep),
         Screen::LightWarmth { light, value } => warmth_moving(p, live.as_deref_mut(), fonts, light, *value, sweep),
         Screen::LightHue { value, .. } => hue_moving(p, live.as_deref_mut(), fonts, *value, sweep),
-        Screen::ClimateSet { card, target } => climate_moving(p, live.as_deref_mut(), fonts, card, Some(*target), sweep, None, None),
+        Screen::ClimateSet { card, target } => {
+            // A mode with no temperature (dry, fan only): nothing to set.
+            climate_moving(p, live.as_deref_mut(), fonts, card, card.target.map(|_| *target), sweep, None, None)
+        }
         Screen::Volume { value, .. } => volume_moving(p, live.as_deref_mut(), fonts, *value, sweep),
         Screen::CoverSet { card, value } => cover_moving(p, live.as_deref_mut(), fonts, card, *value, sweep),
         Screen::NestSet { nest, target, pulse, shown, .. } => {
@@ -217,7 +223,7 @@ pub fn still_key(screen: &Screen) -> Option<String> {
         Screen::LightWarmth { light, .. } => Some(format!("warmth {}", light.id)),
         Screen::LightHue { light, .. } => Some(format!("hue {}", light.id)),
         Screen::ClimateSet { card, .. } => Some(format!("set {} {} {} {:?} {:?}", card.name, card.mode, card.action,
-                                                        card.current, card.presets.is_empty())),
+                                                        card.current, card.has_menu())),
         Screen::Volume { card, .. } => Some(format!("volume {} {}", card.name, card.state)),
         Screen::CoverSet { card, .. } => Some(format!("cover {} {} {} {} {}", card.id, card.name, card.icon, card.state,
                                                      card.positionable)),
@@ -414,16 +420,28 @@ fn now_label(p: &mut Canvas, fonts: &Fonts, card: &ClimateCard, target: Option<f
     }
 }
 
+/// A climate mode or fan speed as Home Assistant names it, in words:
+/// heat_cool "Heat/cool", fan_only "Fan only".
+pub fn climate_label(name: &str) -> String {
+    match name {
+        "heat_cool" => "Heat/cool".to_owned(),
+        name => capitalise(&name.replace('_', " ")),
+    }
+}
+
 fn climate_still(fonts: &Fonts, card: &ClimateCard, target: Option<f64>, setting: bool) -> Canvas {
     let (background, active) = climate_colours(card);
     let mut p = paint::face(background);
     let text_colour = if active { WHITE } else { GREY };
     label(&mut p, fonts, 150.0, &card.name, text_colour);
-    if target.is_none() || card.mode == "off" {
+    if card.mode == "off" || (target.is_none() && card.mode.is_empty()) {
         paint::text(&mut p, fonts.digits(), 96.0, HALF, 300.0, "OFF", 0.0, WHITE);
+    } else if target.is_none() {
+        // A mode with no temperature to set (dry, fan only): its name.
+        line(&mut p, fonts, 290.0, &climate_label(&card.mode), WHITE);
     }
     let bottom = if setting {
-        if card.presets.is_empty() { "Press when done".to_owned() } else { "Press for presets".to_owned() }
+        if card.has_menu() { "Press for options".to_owned() } else { "Press when done".to_owned() }
     } else {
         let now = card.current.map(|t| format!("{t:.1}° now")).unwrap_or_default();
         let state = match card.action.as_str() {
@@ -722,7 +740,8 @@ fn theme_preview(fonts: &Fonts, theme: paint::Theme) -> (Vec<u8>, u32) {
     paint::set_theme(theme);
     let card = ClimateCard { id: "preview".into(), name: String::new(), icon: String::new(), mode: "heat".into(),
                              action: "heating".into(), target: Some(22.0), current: Some(20.5), min: 9.0, max: 32.0,
-                             step: 0.5, presets: Vec::new(), preset: None };
+                             step: 0.5, presets: Vec::new(), preset: None, modes: Vec::new(),
+                             fan_modes: Vec::new(), fan_mode: None };
     let mut p = paint::face(climate_colours(&card).0);
     climate_moving(&mut p, None, fonts, &card, card.target, None, None, Some((0.0, 22.0)));
     let rgb = p.rgb_upright();
@@ -1063,7 +1082,7 @@ fn list_with<'a>(screen: &Screen<'a>, selected: usize) -> Option<Screen<'a>> {
     Some(match screen {
         Screen::LightList { card, .. } => Screen::LightList { card, selected },
         Screen::Members { card, .. } => Screen::Members { card, selected },
-        Screen::OptionList { card, .. } => Screen::OptionList { card, selected },
+        Screen::OptionList { card, .. } => Screen::OptionList { card: card.clone(), selected },
         Screen::Settings { rows, nest, nest_dial, .. } => Screen::Settings { rows: rows.clone(), nest: *nest, nest_dial: *nest_dial, selected },
         _ => return None,
     })

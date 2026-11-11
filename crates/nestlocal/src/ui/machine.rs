@@ -203,6 +203,9 @@ pub enum Action {
     Previous,
     /// A thermostat's preset, by its place in its card's presets.
     Preset(u8),
+    /// A climate's modes and its fan speeds, each a list to choose from.
+    Modes,
+    Fans,
     /// A light group's own lights, each to switch.
     Members,
     /// A cover opened or closed whole.
@@ -249,6 +252,9 @@ pub enum Mode {
     Camera { slot: usize },
     /// A select's options, `selected` highlighted (its last row Back).
     OptionList { slot: usize, selected: usize },
+    /// A climate's modes, or (`fans`) its fan speeds, listed as a select's
+    /// options are (its last row Back).
+    ClimateList { slot: usize, fans: bool, selected: usize },
     /// A light group's own lights, `selected` highlighted (its last row Back).
     Members { slot: usize, selected: usize },
     /// A cover, the ring setting how open (percent).
@@ -300,6 +306,7 @@ impl Mode {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
             | Mode::LightHue { slot, .. } | Mode::ClimateSet { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
+            | Mode::ClimateList { slot, .. }
             | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
             | Mode::AlarmModes { slot, .. }
             | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
@@ -540,7 +547,9 @@ impl Machine {
         let fine = |mode: &Mode, cards: &Cards| match mode {
             Mode::Chooser(index) => *index < count + 2,
             Mode::LightList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(_))),
-            Mode::ClimateSet { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Climate(_))),
+            Mode::ClimateSet { slot, .. } | Mode::ClimateList { slot, .. } => {
+                matches!(cards.cards.get(*slot), Some(Card::Climate(_)))
+            }
             Mode::Volume { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Media(_))),
             Mode::Camera { slot } => matches!(cards.cards.get(*slot), Some(Card::Camera(_))),
             Mode::OptionList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Options(_))),
@@ -850,7 +859,7 @@ impl Machine {
                 let step = match self.mode {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
                     Mode::Menu { .. } => MENU_STEP,
-                    Mode::LightList { .. } | Mode::OptionList { .. } | Mode::Members { .. }
+                    Mode::LightList { .. } | Mode::OptionList { .. } | Mode::ClimateList { .. } | Mode::Members { .. }
                     | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
                     | Mode::AlarmPad { .. } | Mode::AlarmModes { .. } => ROW_STEP,
                     Mode::ClimateSet { .. } | Mode::Thermostat { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
@@ -1057,11 +1066,22 @@ impl Machine {
                     self.mode = Mode::LightHue { slot, light, value };
                 }
             }
-            Mode::ClimateSet { slot, target } => {
+            Mode::ClimateList { slot, fans, selected } => {
                 if let Some(Card::Climate(card)) = self.card(slot) {
-                    let target = (target + steps as f64 * card.step).clamp(card.min, card.max);
-                    self.pending = Some(Command::Temperature(card.id.clone(), target));
-                    self.mode = Mode::ClimateSet { slot, target };
+                    let rows = card.choices(fans).0.len() as i32 + 1;
+                    let selected = (selected as i32 + steps).clamp(0, rows - 1) as usize;
+                    self.mode = Mode::ClimateList { slot, fans, selected };
+                }
+            }
+            Mode::ClimateSet { slot, target } => {
+                // A mode with no temperature (dry, fan only): nothing to set.
+                match self.card(slot) {
+                    Some(Card::Climate(card)) if card.target.is_some() => {
+                        let target = (target + steps as f64 * card.step).clamp(card.min, card.max);
+                        self.pending = Some(Command::Temperature(card.id.clone(), target));
+                        self.mode = Mode::ClimateSet { slot, target };
+                    }
+                    _ => {}
                 }
             }
             Mode::Volume { slot, value } => {
@@ -1222,9 +1242,15 @@ impl Machine {
                                          selected: 0 };
             }
             view @ Mode::ClimateSet { slot, .. } => match self.card(slot) {
-                // Its presets, where it has them; else done.
-                Some(Card::Climate(card)) if !card.presets.is_empty() => {
+                // Its modes, fan speeds and presets, where it has them; else done.
+                Some(Card::Climate(card)) if card.has_menu() => {
                     let mut actions = vec![Action::Back];
+                    if card.modes.len() > 1 {
+                        actions.push(Action::Modes);
+                    }
+                    if !card.fan_modes.is_empty() {
+                        actions.push(Action::Fans);
+                    }
                     actions.extend((0..card.presets.len().min(4)).map(|i| Action::Preset(i as u8)));
                     self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
                 }
@@ -1239,6 +1265,16 @@ impl Machine {
                     }
                 }
                 self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
+            }
+            Mode::ClimateList { slot, fans, selected } => {
+                if let Some(Card::Climate(card)) = self.card(slot) {
+                    if let Some(choice) = card.choices(fans).0.get(selected).cloned() {
+                        let id = card.id.clone();
+                        out.push(Effect::Send(if fans { Command::FanMode(id, choice) } else { Command::HvacMode(id, choice) }));
+                    }
+                }
+                // Back to its dial, the choice on it.
+                self.mode = self.climate_set(slot);
             }
             Mode::Members { slot, selected } => {
                 let member = match self.cards.cards.get_mut(slot) {
@@ -1528,6 +1564,17 @@ impl Machine {
                 }
                 self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
             }
+            (Action::Modes | Action::Fans, Mode::ClimateSet { slot, .. }) => {
+                let fans = action == Action::Fans;
+                let selected = match self.card(slot) {
+                    Some(Card::Climate(card)) => {
+                        let (choices, now) = card.choices(fans);
+                        choices.iter().position(|c| Some(c.as_str()) == now).unwrap_or(0)
+                    }
+                    _ => 0,
+                };
+                self.mode = Mode::ClimateList { slot, fans, selected };
+            }
             (Action::Members, Mode::LightDim { slot, .. }) => self.mode = Mode::Members { slot, selected: 0 },
             (Action::Eco(on), Mode::Thermostat { .. }) => {
                 self.nest_command("preset", if on { "eco" } else { "none" }, out);
@@ -1652,7 +1699,7 @@ impl Machine {
             return;
         }
         if matches!(self.mode, Mode::Thermostat { .. } | Mode::ClimateSet { .. } | Mode::AlarmView { .. }
-                    | Mode::Camera { .. } | Mode::OptionList { .. } | Mode::Members { .. }) {
+                    | Mode::Camera { .. } | Mode::OptionList { .. } | Mode::ClimateList { .. } | Mode::Members { .. }) {
             // An open card with no main action to hold for: nothing. Its
             // menu's Back (or a press, on a camera) goes back.
             return;
@@ -1698,6 +1745,15 @@ impl Machine {
             self.ran = Some((slot, self.last_input));
             self.dirty = true;
         }
+    }
+
+    /// A climate's dial, on its target as it is now.
+    fn climate_set(&self, slot: usize) -> Mode {
+        let target = match self.card(slot) {
+            Some(Card::Climate(card)) => card.target.unwrap_or((card.min + card.max) / 2.0),
+            _ => 0.0,
+        };
+        Mode::ClimateSet { slot, target }
     }
 
     /// A light's dimmer, as it is now.
@@ -2016,6 +2072,20 @@ impl Machine {
                     if let Card::Climate(card) = card {
                         if card.id == *id {
                             card.target = Some(*value);
+                        }
+                    }
+                }
+            }
+            Command::HvacMode(id, value) | Command::FanMode(id, value) => {
+                let fans = matches!(command, Command::FanMode(..));
+                for card in cards.iter_mut() {
+                    if let Card::Climate(card) = card {
+                        if card.id == *id {
+                            if fans {
+                                card.fan_mode = Some(value.clone());
+                            } else {
+                                card.mode = value.clone();
+                            }
                         }
                     }
                 }
@@ -2858,6 +2928,53 @@ mod tests {
         rig.rows(3);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Next("media_player.speaker".into())]);
         assert!(matches!(rig.machine.mode, Mode::Volume { .. }), "back to its volume");
+    }
+
+    #[test]
+    fn an_air_conditioner_s_modes_and_fan_speeds_are_lists_off_its_menu() {
+        let mut rig = deck_of(br#"{"cards":[
+            {"kind":"climate","id":"climate.ac","name":"AC","mode":"cool","target":22,"presets":["away","boost"],
+             "modes":["off","cool","dry","fan_only"],"fan_modes":["auto","low","high"],"fan_mode":"auto"}]}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.press();
+        let Mode::Menu { actions, .. } = rig.machine.mode.clone() else { panic!("its menu") };
+        assert_eq!(actions[1..], [Action::Modes, Action::Fans, Action::Preset(0), Action::Preset(1)]);
+        rig.rows(2);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::ClimateList { slot: 0, fans: true, selected: 0 }, "on the speed it's at");
+        rig.turn(2 * ROW_STEP);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::FanMode("climate.ac".into(), "high".into())]);
+        assert_eq!(rig.machine.mode, Mode::ClimateSet { slot: 0, target: 22.0 }, "back to its dial");
+        rig.press();
+        rig.rows(1);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::ClimateList { slot: 0, fans: false, selected: 1 }, "on cool");
+        rig.turn(ROW_STEP);
+        let sent = rig.press();
+        assert_eq!(Rig::sends(&sent), vec![Command::HvacMode("climate.ac".into(), "dry".into())]);
+        assert_eq!(Command::HvacMode("climate.ac".into(), "dry".into()).payload(),
+                   serde_json::json!({"id": "climate.ac", "action": "hvac_mode", "option": "dry"}));
+        // Back on the last row: no command.
+        rig.press();
+        rig.rows(1);
+        rig.press();
+        rig.turn(10 * ROW_STEP);
+        assert!(Rig::sends(&rig.press()).is_empty());
+    }
+
+    #[test]
+    fn a_climate_in_a_mode_without_a_temperature_has_nothing_to_turn() {
+        let mut rig = deck_of(br#"{"cards":[
+            {"kind":"climate","id":"climate.ac","name":"AC","mode":"fan_only","modes":["off","cool","fan_only"]}]}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        let before = rig.machine.mode.clone();
+        assert!(Rig::sends(&rig.turn(4 * CLIMATE_STEP)).is_empty());
+        assert_eq!(rig.machine.mode, before);
+        rig.press();
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if actions[1..] == [Action::Modes]),
+                "only its modes");
     }
 
     #[test]

@@ -480,6 +480,31 @@ pub struct ClimateCard {
     pub presets: Vec<String>,
     #[serde(default)]
     pub preset: Option<String>,
+    /// Its modes (heat, cool, dry, fan_only, off, ...) and fan speeds, each
+    /// chosen from a list off its menu.
+    #[serde(default)]
+    pub modes: Vec<String>,
+    #[serde(default)]
+    pub fan_modes: Vec<String>,
+    #[serde(default)]
+    pub fan_mode: Option<String>,
+}
+
+impl ClimateCard {
+    /// Whether a press on its screen has a menu to open: presets, modes to
+    /// change between or fan speeds.
+    pub fn has_menu(&self) -> bool {
+        !self.presets.is_empty() || self.modes.len() > 1 || !self.fan_modes.is_empty()
+    }
+
+    /// Its modes (`fans` false) or its fan speeds, and the one it's in.
+    pub fn choices(&self, fans: bool) -> (&[String], Option<&str>) {
+        if fans {
+            (&self.fan_modes, self.fan_mode.as_deref())
+        } else {
+            (&self.modes, Some(self.mode.as_str()))
+        }
+    }
 }
 
 /// This thermostat, from its own buckets (bridge::state, with its equipment
@@ -533,6 +558,9 @@ impl Nest {
             min, max, step,
             presets: Vec::new(),
             preset: eco.then(|| "eco".to_owned()),
+            modes: Vec::new(),
+            fan_modes: Vec::new(),
+            fan_mode: None,
         };
         let boost = s.get("hot_water_boost").and_then(|v| match v {
             Value::String(m) => m.parse().ok(),
@@ -761,6 +789,9 @@ pub enum Command {
     Previous(String),
     /// A thermostat's preset, by name.
     Preset(String, String),
+    /// A climate's mode (cool, dry, ...) and fan speed, by Home Assistant's names.
+    HvacMode(String, String),
+    FanMode(String, String),
     /// A select's option.
     Select(String, String),
     /// A cover's position, percent open; or open or closed whole.
@@ -795,6 +826,8 @@ impl Command {
             Command::Next(id) => json!({"id": id, "action": "next"}),
             Command::Previous(id) => json!({"id": id, "action": "previous"}),
             Command::Preset(id, o) => json!({"id": id, "action": "preset", "option": o}),
+            Command::HvacMode(id, o) => json!({"id": id, "action": "hvac_mode", "option": o}),
+            Command::FanMode(id, o) => json!({"id": id, "action": "fan_mode", "option": o}),
             Command::Select(id, o) => json!({"id": id, "action": "select", "option": o}),
             Command::Position(id, p) => json!({"id": id, "action": "position", "value": p}),
             Command::Open(id) => json!({"id": id, "action": "open"}),

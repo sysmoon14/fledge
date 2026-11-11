@@ -37,7 +37,8 @@ use std::time::{Duration, Instant};
 
 pub use model::Command;
 use machine::{Action, Effect, Input, Machine, Mode, Slot};
-use model::{AlarmResult, Alert, Art, Card, Cards, Nest};
+use model::{AlarmResult, Alert, Art, Card, Cards, Nest, OptionsCard};
+use std::borrow::Cow;
 use screens::Screen;
 
 use crate::logf;
@@ -1762,7 +1763,21 @@ impl Runtime {
                 _ => return None,
             },
             Mode::OptionList { slot, selected } => match card(*slot)? {
-                Card::Options(card) => Screen::OptionList { card, selected: *selected },
+                Card::Options(card) => Screen::OptionList { card: Cow::Borrowed(card), selected: *selected },
+                _ => return None,
+            },
+            Mode::ClimateList { slot, fans, selected } => match card(*slot)? {
+                Card::Climate(card) => {
+                    let (choices, now) = card.choices(*fans);
+                    let options = OptionsCard {
+                        id: card.id.clone(),
+                        name: format!("{} · {}", card.name, if *fans { "Fan" } else { "Mode" }),
+                        icon: String::new(),
+                        options: choices.iter().map(|c| screens::climate_label(c)).collect(),
+                        current: now.map(screens::climate_label),
+                    };
+                    Screen::OptionList { card: Cow::Owned(options), selected: *selected }
+                }
                 _ => return None,
             },
             Mode::CoverSet { slot, value } => match card(*slot)? {
@@ -2174,7 +2189,7 @@ fn depth(mode: &Mode, machine: &Machine) -> u8 {
             Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
             _ => 1,
         },
-        Mode::Members { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
+        Mode::Members { .. } | Mode::ClimateList { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
         | Mode::AlarmPad { .. } | Mode::AlarmOpen { .. } | Mode::AlarmModes { .. } => 2,
         Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => {
             depth(&Mode::LightDim { slot: *slot, light: *light, on: true, value: 0 }, machine) + 1
@@ -2439,6 +2454,8 @@ fn menu_item(action: Action, presets: &[String]) -> (String, String, String) {
         Action::Boost(false) => ("mdi:water-boiler", "Stop boost", "Press to stop the hot water"),
         Action::NestDial => ("mdi:thermometer", "Nest's dial", "Press for the Nest's own screens"),
         Action::Run => ("mdi:play", "Run", "Press to run it"),
+        Action::Modes => ("mdi:thermostat", "Mode", "Press to choose its mode"),
+        Action::Fans => ("mdi:fan", "Fan", "Press to choose its fan speed"),
         Action::Preset(i) => {
             let preset = presets.get(i as usize).cloned().unwrap_or_default();
             let name = screens::capitalise(&preset.replace('_', " "));
@@ -2720,6 +2737,18 @@ mod shots {
             ("7-climate-set", Screen::ClimateSet { card: climate, target: 22.0 }),
             ("8-volume", Screen::Volume { card: media, value: 35 }),
         ];
+        // An air conditioner: drying (no temperature), and its modes listed.
+        let ac = Cards::parse(br#"{"cards":[{"kind":"climate","id":"climate.ac","name":"Office AC","mode":"dry",
+            "action":"drying","current":24.5,"presets":["away","boost"],"modes":["off","cool","heat","dry","fan_only","heat_cool"],
+            "fan_modes":["auto","low","high"],"fan_mode":"auto"}]}"#).unwrap();
+        let [Card::Climate(ac)] = &ac.cards[..] else { panic!() };
+        let modes = model::OptionsCard { id: ac.id.clone(), name: format!("{} · Mode", ac.name), icon: String::new(),
+                                         options: ac.modes.iter().map(|m| screens::climate_label(m)).collect(),
+                                         current: Some(screens::climate_label(&ac.mode)) };
+        let shots = shots.into_iter().chain([
+            ("9-ac-dry", Screen::ClimateSet { card: ac, target: 22.0 }),
+            ("9-ac-modes", Screen::OptionList { card: Cow::Owned(modes), selected: 3 }),
+        ]);
         for (name, screen) in shots {
             save(&screens::draw(&fonts, &screen, None), &format!("{out}/{name}.png"));
         }
@@ -2748,7 +2777,7 @@ mod shots {
             icon: "mdi:water-boiler".into(), options: vec!["Off".into(), "30 minutes".into(), "1 hour".into(), "2 hours".into()],
             current: Some("Off".into()) };
         save(&screens::draw(&fonts, &Screen::OptionsCard { card: &boost }, None), &format!("{out}/b1-options.png"));
-        save(&screens::draw(&fonts, &Screen::OptionList { card: &boost, selected: 2 }, None), &format!("{out}/b2-option-list.png"));
+        save(&screens::draw(&fonts, &Screen::OptionList { card: Cow::Borrowed(&boost), selected: 2 }, None), &format!("{out}/b2-option-list.png"));
         let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
             state: "open".into(), position: Some(60), positionable: true };
         save(&screens::draw(&fonts, &Screen::CoverCard { card: &blind }, None), &format!("{out}/b3-cover.png"));
