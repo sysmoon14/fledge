@@ -36,7 +36,13 @@ NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause", "pa
          "window-shutter-open", "blinds", "blinds-open", "water-boiler", "fire", "snowflake",
          # The thermostat's own Settings.
          "home-account", "calendar-clock", "clock-fast", "temperature-celsius", "update", "chevron-right",
-         "check", "dots-horizontal", "information-outline"}
+         "check", "dots-horizontal", "information-outline",
+         # The glance's lines: Home Assistant's sensors, calendars and people.
+         "clock-outline", "calendar", "calendar-outline", "calendar-today", "car", "car-electric", "ev-station",
+         "flash", "lightning-bolt", "account", "account-multiple", "trash-can", "trash-can-outline", "recycle",
+         "solar-power", "solar-panel", "battery", "battery-charging", "gauge", "water-percent", "text",
+         "currency-gbp", "currency-usd", "currency-eur", "trending-up", "trending-down", "home-thermometer",
+         "molecule-co2", "bell", "package-variant", "dog", "baby-face-outline", "alarm"}
 
 # Home Assistant's Material Symbols sets, by its prefixes.
 SETS = {"outlined": "m3o", "rounded": "m3r", "sharp": "m3s"}
