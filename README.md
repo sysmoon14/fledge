@@ -101,6 +101,14 @@ screens come back for Nest's dial and More Nest settings.
 
 ## Supported thermostats
 
+**Fledge supports the Nest Learning Thermostat (3rd generation) only.** Its
+cards need the 3rd generation's display, and they can't be shown on the 1st or
+2nd generation yet, so the app won't patch those (backups and restores still
+work). For a 1st or 2nd generation Nest, use
+[unfr0zen](https://github.com/unfr0zen/unfr0zen), which supports them.
+
+What unfr0zen itself supports, which Fledge builds on:
+
 | Device | Codename | SoC | MQTT | Matter (Wi-Fi) | Matter (Thread) | Zigbee |
 |-|-|-|-|-|-|-|
 | Nest Learning Thermostat (3rd generation) | `diamond3` | i.MX6SoloX | Tested | Tested | Tested | Tested |
@@ -116,7 +124,6 @@ has only been tested on one unit:
 |-|-|-|-|
 | Tested with Fledge | 3rd | 6.4-8 | European, Heat Link, heating and hot water, MQTT with Home Assistant |
 | Tested by upstream unfr0zen | 3rd | 5.9.4-5, 6.3-5, 6.4-8, 6.5-14 | |
-| Tested by upstream unfr0zen | 2nd | 5.9.4-5 | |
 
 Other firmware versions aren't blocked: the patch finds what it changes by its
 structure and keeps the stock nlclient beside the run log. Running Fledge on
@@ -125,9 +132,10 @@ with the run log, whether it worked or not.
 
 The home screen cards are developed and tested on the 3rd generation.
 
-- **1st generation:** experimental. Patching has not been verified on a physical
-  unit or a stock NAND. Its CC2530 radio uses UART, not the 2nd generation's SPI
-  protocol, so there is no Zigbee, Matter over Thread or USB shell.
+- **2nd generation:** not supported by Fledge. Its nlclient draws straight to
+  the framebuffer, with no graphics processor, so Fledge's way of taking over
+  the 3rd generation's screen doesn't apply. It looks possible (one framebuffer
+  call presents each frame), but needs a 2nd generation to develop on.
 - **Matter and sleep:** the thermostat sleeps and wakes for a controller's
   messages. On the 3rd generation a controller looking it up wakes it too; the
   2nd generation's Wi-Fi chip lets no lookup through while it sleeps, so it
@@ -147,7 +155,6 @@ network doesn't need internet access.
 | Device | Nest firmware |
 |-|-|
 | Nest Learning Thermostat (3rd generation) | 5.9.4-5, 6.3-5, 6.4-8, 6.5-14 |
-| Nest Learning Thermostat (2nd generation) | 5.9.4-5 (tested upstream in unfr0zen) |
 
 Other versions aren't blocked: Fledge patches them on their structure and
 keeps the stock nlclient beside the run log. Running a version not listed here?

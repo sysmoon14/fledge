@@ -358,6 +358,13 @@ pub fn run(config: &Config, progress: &mut dyn Progress,
     let unit = device::detect(progress, config.wait_usb, config.omap, cancel)?;
     match unit.device {
         Device::Diamond3 => diamond3::run(config, progress, unit, cancel),
+        // Fledge's cards need the 3rd generation's display: unsupported for
+        // now, before anything is written (backups and restores still work).
+        // FLEDGE_OLDER_NESTS=1 patches them anyway, for development.
+        Device::Diamond | Device::J49 if std::env::var_os("FLEDGE_OLDER_NESTS").is_none() =>
+            Err(failure(format!("Fledge doesn't support the {} yet: its cards need a 3rd generation Nest Learning \
+                                 Thermostat. Nothing was written. For this Nest, use unfr0zen \
+                                 (https://github.com/unfr0zen/unfr0zen)", unit.device.description()))),
         Device::Diamond | Device::J49 if config.options.external_temperature =>
             Err(failure("--external-temperature needs the 3rd generation's BLE: this unit has none")),
         Device::Diamond | Device::J49 => j49::run(config, progress, unit, cancel),

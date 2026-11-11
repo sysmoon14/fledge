@@ -235,6 +235,10 @@ impl App {
                 if let Bus::One(seen) = &bus {
                     let mode = if seen.mode == "app" { tr!("setup.mode_app").to_string() } else { seen.mode.to_string() };
                     ui.label(egui::RichText::new(format!("{}\n{mode}", seen.device.description())).color(MUTED).size(12.5));
+                    if seen.device != Device::Diamond3 {
+                        ui.add_space(10.0);
+                        ui.add(egui::Label::new(egui::RichText::new(tr!("setup.unsupported_unit")).color(TEXT).size(13.0)).wrap());
+                    }
                 }
             });
         });
