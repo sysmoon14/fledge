@@ -93,7 +93,7 @@ fn dial_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]
         if y < NUMBER_BASELINE {
             pill_words(pixmap, fonts, y - 9.0, text, c, icon_name);
         } else {
-            paint::text(pixmap, fonts.regular(), 21.0, HALF, y, text, 0.0, [163, 173, 184]);
+            paint::text(pixmap, fonts.regular(), 24.0, HALF, y, text, 0.0, [163, 173, 184]);
         }
         return;
     }
@@ -103,7 +103,7 @@ fn dial_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]
 
 /// Words in a soft pill centred on `y`, tinted by `c`, an icon before them.
 fn pill_words(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3], icon_name: Option<&str>) {
-    pill_words_at(pixmap, fonts, y, text, c, icon_name, 20.0, 270.0);
+    pill_words_at(pixmap, fonts, y, text, c, icon_name, 22.0, 280.0);
 }
 
 /// pill_words at `size`, its words at most `room` wide.
@@ -239,8 +239,8 @@ pub fn still_key(screen: &Screen) -> Option<String> {
 fn label(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
     if paint::fledge() {
         // Fledge names things as they're written.
-        let text = paint::fit(fonts.medium(), 22.0, text, 0.0, 300.0);
-        paint::text(pixmap, fonts.medium(), 22.0, HALF, y, &text, 0.0, c);
+        let text = paint::fit(fonts.medium(), 24.0, text, 0.0, 310.0);
+        paint::text(pixmap, fonts.medium(), 24.0, HALF, y, &text, 0.0, c);
         return;
     }
     let text = paint::fit(fonts.medium(), 22.0, &text.to_uppercase(), 1.5, 300.0);
@@ -248,8 +248,8 @@ fn label(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
 }
 
 fn line(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
-    let text = paint::fit(fonts.regular(), 22.0, text, 0.0, 320.0);
-    paint::text(pixmap, fonts.regular(), 22.0, HALF, y, &text, 0.0, c);
+    let text = paint::fit(fonts.regular(), 24.0, text, 0.0, 330.0);
+    paint::text(pixmap, fonts.regular(), 24.0, HALF, y, &text, 0.0, c);
 }
 
 /// A large number as the Nest's dial shows a temperature: 21, or 21 with a
@@ -403,14 +403,14 @@ fn now_label(p: &mut Canvas, fonts: &Fonts, card: &ClimateCard, target: Option<f
     let half = card.step < 1.0 && (now.fract() - 0.5).abs() < 0.25;
     let whole = if half { now.floor() } else { now.round() } as i64;
     let digits = whole.to_string();
-    let width = paint::measure(fonts.medium(), 28.0, &digits, 0.0);
-    let small = if half { paint::measure(fonts.medium(), 16.0, "5", 0.0) + 2.0 } else { 0.0 };
+    let width = paint::measure(fonts.medium(), 34.0, &digits, 0.0);
+    let small = if half { paint::measure(fonts.medium(), 20.0, "5", 0.0) + 2.0 } else { 0.0 };
     let left = x - (width + small) / 2.0;
     // White over the ticks, to read on the black dial as on the orange.
     let tint = WHITE;
-    paint::text_at(p, fonts.medium(), 28.0, left, y + 10.0, &digits, 0.0, tint, shown);
+    paint::text_at(p, fonts.medium(), 34.0, left, y + 12.0, &digits, 0.0, tint, shown);
     if half {
-        paint::text_at(p, fonts.medium(), 16.0, left + width + 2.0, y - 2.0, "5", 0.0, tint, shown);
+        paint::text_at(p, fonts.medium(), 20.0, left + width + 2.0, y - 3.0, "5", 0.0, tint, shown);
     }
 }
 
@@ -581,10 +581,10 @@ fn media_card(fonts: &Fonts, card: &MediaCard, volume: Option<u8>, progress: Opt
     // How far through the track, under its title.
     let mut below = top + 76.0;
     if let Some(done) = progress {
-        let (x, y) = (HALF - PROGRESS_WIDTH / 2.0, top + 58.0);
-        paint::pill(&mut p, x, y, PROGRESS_WIDTH, 5.0, colour(DIM));
-        let width = (PROGRESS_WIDTH * done).max(5.0);
-        paint::pill(&mut p, x, y, width, 5.0, colour(if playing { MEDIA } else { GREY }));
+        let (x, y) = (HALF - PROGRESS_WIDTH / 2.0, top + 57.0);
+        paint::pill(&mut p, x, y, PROGRESS_WIDTH, 8.0, colour(DIM));
+        let width = (PROGRESS_WIDTH * done).max(8.0);
+        paint::pill(&mut p, x, y, width, 8.0, colour(if playing { MEDIA } else { GREY }));
         below += 14.0;
     }
     let under = if card.artist.is_empty() { String::new() } else { card.artist.clone() };
@@ -928,10 +928,10 @@ fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial
         let update = rows[row] == Setting::Software && nest.is_some_and(|n| n.update.is_some());
         let value_tint = if chosen { WHITE } else if update || value == "On" { ON } else { GREY };
         icon(&mut p, icon_name, "setting", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
-        let value_width = paint::measure(fonts.regular(), 22.0, &value, 0.0);
-        let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
-        paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
-        paint::text_at(&mut p, fonts.regular(), 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
+        let value_width = paint::measure(fonts.regular(), 24.0, &value, 0.0);
+        let name = paint::fit(fonts.regular(), 26.0, name, 0.0, w - 90.0 - value_width - 16.0);
+        paint::text_at(&mut p, fonts.regular(), 26.0, x + 62.0, y + 37.0, &name, 0.0, WHITE, 1.0);
+        paint::text_at(&mut p, fonts.regular(), 24.0, x + w - 24.0 - value_width, y + 36.0, &value, 0.0, value_tint, 1.0);
     }
     p
 }
@@ -1111,10 +1111,10 @@ fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, l
         };
         let (tint, value_tint, text_tint) = if chosen { (WHITE, WHITE, WHITE) } else { (tint, value_tint, WHITE) };
         icon(&mut p, icon_name, entity, x + 34.0, y + h / 2.0, 28.0, tint);
-        let value_width = paint::measure(fonts.regular(), 22.0, &value, 0.0);
-        let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
-        paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, text_tint, 1.0);
-        paint::text_at(&mut p, fonts.regular(), 20.0, x + w - 24.0 - value_width, y + 35.0, &value, 0.0, value_tint, 1.0);
+        let value_width = paint::measure(fonts.regular(), 24.0, &value, 0.0);
+        let name = paint::fit(fonts.regular(), 26.0, name, 0.0, w - 90.0 - value_width - 16.0);
+        paint::text_at(&mut p, fonts.regular(), 26.0, x + 62.0, y + 37.0, &name, 0.0, text_tint, 1.0);
+        paint::text_at(&mut p, fonts.regular(), 24.0, x + w - 24.0 - value_width, y + 36.0, &value, 0.0, value_tint, 1.0);
     }
     p
 }
@@ -1481,7 +1481,7 @@ fn mode_prompt(fonts: &Fonts, nest: &Nest, selected: usize, layer: Layer) -> Can
         let (x, _, h) = PILL;
         let chosen = layer.chosen(row == selected);
         icon(&mut p, icon_name, "prompt", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
-        paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, name, 0.0, WHITE, 1.0);
+        paint::text_at(&mut p, fonts.regular(), 26.0, x + 62.0, y + 37.0, name, 0.0, WHITE, 1.0);
     }
     p
 }
@@ -1503,11 +1503,11 @@ fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer)
             icon(&mut p, "mdi:arrow-left", "back", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
         }
         let value = if now { "Now" } else { "" };
-        let value_width = paint::measure(fonts.regular(), 22.0, value, 0.0);
-        let name = paint::fit(fonts.regular(), 24.0, name, 0.0, w - 90.0 - value_width - 16.0);
-        paint::text_at(&mut p, fonts.regular(), 24.0, x + 62.0, y + 36.0, &name, 0.0, WHITE, 1.0);
+        let value_width = paint::measure(fonts.regular(), 24.0, value, 0.0);
+        let name = paint::fit(fonts.regular(), 26.0, name, 0.0, w - 90.0 - value_width - 16.0);
+        paint::text_at(&mut p, fonts.regular(), 26.0, x + 62.0, y + 37.0, &name, 0.0, WHITE, 1.0);
         if now {
-            paint::text_at(&mut p, fonts.regular(), 20.0, x + w - 22.0 - value_width, y + 35.0, value, 0.0,
+            paint::text_at(&mut p, fonts.regular(), 24.0, x + w - 22.0 - value_width, y + 36.0, value, 0.0,
                            if chosen { WHITE } else { ACTION }, 1.0);
         }
     }
@@ -1610,8 +1610,8 @@ fn alarm_delay_ring(p: &mut Canvas, card: &AlarmCard, now: Option<f64>, mark: Op
 /// The note under an alarm's screen, if there's one.
 fn alarm_note(p: &mut Canvas, fonts: &Fonts, note: Option<&str>, y: f32) -> bool {
     let Some(note) = note else { return false };
-    let note = paint::fit(fonts.medium(), 18.0, note, 0.0, 300.0);
-    paint::text(p, fonts.medium(), 18.0, HALF, y, &note, 0.0, ALARM_RED);
+    let note = paint::fit(fonts.medium(), 21.0, note, 0.0, 320.0);
+    paint::text(p, fonts.medium(), 21.0, HALF, y, &note, 0.0, ALARM_RED);
     true
 }
 
@@ -1671,8 +1671,8 @@ fn alarm_screen(fonts: &Fonts, card: &AlarmCard, now: Option<f64>, note: Option<
         }
         None => {
             icon(&mut p, icon_name, &card.id, HALF, 136.0, 76.0, if triggered { WHITE } else { accent });
-            let label = paint::fit(fonts.medium(), 22.0, name, 0.0, 300.0);
-            paint::text(&mut p, fonts.medium(), 22.0, HALF, 216.0, &label, 0.0, words);
+            let label = paint::fit(fonts.medium(), 24.0, name, 0.0, 300.0);
+            paint::text(&mut p, fonts.medium(), 24.0, HALF, 216.0, &label, 0.0, words);
             let big = paint::fit(fonts.medium(), 52.0, word, 0.0, 340.0);
             paint::text(&mut p, fonts.medium(), 52.0, HALF, 284.0, &big, 0.0, if triggered { WHITE } else { accent });
             if !under.is_empty() {
@@ -1821,8 +1821,8 @@ pub fn options(fonts: &Fonts, title: &str, items: &[Opt], selected: usize, accen
     let name = paint::fit(fonts.medium(), 42.0, chosen.name, 0.0, 320.0);
     paint::text(&mut p, fonts.medium(), 42.0, HALF, 300.0, &name, 0.0, WHITE);
     line(&mut p, fonts, 340.0, chosen.under, GREY);
-    let label = paint::fit(fonts.medium(), 18.0, title, 0.0, 200.0);
-    paint::text(&mut p, fonts.medium(), 18.0, HALF, 404.0, &label, 0.0, GREY);
+    let label = paint::fit(fonts.medium(), 20.0, title, 0.0, 210.0);
+    paint::text(&mut p, fonts.medium(), 20.0, HALF, 404.0, &label, 0.0, GREY);
     p
 }
 

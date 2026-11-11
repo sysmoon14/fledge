@@ -2774,6 +2774,9 @@ mod shots {
             save(&screens::draw(&fonts, &Screen::AlarmModes { card: &disarmed, selected }, None),
                  &format!("{out}/m{selected}-alarm-modes.png"));
         }
+        // An armed alarm's options (Back, Disarm), and arming's (Back, Cancel).
+        save(&screens::draw(&fonts, &Screen::AlarmModes { card: &armed, selected: 1 }, None), &format!("{out}/m-armed-disarm.png"));
+        save(&screens::draw(&fonts, &Screen::AlarmModes { card: &arming, selected: 1 }, None), &format!("{out}/m-arming-cancel.png"));
         // Each state of an alarm's card among the cards, and opened.
         let states = ["disarmed", "armed_home", "armed_away", "armed_night", "arming", "pending", "triggered", "unavailable"];
         for (i, state) in states.iter().enumerate() {

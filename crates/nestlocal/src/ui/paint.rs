@@ -1224,10 +1224,10 @@ pub fn hint(frame: &mut Vec<u8>, fonts: &Fonts, text: &str) {
         return;
     };
     let mut canvas = Canvas { pixmap, panel: true };
-    let width = measure(fonts.medium(), 15.0, text, 0.2) + 28.0;
+    let width = measure(fonts.medium(), 19.0, text, 0.2) + 32.0;
     // Between the cards (their bottoms at 389) and the dots.
     pill(&mut canvas, CENTRE - width / 2.0, 399.0, width, 30.0, Color::from_rgba8(36, 38, 42, 255));
-    self::text(&mut canvas, fonts.medium(), 15.0, CENTRE, 419.0, text, 0.2, [230, 233, 238]);
+    self::text(&mut canvas, fonts.medium(), 19.0, CENTRE, 420.0, text, 0.2, [230, 233, 238]);
     *frame = canvas.pixmap.take();
 }
 
