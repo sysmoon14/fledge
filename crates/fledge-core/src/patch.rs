@@ -1268,8 +1268,8 @@ mod tests {
         assert!(volume.text(NLSLEEP).contains(" LD_PRELOAD=/nestlabs/lib/libwakefilter.so ${STARTDAEMON} "));
         // Again changes neither.
         assert!(!names(&patch(&mut volume, &options, false).unwrap()).contains(WAKE_FILTER));
-        let changes = patch(&mut volume, &Options { matter: None, mqtt: Some(Mqtt { url: "tcp://b:1883".into(), user: None,
-            password: None, tls: false, ca: None }), ..options }, false).unwrap();
+        let changes = patch(&mut volume, &Options { matter: None, mqtt: Some(Mqtt { url: "tcp://b:1883".into(),
+            ..Mqtt::default() }), ..options }, false).unwrap();
         assert!(changes.iter().any(|c| c.name == WAKE_FILTER && c.action == "remove"));
         assert!(!volume.files.contains_key(WAKE_FILTER));
         assert_eq!(volume.text(NLSLEEP), script);
