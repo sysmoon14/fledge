@@ -1566,6 +1566,8 @@ impl Machine {
             }
             Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => self.toggle(slot, Some(light), out),
             Mode::Volume { slot, .. } => self.toggle(slot, None, out),
+            // A blind's own screen: held, it opens or closes whole.
+            Mode::CoverSet { slot, .. } => self.toggle(slot, None, out),
             _ => false,
         };
         if toggled {
@@ -2462,9 +2464,9 @@ mod tests {
         rig.press();
         rig.rows(2);
         assert_eq!(Rig::sends(&rig.press()), vec![Command::Close("cover.blind".into())], "its menu: Close");
-        rig.long();
-        assert_eq!(rig.machine.mode, Mode::Chooser(1));
-        assert!(Rig::sends(&rig.long()).is_empty(), "held on its card: back, nothing opened or closed");
+        assert_eq!(Rig::sends(&rig.long()), vec![Command::Open("cover.blind".into())],
+                   "held on its own screen: open again, as it's closing");
+        assert_eq!(rig.machine.mode, Mode::CoverSet { slot: 0, value: 45 }, "it stays open");
     }
 
     /// An alarm card (Alarmo's, wanting a code only to disarm, as the
