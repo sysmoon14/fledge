@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::model::{AlarmCard, AlarmResult, Alert, Card, Cards, ClimateCard, ClimateChoice, Code, Command, Far, Near, Nest, Wake};
+use super::model::{AlarmCard, AlarmResult, Alert, Card, Cards, ClimateCard, ClimateChoice, Code, Command, Far, Glance, Near, Nest, Wake};
 use crate::motion::Sensor;
 use crate::logf;
 
@@ -53,6 +53,8 @@ pub const CAMERA_EVERY: Duration = Duration::from_secs(3);
 pub const CAMERA_IDLE: Duration = Duration::from_secs(60);
 /// How long the glance shows with nothing touched.
 pub const GLANCE_IDLE: Duration = Duration::from_secs(20);
+/// How long a glance tried from the panel shows.
+pub const TRY_SHOWN: Duration = Duration::from_secs(20);
 /// The display lit this soon after an approach reading lit it for someone
 /// close, not across the room.
 pub const NEAR_LIT: Duration = Duration::from_secs(2);
@@ -397,6 +399,8 @@ pub struct Machine {
     /// The notification showing, and until when.
     pub alert: Option<Alert>,
     alert_until: Option<Instant>,
+    /// A glance to try (the panel's, unsaved) and until when it shows.
+    trial: Option<(Glance, Instant)>,
     /// A scene or script just run from its card, and when: its card says
     /// so for a moment.
     pub ran: Option<(usize, Instant)>,
@@ -461,7 +465,7 @@ impl Machine {
         Machine {
             mode: Mode::Idle, cards: Cards::default(), woke: false, hint: false, dirty: false, last_input: now,
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
-            lighting: None, was_lit: None, alert: None, alert_until: None, ran: None, pictured: None, settings_open: false,
+            lighting: None, was_lit: None, alert: None, alert_until: None, trial: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
             rests: false, near_at: None, kept_dark: false, floor: None, alarm_states: Default::default(), alarm_takeover: None,
             alarm_code: None, alarm_arming: None, alarm_wait: None, alarm_note: None, alarm_locked: None,
@@ -987,6 +991,36 @@ impl Machine {
         let id = alert.id.clone();
         self.alert = Some(alert);
         self.go(Mode::Alert { id, back }, out);
+    }
+
+    /// The glance showing: one being tried, else Home Assistant's.
+    pub fn glance(&self) -> Option<&Glance> {
+        self.trial.as_ref().map(|(glance, _)| glance).or(self.cards.glance.as_ref())
+    }
+
+    /// Shows `glance` for a while (TRY_SHOWN), lit if it isn't, as the
+    /// panel tries it on the real screen; None ends it. Not over a
+    /// notification, an alarm or Nest's own screens.
+    pub fn try_glance(&mut self, glance: Option<Glance>, now: Instant, lit: bool, out: &mut Vec<Effect>) {
+        let Some(glance) = glance else {
+            if self.trial.take().is_some() && self.mode == Mode::Glance {
+                self.dirty = true;
+                let back = self.left_alone();
+                self.go(back, out);
+            }
+            return;
+        };
+        if matches!(self.mode, Mode::Idle | Mode::Native | Mode::Alert { .. }) || self.alarm_urgent() {
+            return;
+        }
+        if !lit {
+            out.push(Effect::WakeDisplay);
+            self.lighting = Some(now + LIGHTING);
+        }
+        self.trial = Some((glance, now + TRY_SHOWN));
+        self.last_input = now;
+        self.dirty = true;
+        self.go(Mode::Glance, out);
     }
 
     /// The notification goes, saying why (`said`: pressed or dismissed; None
@@ -2173,6 +2207,18 @@ impl Machine {
                 self.end_alert(Some(Command::AlertDismissed(id)), out);
             }
         }
+        if let Some((_, until)) = &self.trial {
+            // Tried long enough, or something else shows now: the saved glance.
+            if now >= *until || self.mode != Mode::Glance {
+                self.trial = None;
+                self.dirty = true;
+                if self.mode == Mode::Glance {
+                    self.last_input = now;
+                    let back = self.left_alone();
+                    self.go(back, out);
+                }
+            }
+        }
         if self.ran.is_some_and(|(_, at)| now.duration_since(at) >= RAN_SHOWN) {
             self.ran = None;
             self.dirty = true;
@@ -3153,6 +3199,28 @@ mod tests {
         assert!(rig.machine.owns() && rig.machine.resting());
         rig.turn(CARD_STEP / 4);
         assert!(rig.machine.position().is_some() && !rig.machine.resting(), "a turn on the lit display: the cards follow");
+    }
+
+    #[test]
+    fn a_glance_tried_from_the_panel_shows_for_a_while_then_the_saved_one() {
+        let (mut rig, _) = holding(Cards::parse(br#"{"cards":[{"kind":"climate","id":"climate.k","name":"K"}],
+            "glance":{"offset":0}}"#).unwrap());
+        rig.lit = false;
+        let tried: Glance = serde_json::from_str(r#"{"layout":"analog"}"#).unwrap();
+        let mut out = vec![];
+        rig.machine.try_glance(Some(tried.clone()), rig.now, false, &mut out);
+        assert!(out.contains(&Effect::WakeDisplay), "lit to show it");
+        rig.lit = true;
+        assert_eq!((rig.machine.mode.clone(), rig.machine.glance()), (Mode::Glance, Some(&tried)));
+        rig.wait(TRY_SHOWN - Duration::from_secs(1));
+        assert_eq!(rig.machine.glance(), Some(&tried), "still trying");
+        rig.wait(Duration::from_secs(2));
+        assert_eq!(rig.machine.mode, Mode::Glance);
+        assert_eq!(rig.machine.glance().map(|g| g.layout), Some(super::super::model::Layout::Clock), "the saved one back");
+        rig.machine.try_glance(Some(tried), rig.now, true, &mut out);
+        rig.turn(CARD_STEP);
+        rig.tick();
+        assert!(rig.machine.glance().is_some_and(|g| g.layout == super::super::model::Layout::Clock), "a touch ends it");
     }
 
     #[test]

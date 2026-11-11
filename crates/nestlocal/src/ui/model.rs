@@ -84,6 +84,167 @@ pub struct Glance {
     pub offset: i64,
     #[serde(default)]
     pub weather: Option<Weather>,
+    /// How it's laid out (protocol 11); the clock without.
+    #[serde(default)]
+    pub layout: Layout,
+    /// The clock's hours (protocol 11): 24 without.
+    #[serde(default)]
+    pub clock: Clock,
+    /// The lines under the big element, top to bottom (protocol 11);
+    /// without, the date, the weather and what's on, as before.
+    #[serde(default)]
+    pub lines: Option<Vec<Line>>,
+    /// The big number's (Layout::Number).
+    #[serde(default)]
+    pub big: Option<Big>,
+    /// The next event (Layout::Agenda).
+    #[serde(default)]
+    pub event: Option<Event>,
+    /// Whether the temperature layout colours the screen while heating or
+    /// cooling (on without).
+    #[serde(default)]
+    pub colour: Option<bool>,
+    /// The night's glance (Home Assistant decides when), drawn dimmer and
+    /// warmer with `dim`.
+    #[serde(default)]
+    pub night: bool,
+    #[serde(default)]
+    pub dim: bool,
+}
+
+/// The glance's layouts: something large, and lines under it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    /// The time large (the glance as it was).
+    #[default]
+    Clock,
+    /// The room's temperature large.
+    Temp,
+    /// Outside: the weather's icon and temperature.
+    Weather,
+    /// A clock face with hands.
+    Analog,
+    /// One value from Home Assistant.
+    Number,
+    /// The next event from a calendar.
+    Agenda,
+    /// A layout this build doesn't know: the clock.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Layout {
+    /// The lines it has room for.
+    pub fn slots(self) -> usize {
+        match self {
+            Layout::Clock | Layout::Unknown => 3,
+            Layout::Temp | Layout::Weather | Layout::Number => 2,
+            Layout::Analog | Layout::Agenda => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+pub struct Clock {
+    /// 12 or 24.
+    #[serde(default = "twenty_four")]
+    pub hours: u8,
+    /// AM / PM beside a 12-hour time.
+    #[serde(default = "yes")]
+    pub ampm: bool,
+}
+
+impl Default for Clock {
+    fn default() -> Clock {
+        Clock { hours: 24, ampm: true }
+    }
+}
+
+fn twenty_four() -> u8 {
+    24
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Clock {
+    pub fn twelve(&self) -> bool {
+        self.hours == 12
+    }
+
+    /// "14:05", or "2:05" with " PM" where `ampm` asks and the clock shows it.
+    pub fn time(&self, minutes: i64, ampm: bool) -> String {
+        let (h, m) = (minutes.rem_euclid(1440) / 60, minutes.rem_euclid(60));
+        if !self.twelve() {
+            return format!("{h:02}:{m:02}");
+        }
+        let twelve = (h + 11) % 12 + 1;
+        if ampm && self.ampm { format!("{twelve}:{m:02} {}", Clock::half(h)) } else { format!("{twelve}:{m:02}") }
+    }
+
+    /// "AM" or "PM" for the hour `h` (0..24).
+    pub fn half(h: i64) -> &'static str {
+        if h < 12 { "AM" } else { "PM" }
+    }
+}
+
+/// A line of the glance: one the Nest works out itself (`kind`), or
+/// Home Assistant's words with an icon.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Line {
+    /// date, date_short, time, inside, heating, whats_on, weather; or none
+    /// for Home Assistant's `text`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+impl Line {
+    pub fn kind(kind: &str) -> Line {
+        Line { kind: Some(kind.to_owned()), ..Line::default() }
+    }
+}
+
+/// The big number: what it is, its value and unit as Home Assistant shows
+/// them.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Big {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub unit: String,
+}
+
+/// A calendar's next event.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Event {
+    #[serde(default)]
+    pub title: String,
+    /// When it starts (Unix seconds).
+    #[serde(default)]
+    pub start: i64,
+    #[serde(default)]
+    pub all_day: bool,
+}
+
+impl Glance {
+    /// Its lines, as many as its layout has room for: the date, the
+    /// weather and what's on where Home Assistant sent none.
+    pub fn lines(&self) -> Vec<Line> {
+        let mut lines = match &self.lines {
+            Some(lines) => lines.clone(),
+            None => ["date", "weather", "whats_on"].map(Line::kind).to_vec(),
+        };
+        lines.truncate(self.layout.slots());
+        lines
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -1041,6 +1202,16 @@ impl Command {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_clock_tells_twelve_and_twenty_four_hours() {
+        let clock = |json: &str| serde_json::from_str::<super::Clock>(json).unwrap();
+        assert_eq!(clock("{}").time(9 * 60 + 5, true), "09:05", "24 hours without");
+        let twelve = clock(r#"{"hours":12}"#);
+        assert_eq!(twelve.time(0, true), "12:00 AM");
+        assert_eq!(twelve.time(12 * 60 + 30, true), "12:30 PM");
+        assert_eq!(twelve.time(21 * 60 + 13, false), "9:13", "the big time's AM / PM is drawn apart");
+        assert_eq!(clock(r#"{"hours":12,"ampm":false}"#).time(21 * 60 + 13, true), "9:13");
+    }
     use super::*;
 
     #[test]
