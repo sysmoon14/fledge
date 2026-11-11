@@ -101,24 +101,22 @@ screens come back for Nest's dial and More Nest settings.
 
 ## Supported thermostats
 
-**Fledge supports the Nest Learning Thermostat (3rd generation) only.** Its
-cards need the 3rd generation's display, and they can't be shown on the 1st or
-2nd generation yet, so the app won't patch those (backups and restores still
-work). For a 1st or 2nd generation Nest, use
-[unfr0zen](https://github.com/unfr0zen/unfr0zen), which supports them.
+**Fledge supports the Nest Learning Thermostat (3rd generation) only.**
 
-What unfr0zen itself supports, which Fledge builds on:
+> [!IMPORTANT]
+> **Not supported: the Nest Learning Thermostat (1st and 2nd generation), the
+> Nest Thermostat E and newer Nests.** Fledge's app recognises them, tells you
+> so, and does nothing to them. **For those, use
+> [unfr0zen](https://github.com/unfr0zen/unfr0zen).** That stays the case until
+> I have hardware to develop and test on, or someone who does sends a pull
+> request that has been tested on a real thermostat.
 
 | Device | Codename | SoC | MQTT | Matter (Wi-Fi) | Matter (Thread) | Zigbee |
 |-|-|-|-|-|-|-|
 | Nest Learning Thermostat (3rd generation) | `diamond3` | i.MX6SoloX | Tested | Tested | Tested | Tested |
-| Nest Learning Thermostat (2nd generation) | `j49` | TI AM3703 | Tested | Tested | Tested | Tested |
-| Nest Learning Thermostat (1st generation) | `diamond` | TI AM3703 | Built | Built | No | No |
 
-*Tested*: on a unit, by upstream unfr0zen. *Built*: builds, not yet tested on a unit. *No*: not available.
-
-This is **unfr0zen's** testing, before Fledge's changes. Fledge itself
-has only been tested on one unit:
+*Tested*: on a unit, by upstream unfr0zen, before Fledge's changes. Fledge
+itself has only been tested on one unit:
 
 | | Generation | Nest firmware | Setup |
 |-|-|-|-|
@@ -132,15 +130,9 @@ with the run log, whether it worked or not.
 
 The home screen cards are developed and tested on the 3rd generation.
 
-- **2nd generation:** not supported by Fledge. Its nlclient draws straight to
-  the framebuffer, with no graphics processor, so Fledge's way of taking over
-  the 3rd generation's screen doesn't apply. It looks possible (one framebuffer
-  call presents each frame), but needs a 2nd generation to develop on.
 - **Matter and sleep:** the thermostat sleeps and wakes for a controller's
-  messages. On the 3rd generation a controller looking it up wakes it too; the
-  2nd generation's Wi-Fi chip lets no lookup through while it sleeps, so it
-  answers them on its own wakes.
-- **Thread and Zigbee** share the 2nd and 3rd generation's 802.15.4 radio (an
+  messages, and a controller looking it up wakes it too.
+- **Thread and Zigbee** share the thermostat's 802.15.4 radio (an
   EM357 or EM3581 on SPI), so only one of them can be on, and on European
   models either one replaces the wireless Heat Link connection. Zigbee drives
   it directly; Matter over Thread goes through OpenThread's `ot-daemon`.
@@ -162,8 +154,7 @@ keeps the stock nlclient beside the run log. Running a version not listed here?
 
 ## Get started
 
-1. **A USB data cable.** Gen 1 uses mini-USB; Gen 2 and 3 use micro-USB.
-   Charge-only cables won't work.
+1. **A micro-USB data cable.** Charge-only cables won't work.
 2. **The Fledge app.** Download it from the
    [latest release](https://github.com/sysmoon14/fledge/releases/latest), under
    Assets:
@@ -190,8 +181,6 @@ keeps the stock nlclient beside the run log. Running a version not listed here?
   <img src="assets/screens/app.png" width="720" alt="The Fledge app's Set up page: Connect your thermostat, with the three steps and a 3rd generation thermostat found over USB.">
 </p>
 
-- **Windows:** 1st and 2nd generation: bind the WinUSB driver to the boot ROM
-  (`0451:d00e`) once with [Zadig](https://zadig.akeo.ie).
 - **macOS:** the app is signed ad hoc, not notarized: run
   `xattr -dr com.apple.quarantine Fledge.app`, or allow it under System Settings → Privacy & Security.
 - **Linux:** run it as your normal user, after the one-time USB setup below.
@@ -214,10 +203,6 @@ ATTRS{idVendor}=="0525", ATTRS{idProduct}=="a4a7", TAG+="uaccess", ENV{ID_MM_DEV
 ATTRS{idVendor}=="0525", ATTRS{idProduct}=="b4a4", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
 ATTRS{idVendor}=="2464", ATTRS{idProduct}=="0030", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
 ATTRS{idVendor}=="2464", ATTRS{idProduct}=="0031", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
-# diamond/j49: OMAP boot ROM (and x-loader, the flasher), each application's gadget
-ATTRS{idVendor}=="0451", ATTRS{idProduct}=="d00e", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
-ATTRS{idVendor}=="2464", ATTRS{idProduct}=="0001", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
-ATTRS{idVendor}=="2464", ATTRS{idProduct}=="0002", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
 EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
@@ -273,7 +258,7 @@ Commands:
   nlclient  Patch a local stock nlclient, or restore it from its undo journal
 
 Common options:
-  --device <GEN>         diamond, j49 or diamond3 instead of the USB identity
+  --device <GEN>         the generation, instead of the USB identity
   --backup              Save the original root volume before patching
   --dry-run             List the changes, write nothing
   --mqtt <URL>          Relay to this MQTT broker
@@ -317,8 +302,7 @@ you turned on: Matter's pairing code and QR, Zigbee pairing, and Doom.
 **The app doesn't see the thermostat.** Use a USB cable that carries data:
 charge-only cables are the usual cause. Connect to the USB port on the back of
 the detached display, not the power-only USB port on a European stand or Heat
-Link base. On Windows, the 1st and 2nd generation need the WinUSB driver bound
-to `0451:d00e` with [Zadig](https://zadig.akeo.ie). On Linux, add the
+Link base. On Linux, add the
 [udev rule](#get-started) and reconnect the unit.
 
 **Windows stops with `ACM interface for 18d1:4ee0 did not appear` (3rd generation).**
@@ -376,7 +360,7 @@ who wrote nearly all of unfr0zen and did the hard part:
   `nlclient` that finds its own way round each firmware and can always be undone,
   and a stock client left in place whenever a firmware isn't supported.
 - **nestlocal.** Local control without Google's cloud over MQTT, Matter (Wi-Fi
-  and Thread) and Zigbee, down to driving the gen 2's radio pins, hot water
+  and Thread) and Zigbee, down to the radio, hot water
   boost, Works with Nest boilers and regulating from an external sensor.
 - **Knowing the hardware.** Reverse engineering the Nest's client, screen and
   radios, and testing it all on real thermostats across firmware versions.

@@ -268,7 +268,7 @@
   "setup.step.review": "Review",
   "setup.time_server": "Time server",
   "setup.time_server_why": "Replaces Nest's, which is blocked",
-  "setup.unsupported_unit": "Fledge needs a 3rd generation Nest Learning Thermostat: its cards can't be shown on this one yet. For this Nest, use unfr0zen. Backups and restores still work here.",
+  "setup.unsupported_unit": "Unsupported thermostat. Fledge supports the Nest Learning Thermostat (3rd generation) only, and won't do anything to this one. For this thermostat, use unfr0zen.",
   "setup.updates": "Updates from Home Assistant",
   "setup.updates_about": "Shows a Fledge update in Home Assistant when there's a new release. Install it from there. It's checked for a valid signature first, and the old version comes back if the new one fails to start.",
   "setup.updates_needs_mqtt": "Updates come through Home Assistant, so they need the connection above.",

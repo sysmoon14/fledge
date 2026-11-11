@@ -13,7 +13,7 @@ pub(crate) fn unsupported(progress: &mut dyn Progress) -> Error {
         Ok(id) => progress.device(&format!("{}: {}", Device::Onyx.description(), id.silicon)),
         Err(error) => log::warn!("Onyx silicon revision not read: {error}"),
     }
-    Error::Device("Nest Thermostat E is not supported".into())
+    crate::device::unsupported_thermostat(Device::Onyx)
 }
 
 #[cfg(test)]

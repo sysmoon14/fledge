@@ -130,6 +130,10 @@ pub fn run(job: &Job, wait_usb: Duration, omap: Option<Device>,
         }
     };
     let unit = device::detect(progress, wait_usb, omap, cancel)?;
+    if matches!(unit.device, Device::Diamond | Device::J49) && !device::older_nests() {
+        // Not even a backup: the flasher isn't loaded onto it.
+        return Err(device::unsupported_thermostat(unit.device));
+    }
     if let Some(device) = expected.filter(|&device| unit.device != Device::Onyx && device != unit.device && !(device == Device::J49 && unit.device == Device::Diamond)) {
         return Err(failure(format!("the image is a {}'s NAND; the unit is a {}", device.name(), unit.device.name())));
     }

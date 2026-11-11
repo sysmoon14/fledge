@@ -87,6 +87,22 @@ pub type CancelFlag = Arc<AtomicBool>;
 /// The unit on the bus, in whatever mode it is in. With none, asks for the
 /// button and waits up to `wait` for one in its boot ROM's USB download mode.
 /// A set `cancel` flag cuts the wait short.
+/// What Fledge says of a thermostat it doesn't support: everything but the
+/// Nest Learning Thermostat (3rd generation). Its cards need the 3rd
+/// generation's display; the 1st and 2nd generation draw to theirs another
+/// way, and none of it has been tried on one.
+pub fn unsupported_thermostat(device: Device) -> Error {
+    Error::Device(format!("Unsupported thermostat: Fledge supports the Nest Learning Thermostat (3rd generation) only, \
+                           and this is a {}. Nothing was done to it. For this thermostat, use unfr0zen: \
+                           https://github.com/unfr0zen/unfr0zen", device.description()))
+}
+
+/// Whether Fledge works with the 1st and 2nd generation: not yet, but
+/// FLEDGE_OLDER_NESTS=1 lets a developer with one try (unfr0zen's code).
+pub fn older_nests() -> bool {
+    std::env::var_os("FLEDGE_OLDER_NESTS").is_some()
+}
+
 pub fn detect(progress: &mut dyn Progress, wait: Duration, omap: Option<Device>,
               cancel: &CancelFlag) -> Result<Unit> {
     if let Some(unit) = single(units()?)?.map(|unit| selected(unit, omap)) {
@@ -127,6 +143,16 @@ pub fn detect(progress: &mut dyn Progress, wait: Duration, omap: Option<Device>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_nests_and_the_e_are_turned_away_alike() {
+        for device in [Device::Diamond, Device::J49, Device::Onyx] {
+            let message = unsupported_thermostat(device).to_string();
+            assert!(message.contains("Unsupported thermostat") && message.contains(device.description())
+                    && message.contains("unfr0zen"), "{message}");
+        }
+    }
+
 
     #[test]
     fn each_mode_identifies_its_device() {
