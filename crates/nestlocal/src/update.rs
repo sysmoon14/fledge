@@ -301,7 +301,9 @@ pub fn failed() -> Option<String> {
 /// that release or was built on top of it (`git describe` puts the tag
 /// first), so that a development build does not offer its own base.
 pub fn offered(installed: &str, tag: &str) -> String {
-    let built_on = installed.strip_prefix(tag).is_some_and(|rest| rest.is_empty() || rest.starts_with('-'));
+    // Built on the tag: the tag itself, or git describe's -K-gHASH after it.
+    // Not a release candidate of it: v0.8.0-rc.2 is offered v0.8.0.
+    let built_on = release_of(installed) == tag;
     if built_on { installed.to_string() } else { tag.to_string() }
 }
 
@@ -703,6 +705,14 @@ mod tests {
                          "entity_picture", "in_progress", "update_percentage"].contains(&key.as_str()), "{key}");
             }
         }
+    }
+
+    #[test]
+    fn a_release_candidate_is_offered_its_release() {
+        assert_eq!(offered("v0.8.0-rc.2", "v0.8.0"), "v0.8.0");
+        assert_eq!(offered("v0.8.0-3-gabc1234", "v0.8.0"), "v0.8.0-3-gabc1234", "a build on the release");
+        assert_eq!(offered("v0.8.0", "v0.8.0"), "v0.8.0");
+        assert_eq!(offered("v0.7.0", "v0.8.0"), "v0.8.0");
     }
 
     #[test]
