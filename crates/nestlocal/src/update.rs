@@ -325,9 +325,10 @@ pub enum Progress {
 }
 
 /// The entity's state: what the MQTT update entity reads from its state topic.
-pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>, pre_releases: bool) -> Value {
+pub fn state(latest: Option<&Release>, progress: &Progress, failed: Option<&str>) -> Value {
+    // Only the keys Home Assistant's MQTT update takes: one more and it
+    // drops the whole state (the pre-releases switch has its own topic).
     let mut state = serde_json::json!({ "installed_version": VERSION, "title": "Fledgeling" });
-    state["pre_releases"] = pre_releases.into();
     state["in_progress"] = matches!(progress, Progress::Downloading(_) | Progress::Restarting).into();
     if let Progress::Downloading(percent) = progress {
         state["update_percentage"] = (*percent).into();
@@ -616,11 +617,11 @@ mod tests {
 
     #[test]
     fn the_state_offers_a_release_only_once_one_is_known() {
-        let s = state(None, &Progress::Idle, None, false);
+        let s = state(None, &Progress::Idle, None);
         assert_eq!(s["installed_version"], VERSION);
         assert!(s.get("latest_version").is_none());
         let notes = "x".repeat(300);
-        let s = state(Some(&Release { tag: "v99.0.0".into(), url: "u".into(), notes, assets: vec![] }), &Progress::Idle, None, false);
+        let s = state(Some(&Release { tag: "v99.0.0".into(), url: "u".into(), notes, assets: vec![] }), &Progress::Idle, None);
         assert_eq!(s["latest_version"], "v99.0.0");
         assert_eq!(s["release_url"], "u");
         assert_eq!(s["release_summary"].as_str().unwrap().len(), 255);
@@ -638,13 +639,13 @@ mod tests {
 
     #[test]
     fn the_state_shows_an_install_and_a_rollback() {
-        let s = state(None, &Progress::Downloading(40), None, false);
+        let s = state(None, &Progress::Downloading(40), None);
         assert_eq!((s["in_progress"].clone(), s["update_percentage"].clone()), (true.into(), 40.into()));
-        assert_eq!(state(None, &Progress::Restarting, None, false)["in_progress"], true);
-        let s = state(None, &Progress::Idle, Some("v9.9.9-rc.1"), false);
+        assert_eq!(state(None, &Progress::Restarting, None)["in_progress"], true);
+        let s = state(None, &Progress::Idle, Some("v9.9.9-rc.1"));
         assert_eq!(s["in_progress"], false);
         assert!(s["title"].as_str().unwrap().contains("v9.9.9-rc.1 did not start"));
-        assert!(state(None, &Progress::Failed("no room".into()), None, false)["title"].as_str().unwrap().contains("no room"));
+        assert!(state(None, &Progress::Failed("no room".into()), None)["title"].as_str().unwrap().contains("no room"));
     }
 
     #[test]
@@ -666,12 +667,12 @@ mod tests {
     #[test]
     fn a_release_that_was_rolled_back_is_not_offered_again() {
         let r = Release { tag: "v99.0.0-rc.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
-        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"), false);
+        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"));
         assert_eq!(s["latest_version"], s["installed_version"]);
         assert!(s["title"].as_str().unwrap().contains("v99.0.0-rc.1 did not start"));
         // A newer one than that is.
         let r = Release { tag: "v99.0.0-rc.2".into(), ..r };
-        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"), false);
+        let s = state(Some(&r), &Progress::Idle, Some("v99.0.0-rc.1"));
         assert_eq!(s["latest_version"], "v99.0.0-rc.2");
         assert!(s["title"].as_str().unwrap().contains("rolled back"));
     }
@@ -687,10 +688,21 @@ mod tests {
     #[test]
     fn home_assistant_sees_a_development_build_as_its_release_when_one_is_newer() {
         let r = Release { tag: "v99.0.0-rc.1".into(), url: "u".into(), notes: String::new(), assets: vec![] };
-        let s = state(Some(&r), &Progress::Idle, None, false);
+        let s = state(Some(&r), &Progress::Idle, None);
         assert_eq!(s["installed_version"], release_of(VERSION));
         assert_eq!(s["latest_version"], "v99.0.0-rc.1");
-        assert_eq!(state(None, &Progress::Idle, None, false)["title"], "Fledgeling");
+        assert_eq!(state(None, &Progress::Idle, None)["title"], "Fledgeling");
+    }
+
+    #[test]
+    fn the_state_holds_only_what_home_assistant_s_update_takes() {
+        let r = Release { tag: "v99.0.0-rc.1".into(), url: "u".into(), notes: "n".into(), assets: vec![] };
+        for s in [state(Some(&r), &Progress::Downloading(5), None), state(None, &Progress::Failed("x".into()), Some("v1.0.0"))] {
+            for key in s.as_object().unwrap().keys() {
+                assert!(["installed_version", "latest_version", "title", "release_summary", "release_url",
+                         "entity_picture", "in_progress", "update_percentage"].contains(&key.as_str()), "{key}");
+            }
+        }
     }
 
     #[test]

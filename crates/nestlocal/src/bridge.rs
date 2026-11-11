@@ -268,7 +268,7 @@ impl Bridge {
             return Vec::new();
         }
         UPDATE_ENTITIES.iter().map(|(component, key)| format!("{}/{component}/{id}/{key}/config", self.discovery))
-            .chain([format!("{}/update", self.base)]).collect()
+            .chain([format!("{}/update", self.base), format!("{}/update/pre_releases", self.base)]).collect()
     }
 
     /// The stand-in sensor's entities, from a run with -external-temperature,
@@ -287,9 +287,10 @@ impl Bridge {
     pub(crate) fn publish_update(&self) {
         if let Some(updates) = self.updates.get() {
             let state = crate::update::state(updates.latest.lock().unwrap().as_ref(),
-                                             &updates.progress.lock().unwrap(), crate::update::failed().as_deref(),
-                                             updates.pre_releases());
+                                             &updates.progress.lock().unwrap(), crate::update::failed().as_deref());
             self.publish(&format!("{}/update", self.base), true, state.to_string().as_bytes());
+            let on: &[u8] = if updates.pre_releases() { b"ON" } else { b"OFF" };
+            self.publish(&format!("{}/update/pre_releases", self.base), true, on);
         }
     }
 
@@ -894,8 +895,7 @@ impl Bridge {
             });
             // Off for everyone but those trying release candidates.
             add(UPDATE_ENTITIES[2].0, UPDATE_ENTITIES[2].1, "Fledgeling pre-releases", fields!{
-                "state_topic" => format!("{}/update", self.base),
-                "value_template" => "{{ 'ON' if value_json.pre_releases else 'OFF' }}",
+                "state_topic" => format!("{}/update/pre_releases", self.base),
                 "command_topic" => format!("{set}update_pre_releases"),
                 "entity_category" => "config",
                 "icon" => "mdi:flask-outline",
@@ -1345,7 +1345,7 @@ pub mod tests {
         assert_eq!(update["command_topic"], json!("nestlocal/S/set/update"));
         assert_eq!(update["payload_install"], json!("install"));
         let pre: Value = serde_json::from_str(&configs["homeassistant/switch/nestlocal_s/update_pre_releases/config"]).unwrap();
-        assert_eq!((&pre["command_topic"], &pre["state_topic"]), (&json!("nestlocal/S/set/update_pre_releases"), &json!("nestlocal/S/update")));
+        assert_eq!((&pre["command_topic"], &pre["state_topic"]), (&json!("nestlocal/S/set/update_pre_releases"), &json!("nestlocal/S/update/pre_releases")));
     }
 
     #[test]
@@ -1356,6 +1356,7 @@ pub mod tests {
             "homeassistant/button/nestlocal_s/check_update/config".to_string(),
             "homeassistant/switch/nestlocal_s/update_pre_releases/config".to_string(),
             "nestlocal/S/update".to_string(),
+            "nestlocal/S/update/pre_releases".to_string(),
         ]);
         let b = test_bridge();
         assert!(b.updates.set(crate::update::Updates::new("sysmoon14/fledge", None)).is_ok());
