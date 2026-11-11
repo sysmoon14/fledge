@@ -226,6 +226,7 @@ pub enum Action {
 /// (row 0 is the question).
 pub const MODE_PROMPT: &str = "To adjust the temperature,\nchange the thermostat mode";
 pub const PROMPT_ON: usize = 1;
+#[cfg(test)]
 pub const PROMPT_OFF: usize = 2;
 pub const PROMPT_CANCEL: usize = 3;
 
@@ -271,7 +272,7 @@ pub enum Mode {
     ThemePick { fledge: bool },
     /// The thermostat off and its ring turned: change the mode? Over its dial
     /// at `target`, `selected` (PROMPT_ON..=PROMPT_CANCEL) highlighted.
-    ModePrompt { target: f64, selected: usize },
+    Prompt { target: f64, selected: usize },
     /// A notification over `back`, which shows again once it goes.
     Alert { id: String, back: Box<Mode> },
     /// A device's ring of actions over `view`, `selected` chosen.
@@ -310,7 +311,7 @@ impl Mode {
             | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
             | Mode::AlarmModes { slot, .. }
             | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
-            Mode::Thermostat { .. } | Mode::ModePrompt { .. } => Some(Slot::Thermostat),
+            Mode::Thermostat { .. } | Mode::Prompt { .. } => Some(Slot::Thermostat),
             Mode::Menu { view, .. } => view.card_slot(),
             _ => None,
         }
@@ -573,7 +574,7 @@ impl Machine {
         let (deck, card) = (self.deck().len(), self.thermostat_card());
         let fine = |mode: &Mode, cards: &Cards| match mode {
             Mode::Chooser(index) => *index < deck,
-            Mode::Thermostat { .. } | Mode::ModePrompt { .. } => card,
+            Mode::Thermostat { .. } | Mode::Prompt { .. } => card,
             Mode::LightList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(_))),
             Mode::ClimateSet { slot, .. } | Mode::ClimateList { slot, .. } => {
                 matches!(cards.cards.get(*slot), Some(Card::Climate(_)))
@@ -871,7 +872,7 @@ impl Machine {
                         }
                         self.turn = 0;
                         out.push(Effect::Click);
-                        self.mode = Mode::ModePrompt { target, selected: PROMPT_ON };
+                        self.mode = Mode::Prompt { target, selected: PROMPT_ON };
                         self.dirty = true;
                         self.sync(out);
                         return;
@@ -888,7 +889,7 @@ impl Machine {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
                     Mode::Menu { .. } => MENU_STEP,
                     Mode::LightList { .. } | Mode::OptionList { .. } | Mode::ClimateList { .. } | Mode::Members { .. }
-                    | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
+                    | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
                     | Mode::AlarmPad { .. } | Mode::AlarmModes { .. } => ROW_STEP,
                     Mode::ClimateSet { .. } | Mode::Thermostat { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
@@ -1149,9 +1150,9 @@ impl Machine {
                 self.mode = Mode::Menu { view, actions, selected };
             }
             Mode::Thermostat { .. } => {}
-            Mode::ModePrompt { target, selected } => {
+            Mode::Prompt { target, selected } => {
                 let selected = (selected as i32 + steps).clamp(PROMPT_ON as i32, PROMPT_CANCEL as i32) as usize;
-                self.mode = Mode::ModePrompt { target, selected };
+                self.mode = Mode::Prompt { target, selected };
             }
             Mode::Settings { selected } => {
                 let rows = self.settings().len() as i32;
@@ -1387,7 +1388,7 @@ impl Machine {
                 actions.push(Action::NestDial);
                 self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
             }
-            Mode::ModePrompt { target, selected } => {
+            Mode::Prompt { target, selected } => {
                 if selected == PROMPT_ON {
                     if let Some(nest) = &mut self.nest {
                         let mode = nest.on_mode();
@@ -1745,7 +1746,7 @@ impl Machine {
         }
         let back = match self.mode.clone() {
             // Held: as Cancel.
-            Mode::ModePrompt { target, .. } => {
+            Mode::Prompt { target, .. } => {
                 out.push(Effect::Click);
                 self.mode = Mode::Thermostat { target };
                 self.dirty = true;
@@ -3453,14 +3454,14 @@ mod tests {
         rig.turn(PROMPT_TURN - 1);
         assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "nor what was turned before a press");
         assert!(sent(&rig.turn(1)).is_empty(), "nothing set");
-        assert_eq!(rig.machine.mode, Mode::ModePrompt { target: 20.0, selected: PROMPT_ON }, "Heat, Off, Cancel; Heat chosen");
+        assert_eq!(rig.machine.mode, Mode::Prompt { target: 20.0, selected: PROMPT_ON }, "Heat, Off, Cancel; Heat chosen");
         rig.rows(5);
-        assert_eq!(rig.machine.mode, Mode::ModePrompt { target: 20.0, selected: PROMPT_CANCEL }, "no further than Cancel");
+        assert_eq!(rig.machine.mode, Mode::Prompt { target: 20.0, selected: PROMPT_CANCEL }, "no further than Cancel");
         assert!(sent(&rig.press()).is_empty(), "Cancel: nothing sent");
         assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "back on its dial, still off");
         rig.turn(PROMPT_TURN);
         rig.rows(1);
-        assert_eq!(rig.machine.mode, Mode::ModePrompt { target: 20.0, selected: PROMPT_OFF });
+        assert_eq!(rig.machine.mode, Mode::Prompt { target: 20.0, selected: PROMPT_OFF });
         assert!(sent(&rig.press()).is_empty(), "Off: left off");
         assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 });
         rig.turn(PROMPT_TURN);
@@ -3468,7 +3469,7 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "held: as Cancel");
         rig.turn(PROMPT_TURN);
         rig.rows(-3);
-        assert_eq!(rig.machine.mode, Mode::ModePrompt { target: 20.0, selected: PROMPT_ON }, "the question isn't a row");
+        assert_eq!(rig.machine.mode, Mode::Prompt { target: 20.0, selected: PROMPT_ON }, "the question isn't a row");
         assert_eq!(sent(&rig.press()), vec![("mode".into(), "heat".into())], "Heat: on");
         assert_eq!(rig.machine.mode, Mode::Thermostat { target: 20.0 }, "on its dial to set");
         rig.turn(CLIMATE_STEP * 2);

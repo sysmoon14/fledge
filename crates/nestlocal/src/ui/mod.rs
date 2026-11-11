@@ -1861,7 +1861,7 @@ impl Runtime {
                 target: machine::on_step(*target, machine.nest.as_ref()?.card.step),
                 setting: machine.set_at.is_some_and(|at| at.elapsed() < machine::SET_SHOWN), shown: None,
             },
-            Mode::ModePrompt { selected, .. } => Screen::ModePrompt { nest: machine.nest.as_ref()?, selected: *selected },
+            Mode::Prompt { selected, .. } => Screen::ModePrompt { nest: machine.nest.as_ref()?, selected: *selected },
             Mode::Settings { selected } => Screen::Settings { rows: machine.settings(), nest: machine.nest.as_ref(),
                                                               nest_dial: machine.nest_dial, selected: *selected },
             Mode::SettingSet { setting, value } => Screen::SettingSet { setting: *setting, nest: machine.nest.as_ref()?,
@@ -2201,7 +2201,7 @@ fn depth(mode: &Mode, machine: &Machine) -> u8 {
             Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
             _ => 1,
         },
-        Mode::Members { .. } | Mode::ClimateList { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::ModePrompt { .. }
+        Mode::Members { .. } | Mode::ClimateList { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
         | Mode::AlarmPad { .. } | Mode::AlarmOpen { .. } | Mode::AlarmModes { .. } => 2,
         Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => {
             depth(&Mode::LightDim { slot: *slot, light: *light, on: true, value: 0 }, machine) + 1
@@ -2487,7 +2487,7 @@ fn mode_state(mode: &Mode) {
     let name = match mode {
         Mode::Chooser(index) => format!("Chooser {index}"),
         Mode::Settings { selected } => format!("Settings {selected}"),
-        Mode::ModePrompt { selected, .. } => format!("ModePrompt {selected}"),
+        Mode::Prompt { selected, .. } => format!("ModePrompt {selected}"),
         Mode::Menu { view, .. } => format!("Menu {}", format!("{view:?}").split([' ', '{', '(']).next().unwrap_or("")),
         other => format!("{other:?}").split([' ', '{', '(']).next().unwrap_or("").to_owned(),
     };

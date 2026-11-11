@@ -35,7 +35,7 @@ fn sets(token: &str, flag: &str) -> Option<bool> {
 /// Whether the options turn a boolean `flag` on: its last mention wins, as
 /// Go's flag package (and flags.rs) read them.
 pub fn has(text: &str, flag: &str) -> bool {
-    text.split_whitespace().filter_map(|t| sets(t, flag)).last().unwrap_or(false)
+    text.split_whitespace().filter_map(|t| sets(t, flag)).next_back().unwrap_or(false)
 }
 
 /// The options with `flag` on or off, everything else as it was.

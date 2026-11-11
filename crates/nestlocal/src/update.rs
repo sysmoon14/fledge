@@ -128,6 +128,7 @@ fn version_key(version: &str) -> Option<(u32, u32, u32, u8, u32, u32)> {
 const PRE_RELEASES: [&str; 3] = ["alpha", "beta", "rc"];
 
 /// Whether a tag is a pre-release (vX.Y.Z-rc.N and the like).
+#[cfg(test)]
 pub fn pre_release(tag: &str) -> bool {
     version_key(tag).is_some_and(|k| k.3 == 0)
 }
