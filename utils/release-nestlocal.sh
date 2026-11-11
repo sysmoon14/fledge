@@ -75,14 +75,22 @@ git fetch -q origin "$branch" || fail "cannot fetch origin $branch"
 [ "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" ] || fail "HEAD is not origin/$branch: push it first"
 repo=$(git remote get-url origin | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')
 case $repo in */*) ;; *) fail "origin is not a GitHub repository: $(git remote get-url origin)" ;; esac
-for existing in $(git tag --points-at HEAD); do
-    case $existing in v[0-9]*) fail "this commit is already released as $existing" ;; esac
-done
-previous=$(git describe --tags --abbrev=0 2>/dev/null) || fail "no release tag below this commit"
 if [ -z "$tag" ]; then
     latest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
     [ -n "$latest" ] || fail "no vX.Y.Z tag to follow: give --tag"
     tag=$(echo "$latest" | awk -F. '{ printf "%s.%s.%d", $1, $2, $3 + 1 }')
+fi
+pre() { case $1 in *-rc.*|*-beta.*|*-alpha.*) return 0 ;; *) return 1 ;; esac; }
+# A release candidate's commit may be released again as the release itself.
+for existing in $(git tag --points-at HEAD); do
+    case $existing in v[0-9]*) pre "$existing" && ! pre "$tag" || fail "this commit is already released as $existing" ;; esac
+done
+if pre "$tag"; then
+    previous=$(git describe --tags --abbrev=0 2>/dev/null) || fail "no release tag below this commit"
+else
+    # A release lists what changed since the last release, not its candidates.
+    previous=$(git tag --merged HEAD -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+    [ -n "$previous" ] || fail "no release tag below this commit"
 fi
 git rev-parse -q --verify "refs/tags/$tag" > /dev/null && fail "tag $tag exists"
 git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null 2>&1 && fail "origin has tag $tag"
