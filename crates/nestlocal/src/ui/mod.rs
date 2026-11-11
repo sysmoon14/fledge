@@ -95,6 +95,8 @@ pub fn sensed(sensor: crate::motion::Sensor) {
 pub struct Ui {
     /// Home Assistant's cards and a count of their changes.
     cards: Mutex<(u64, Cards)>,
+    /// Each light's colour as last reported, for while it's off (Cards::keep_colours).
+    colours: Mutex<HashMap<String, [u8; 3]>>,
     /// Media players' album art, by entity id.
     art: Mutex<HashMap<String, Arc<Art>>>,
     /// Home Assistant's: keep the display lit (<base>/set/screen_on), and
@@ -110,7 +112,8 @@ pub struct Ui {
 impl Ui {
     /// Takes Home Assistant's cards (<base>/set/ui).
     pub fn configure(&self, payload: &[u8]) -> Result<(), String> {
-        let cards = Cards::parse(payload)?;
+        let mut cards = Cards::parse(payload)?;
+        cards.keep_colours(&mut self.colours.lock().unwrap());
         let mut held = self.cards.lock().unwrap();
         if held.1 != cards {
             held.0 += 1;

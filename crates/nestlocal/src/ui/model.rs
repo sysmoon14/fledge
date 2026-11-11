@@ -759,6 +759,26 @@ impl Cards {
     }
 }
 
+impl Cards {
+    /// Lights Home Assistant reports no colour for (an off one: it only
+    /// knows rgb_color while on) keep the colour they last had, so the ring
+    /// doesn't change colour as a light turns on or off. `last` holds each
+    /// light's, by entity.
+    pub fn keep_colours(&mut self, last: &mut std::collections::HashMap<String, [u8; 3]>) {
+        for card in &mut self.cards {
+            let Card::Lights(card) = card else { continue };
+            for light in &mut card.lights {
+                match light.rgb {
+                    Some(rgb) => {
+                        last.insert(light.id.clone(), rgb);
+                    }
+                    None => light.rgb = last.get(&light.id).copied(),
+                }
+            }
+        }
+    }
+}
+
 impl Light {
     /// The colour the light shows in: its own while on, Home Assistant's
     /// rgb_color (which it gives colour-temperature lights too), lifted so a
@@ -916,6 +936,19 @@ mod tests {
         assert_eq!(light.colour(), [255, 249, 253]);
         light.rgb = None;
         assert_eq!(light.colour(), WARM);
+        // Off, it keeps the colour it last had on.
+        let lights = |on: bool, rgb: &str| Cards::parse(format!(r#"{{"cards":[{{"kind":"lights","name":"R","icon":"","lights":[
+            {{"id":"light.a","name":"A","on":{on},"rgb":{rgb}}}]}}]}}"#).as_bytes()).unwrap();
+        let colour = |cards: &Cards| match &cards.cards[0] { Card::Lights(c) => c.lights[0].colour(), _ => unreachable!() };
+        let mut last = std::collections::HashMap::new();
+        let mut on = lights(true, "[200,220,255]");
+        on.keep_colours(&mut last);
+        let mut off = lights(false, "null");
+        off.keep_colours(&mut last);
+        assert_eq!(colour(&off), [200, 220, 255], "not warm white while it's off");
+        let mut other = lights(false, "null");
+        other.keep_colours(&mut std::collections::HashMap::new());
+        assert_eq!(colour(&other), WARM, "never seen on: warm white");
     }
 
     #[test]
