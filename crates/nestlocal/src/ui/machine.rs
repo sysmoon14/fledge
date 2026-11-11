@@ -656,7 +656,8 @@ impl Machine {
     /// keeping it lit): at rest, and under the glance, which lasts as long
     /// as nlclient keeps it lit for whoever's in the room.
     pub fn resting(&self) -> bool {
-        self.holds_screen() && self.turn == 0 && matches!(self.mode, Mode::Home | Mode::Glance)
+        // A glance being tried is kept lit for as long as it's tried.
+        self.holds_screen() && self.turn == 0 && matches!(self.mode, Mode::Home | Mode::Glance) && self.trial.is_none()
     }
 
     /// The thermostat saw someone: across the room (its PIR), or close (its
@@ -3212,11 +3213,13 @@ mod tests {
         assert!(out.contains(&Effect::WakeDisplay), "lit to show it");
         rig.lit = true;
         assert_eq!((rig.machine.mode.clone(), rig.machine.glance()), (Mode::Glance, Some(&tried)));
+        assert!(!rig.machine.resting(), "kept lit while it's tried, whoever is or isn't near");
         rig.wait(TRY_SHOWN - Duration::from_secs(1));
         assert_eq!(rig.machine.glance(), Some(&tried), "still trying");
         rig.wait(Duration::from_secs(2));
         assert_eq!(rig.machine.mode, Mode::Glance);
         assert_eq!(rig.machine.glance().map(|g| g.layout), Some(super::super::model::Layout::Clock), "the saved one back");
+        assert!(rig.machine.resting(), "and nlclient's own timing again");
         rig.machine.try_glance(Some(tried), rig.now, true, &mut out);
         rig.turn(CARD_STEP);
         rig.tick();
