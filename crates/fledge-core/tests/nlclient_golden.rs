@@ -52,6 +52,12 @@ fn externals(golden: &Value) -> BTreeMap<String, u32> {
     externals.insert("native_ui_change".into(), reporter);
     let layout: BTreeMap<String, u32> = serde_json::from_value(golden["discovery"]["layout"].clone()).unwrap();
     externals.extend(layout.into_iter().map(|(k, v)| (format!("layout_{k}"), v)));
+    // As the builder links it: the hand-over's natives, 0 where it has none.
+    let handover = nlclient::discovery::handover(&externals);
+    for key in nlclient::discovery::handover_keys() {
+        externals.entry(key.into()).or_insert(0);
+    }
+    externals.insert("layout_HANDOVER".into(), handover as u32);
     externals
 }
 /// Goldens recorded with every import this screen links against. Those
@@ -61,8 +67,11 @@ fn externals(golden: &Value) -> BTreeMap<String, u32> {
 fn current_goldens(object: &[u8]) -> Vec<Value> {
     let (current, stale): (Vec<Value>, Vec<Value>) = goldens().into_iter().partition(|golden| {
         let address = golden["patch"]["payload_address"].as_u64().unwrap() as u32;
-        !matches!(linker::link(object, address, &externals(golden)),
-                  Err(e) if e.to_string().contains("unresolved payload symbol"))
+        // One recorded before the hand-over (its payload has no keeper_start)
+        // would link, as a build without it, to another payload.
+        golden["payload"]["symbols"].get("keeper_start").is_some()
+            && !matches!(linker::link(object, address, &externals(golden)),
+                         Err(e) if e.to_string().contains("unresolved payload symbol"))
     });
     for golden in &stale {
         eprintln!("Recorded before this screen's imports: payload {}", golden["payload"]["sha256"]);
@@ -397,6 +406,7 @@ fn unsupported_relocations_and_branch_veneers_are_refused() {
     let layout: BTreeMap<String, u32> =
         serde_json::from_value(golden["discovery"]["layout"].clone()).unwrap();
     externals.extend(layout.into_iter().map(|(k, v)| (format!("layout_{k}"), v)));
+    externals.entry("layout_HANDOVER".into()).or_insert(1);
     let mut changed = object.clone();
     let reloc = sections(&object)
         .into_iter()

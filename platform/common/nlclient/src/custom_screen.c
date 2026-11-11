@@ -34,6 +34,11 @@ extern const u8 layout_PRIMARY_SIZE __attribute__((visibility("hidden")));
 #define PRIMARY_SIZE LAYOUT(PRIMARY_SIZE)
 extern const u8 layout_RENAME_SYSCALL __attribute__((visibility("hidden")));
 #define RENAME_SYSCALL LAYOUT(RENAME_SYSCALL)
+/* 1: nlclient presents through eglSwapBuffers and can start a thread, so
+ * the screen hand-over runs. 0 (the gen 2): neither its natives nor its
+ * thread are used. */
+extern const u8 layout_HANDOVER __attribute__((visibility("hidden")));
+#define HANDOVER LAYOUT(HANDOVER)
 extern const u8 layout_SCREEN_SECOND_VPTR __attribute__((visibility("hidden")));
 #define SCREEN_SECOND_VPTR LAYOUT(SCREEN_SECOND_VPTR)
 extern const u8 layout_SCREEN_THIRD_VPTR __attribute__((visibility("hidden")));
@@ -391,6 +396,7 @@ static int read_pid(const char *path) {
 /* Once per nlclient: the payload has no writable data, so the mark that the
  * thread runs is this process's pid in KEEPER. */
 static void keeper_start(void *bucket) {
+    if (!HANDOVER) return;
     int pid = native_getpid();
     if (read_pid(KEEPER) == pid) return;
     char text[12];

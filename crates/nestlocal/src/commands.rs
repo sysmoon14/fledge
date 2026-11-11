@@ -292,7 +292,8 @@ impl Bridge {
     /// screen stays dark, where asked, with its backlight off
     /// (ui::Machine::backlight_off). Put back if changed on the Nest.
     pub fn keep_farsight(&self) {
-        if !self.ui.has_presence() {
+        // Only where Fledge draws the screen (ui::start: the gen 3's).
+        if !self.ui.has_presence() || crate::device::current().display != 480 {
             return;
         }
         let key = format!("device.{}", self.serial);

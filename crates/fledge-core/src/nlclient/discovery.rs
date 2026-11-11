@@ -30,6 +30,16 @@ const HANDOVER_IMPORTS: [(&str, &str); 8] = [
     ("native_usleep", "usleep"),
     ("native_getpid", "getpid"),
 ];
+/// Whether nlclient has all the screen hand-over needs (HANDOVER_IMPORTS).
+pub fn handover(api: &BTreeMap<String, u32>) -> bool {
+    HANDOVER_IMPORTS.iter().all(|(key, _)| api.contains_key(*key))
+}
+
+/// The hand-over's natives, for linking a build without them: never called.
+pub fn handover_keys() -> impl Iterator<Item = &'static str> {
+    HANDOVER_IMPORTS.iter().map(|(key, _)| *key)
+}
+
 /// The one call that presents nlclient's frames: a BL to eglSwapBuffers's
 /// PLT stub. More than one, or none, and the hand-over can't be made whole.
 fn swap_call(elf: &Elf, stub: u32) -> Result<u32> {
@@ -361,10 +371,14 @@ pub fn survey(data: &[u8]) -> Result<(Discovery, Option<String>)> {
         api.insert("native_rename".into(), rename);
     }
     // The screen hand-over: nlclient presents each frame through one call
-    // of eglSwapBuffers, which the payload wraps (custom_swap).
+    // of eglSwapBuffers, which the payload wraps (custom_swap), and a thread
+    // of its own keeps the display lit. The gen 2's nlclient draws straight
+    // to the framebuffer, with no EGL and no pthread_create: it gets the
+    // rest of the screen, without the hand-over (handover()).
     for (key, name) in HANDOVER_IMPORTS {
-        api.insert(key.to_owned(), *imports.get(name)
-            .ok_or_else(|| crate::Error::Device(format!("missing hand-over import {name}")))?);
+        if let Some(&address) = imports.get(name) {
+            api.insert(key.to_owned(), address);
+        }
     }
     let table = registry(&elf)?;
     require(
@@ -633,7 +647,9 @@ pub fn survey(data: &[u8]) -> Result<(Discovery, Option<String>)> {
     api.insert("native_scroll_target".into(), select[1]);
     layout.insert("GLOBALS_TIMER_OFFSET".into(), timer(&elf, &arm, &imports)?);
     downlink(&elf, &arm, &imports, &mut api, &mut layout, &mut anchors)?;
-    anchors.insert("swap_call_slot".into(), swap_call(&elf, api["native_egl_swap"])?);
+    if handover(&api) {
+        anchors.insert("swap_call_slot".into(), swap_call(&elf, api["native_egl_swap"])?);
+    }
     let ui_change = ui_change(&elf, &arm, &imports).ok();
     require(
         layout["LAYER_VTABLE_SIZE"].max(layout["SCREEN_VTABLE_SIZE"]) <= 0x400,

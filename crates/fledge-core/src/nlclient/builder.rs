@@ -60,6 +60,13 @@ pub fn build(source: &[u8], object: &[u8]) -> Result<Built> {
     // Without nlclient's display report found, custom_ui_change is never
     // called: nothing is routed through it.
     externals.insert("native_ui_change".into(), discovery.ui_change.as_ref().map_or(0, |ui| ui.reporter));
+    // Without the screen hand-over (the gen 2), its natives are never called
+    // and its thread never starts (layout_HANDOVER 0).
+    let handover = super::discovery::handover(&discovery.native_api);
+    for key in super::discovery::handover_keys() {
+        externals.entry(key.into()).or_insert(0);
+    }
+    externals.insert("layout_HANDOVER".into(), handover as u32);
     externals.extend(
         discovery
             .layout
@@ -100,14 +107,16 @@ pub fn build(source: &[u8], object: &[u8]) -> Result<Built> {
     }
     // nlclient's one eglSwapBuffers call goes through custom_swap, which
     // skips presenting while unfr0zen's UI owns the display.
-    let swap_call = discovery.anchors["swap_call_slot"];
-    let swap_offset = elf.offset(swap_call)?;
-    let delta = linked.symbols["custom_swap"] as i64 - swap_call as i64 - 8;
-    if delta % 4 != 0 || !(-(1 << 25)..(1 << 25)).contains(&delta) {
-        return device("ARM swap call out of range or unaligned");
+    if handover {
+        let swap_call = discovery.anchors["swap_call_slot"];
+        let swap_offset = elf.offset(swap_call)?;
+        let delta = linked.symbols["custom_swap"] as i64 - swap_call as i64 - 8;
+        if delta % 4 != 0 || !(-(1 << 25)..(1 << 25)).contains(&delta) {
+            return device("ARM swap call out of range or unaligned");
+        }
+        let call = 0xeb000000 | ((delta >> 2) as u32 & 0xffffff);
+        output[swap_offset..swap_offset + 4].copy_from_slice(&call.to_le_bytes());
     }
-    let call = 0xeb000000 | ((delta >> 2) as u32 & 0xffffff);
-    output[swap_offset..swap_offset + 4].copy_from_slice(&call.to_le_bytes());
     // Each call of nlclient's display report (BL, or B as a tail call) goes
     // through custom_ui_change, which records what shows for nestlocal.
     if let Some(ui) = &discovery.ui_change {
@@ -155,7 +164,7 @@ pub fn build(source: &[u8], object: &[u8]) -> Result<Built> {
         "payload_address":address,"payload_offset":offset,"payload_size":linked.bytes.len(),"entry":linked.entry,
         "symbols":linked.symbols,"native_api":discovery.native_api,"discovery":discovery,
         "image":"/nestlabs/share/images/G_unfr0zen_192px.png","runtime_directory":"/var/run/unfr0zen","wheel_trace":false,
-        "swap_call":swap_call,"ui_change":discovery.ui_change,"settings_menu":{"address":menu_address,"file_offset":menu_offset,"original":menu_names,"unfr0zen_index":1}
+        "swap_call":discovery.anchors.get("swap_call_slot"),"ui_change":discovery.ui_change,"settings_menu":{"address":menu_address,"file_offset":menu_offset,"original":menu_names,"unfr0zen_index":1}
     });
     let journal = Patch::journal(source, &output)?;
     if Patch::parse(&journal)?.apply(source, false)? != output {
