@@ -20,6 +20,10 @@ pub struct Cards {
     /// the default, first; past the end, last before settings).
     #[serde(default)]
     thermostat: Option<usize>,
+    /// Whether the thermostat has a card at all (protocol 10); with false,
+    /// Home Assistant controls the heating and the Nest shows only its cards.
+    #[serde(default)]
+    show_thermostat: Option<bool>,
     /// Shown as the display lights by itself (someone near), if Home
     /// Assistant asks for it: the time, the weather, what's on.
     #[serde(default)]
@@ -108,6 +112,11 @@ impl Cards {
     /// Whether turning down past a dimmer's lowest turns the light off.
     pub fn dim_off(&self) -> bool {
         self.dim_off.unwrap_or(true)
+    }
+
+    /// Whether the thermostat has a card among the others.
+    pub fn show_thermostat(&self) -> bool {
+        self.show_thermostat.unwrap_or(true)
     }
 
     /// The thermostat's place among the cards.
@@ -535,6 +544,9 @@ pub struct Nest {
     pub update: Option<String>,
     /// When its schedule next changes the target ("HH:MM", its own clock).
     pub next_change: Option<String>,
+    /// Whether it acts as a thermostat; not, its heating is off and it has
+    /// no card or settings of its own (role.rs).
+    pub acting: bool,
 }
 
 impl Nest {
@@ -587,6 +599,7 @@ impl Nest {
             version: text("version"),
             update: s.get("update").and_then(Value::as_str).map(str::to_owned),
             next_change: s.get("next_change").and_then(Value::as_str).map(str::to_owned),
+            acting: s.get("acting").and_then(Value::as_bool).unwrap_or(true),
         }
     }
 

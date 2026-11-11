@@ -23,6 +23,7 @@ mod mqtt;
 mod mqtttls;
 mod nlsettings;
 mod occupancy;
+mod role;
 mod schedule;
 mod sensor;
 mod store;
@@ -158,6 +159,13 @@ fn prepare_settings(config: &flags::Config) {
         Ok(true) => logf!("nestlocal: seeded structure_id in {path}"),
         Ok(false) => {}
         Err(e) => fatal!("{e}"),
+    }
+    use std::path::Path;
+    match heatlink::prepare(Path::new(path), Path::new(heatlink::CHOICE), Path::new(heatlink::RCS), Path::new(heatlink::MARKER)) {
+        Ok(heatlink::Prepared::Nothing) => {}
+        Ok(heatlink::Prepared::Flashed) => logf!("nestlocal: flashed since Home Assistant chose {}: the flasher's choice stands", heatlink::KEY),
+        Ok(heatlink::Prepared::Applied(on)) => logf!("nestlocal: {} {} in {path}, as Home Assistant chose", heatlink::KEY, if on { "on" } else { "off" }),
+        Err(e) => logf!("nestlocal: {}: {e}", heatlink::KEY),
     }
     let identity = std::path::Path::new(&config.external_temperature_store);
     if !config.external_temperature {

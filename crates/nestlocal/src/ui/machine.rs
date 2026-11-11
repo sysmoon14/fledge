@@ -467,18 +467,38 @@ impl Machine {
         !self.nest_dial && self.nest.is_some()
     }
 
+    /// Whether the thermostat has a card: it acts as one, and Home
+    /// Assistant hasn't hidden it.
+    pub fn thermostat_card(&self) -> bool {
+        self.cards.show_thermostat() && self.nest.as_ref().is_none_or(|n| n.acting)
+    }
+
+    /// Whether Nest's own dial stands in for the thermostat's card: only
+    /// while it has one.
+    fn nest_dial_shown(&self) -> bool {
+        self.nest_dial && self.thermostat_card()
+    }
+
     /// The thermostat's state, as nestlocal has it now.
     pub fn set_nest(&mut self, nest: Nest) {
         if self.nest.as_ref() != Some(&nest) {
             self.nest = Some(nest);
             self.dirty = true;
+            // No longer a thermostat: off its screens, to rest.
+            if !self.thermostat_card() && self.mode.card_slot() == Some(Slot::Thermostat) {
+                self.mode = Mode::Home;
+            }
         }
     }
 
     /// The rows of Settings, for what this thermostat has.
     pub fn settings(&self) -> Vec<Setting> {
-        let mut rows = vec![Setting::EcoLow];
         let nest = self.nest.as_ref();
+        if nest.is_some_and(|n| !n.acting) {
+            // A panel on the wall: nothing of heating.
+            return vec![Setting::Theme, Setting::Scale, Setting::Software, Setting::More, Setting::Done];
+        }
+        let mut rows = vec![Setting::EcoLow];
         if nest.is_some_and(|n| n.can_cool) {
             rows.push(Setting::EcoHigh);
         }
@@ -489,7 +509,12 @@ impl Machine {
         if nest.is_some_and(|n| n.hot_water) {
             rows.push(Setting::HotWaterSchedule);
         }
-        rows.extend([Setting::Theme, Setting::Scale, Setting::NestDial, Setting::Software, Setting::More, Setting::Done]);
+        rows.push(Setting::Theme);
+        rows.push(Setting::Scale);
+        if self.thermostat_card() {
+            rows.push(Setting::NestDial);
+        }
+        rows.extend([Setting::Software, Setting::More, Setting::Done]);
         rows
     }
 
@@ -497,7 +522,7 @@ impl Machine {
     fn thermostat(&mut self) -> Mode {
         self.dial_offset = 0.0;
         match &self.nest {
-            Some(nest) if !self.nest_dial => {
+            Some(nest) if !self.nest_dial_shown() => {
                 let card = &nest.card;
                 Mode::Thermostat { target: card.target.unwrap_or((card.min + card.max) / 2.0) }
             }
@@ -520,7 +545,9 @@ impl Machine {
     pub fn deck(&self) -> Vec<Slot> {
         let count = self.cards.cards.len();
         let mut deck: Vec<Slot> = (0..count).map(Slot::Card).collect();
-        deck.insert(self.cards.thermostat().min(count), Slot::Thermostat);
+        if self.thermostat_card() {
+            deck.insert(self.cards.thermostat().min(count), Slot::Thermostat);
+        }
         deck.push(Slot::Settings);
         deck
     }
@@ -543,9 +570,10 @@ impl Machine {
             self.apply_sent(&command);
         }
         self.alarms_changed(out);
-        let count = self.cards.cards.len();
+        let (deck, card) = (self.deck().len(), self.thermostat_card());
         let fine = |mode: &Mode, cards: &Cards| match mode {
-            Mode::Chooser(index) => *index < count + 2,
+            Mode::Chooser(index) => *index < deck,
+            Mode::Thermostat { .. } | Mode::ModePrompt { .. } => card,
             Mode::LightList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(_))),
             Mode::ClimateSet { slot, .. } | Mode::ClimateList { slot, .. } => {
                 matches!(cards.cards.get(*slot), Some(Card::Climate(_)))
@@ -608,7 +636,7 @@ impl Machine {
     /// handing it back to nlclient's dial: unless Nest's own dial is the
     /// thermostat, and only with a screen patch that lets it go dark.
     pub fn holds_screen(&self) -> bool {
-        self.rests && !self.nest_dial
+        self.rests && !self.nest_dial_shown()
     }
 
     /// Whether nlclient's own timing puts the display out (the UI not
@@ -907,9 +935,13 @@ impl Machine {
                 self.hint = true;
                 self.go(Mode::Chooser(self.place(Slot::Thermostat)), out);
             }
-            Wake::Thermostat => {
+            Wake::Thermostat if self.thermostat_card() => {
                 let mode = self.thermostat();
                 self.go(mode, out);
+            }
+            Wake::Thermostat => {
+                self.hint = true;
+                self.go(Mode::Chooser(0), out);
             }
             // A scene or a camera isn't opened: that would run it.
             Wake::Card(slot) if matches!(self.card(slot), Some(Card::Action(_) | Card::Camera(_) | Card::Alarm(_))) => {
@@ -3741,5 +3773,31 @@ mod tests {
         let mut out = vec![];
         rig.machine.set_cards(cards(), &mut out);
         assert_eq!(rig.machine.mode, Mode::Chooser(2), "a card still there stays");
+    }
+
+    #[test]
+    fn home_assistant_can_hide_the_thermostat_s_card() {
+        let two = r#"{"kind":"action","id":"scene.a","name":"A"},{"kind":"action","id":"scene.b","name":"B"}"#;
+        let mut rig = deck_of(format!(r#"{{"cards":[{two}],"show_thermostat":false,"wake":"thermostat"}}"#).as_bytes());
+        rig.machine.set_nest(nest(serde_json::json!({})));
+        assert_eq!(rig.machine.deck(), vec![Slot::Card(0), Slot::Card(1), Slot::Settings]);
+        assert_eq!(rig.machine.mode, Mode::Chooser(0), "waking to the thermostat: the first card instead");
+        assert!(!rig.machine.settings().contains(&Setting::NestDial), "no card for Nest's dial to stand in for");
+        assert!(rig.machine.settings().contains(&Setting::Learning), "still a thermostat: its settings stay");
+    }
+
+    #[test]
+    fn not_a_thermostat_has_no_card_and_no_heating_settings() {
+        let mut rig = nest_rig();
+        rig.press();
+        assert!(matches!(rig.machine.mode, Mode::Thermostat { .. }));
+        rig.machine.set_nest(nest(serde_json::json!({"acting": false, "mode": "off"})));
+        assert_eq!(rig.machine.mode, Mode::Home, "its screen goes with its role");
+        assert!(!rig.machine.deck().contains(&Slot::Thermostat));
+        assert_eq!(rig.machine.settings(), vec![Setting::Theme, Setting::Scale, Setting::Software, Setting::More, Setting::Done]);
+        rig.machine.nest_dial = true;
+        assert!(rig.machine.holds_screen() == rig.machine.rests, "Nest's dial chosen once doesn't come back without a card");
+        rig.machine.set_nest(nest(serde_json::json!({})));
+        assert!(rig.machine.deck().contains(&Slot::Thermostat), "a thermostat again: its card back");
     }
 }

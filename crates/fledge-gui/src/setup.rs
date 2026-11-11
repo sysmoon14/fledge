@@ -673,7 +673,7 @@ pub(crate) fn option_card(ui: &mut egui::Ui, on: &mut bool, enabled: bool, title
 
 /// One of the review step's two backup answers: a card with a radio mark,
 /// outlined in orange when chosen.
-fn choice_card(ui: &mut egui::Ui, chosen: bool, title: &str, about: &str, badge: Option<&str>) -> egui::Response {
+pub(crate) fn choice_card(ui: &mut egui::Ui, chosen: bool, title: &str, about: &str, badge: Option<&str>) -> egui::Response {
     let fill = if chosen { egui::Color32::from_rgb(0x1e, 0x19, 0x13) } else { CARD };
     let stroke = egui::Stroke::new(2.0, if chosen { ACCENT } else { egui::Color32::TRANSPARENT });
     let inner = egui::Frame::new().fill(fill).stroke(stroke).corner_radius(14).inner_margin(egui::Margin::symmetric(16, 14))

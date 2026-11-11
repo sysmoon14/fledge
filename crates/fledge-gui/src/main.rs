@@ -18,7 +18,7 @@ mod nandmap;
 mod patch;
 mod run;
 mod setup;
-pub(crate) use setup::{card, code_line, field, group, inset, muted_line, numbered, option_card, page_heading, pill_button, small_accent_button,
+pub(crate) use setup::{card, choice_card, code_line, field, group, inset, muted_line, numbered, option_card, page_heading, pill_button, small_accent_button,
                        small_button, switch};
 #[cfg(test)]
 mod snapshot;

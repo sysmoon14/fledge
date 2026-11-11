@@ -476,8 +476,8 @@ pub struct Options {
     /// nestlocal joins a Zigbee network through the unit's radio, which it
     /// then has: wpantund stays down.
     pub zigbee: bool,
-    /// Run a Heat Link model as heating a Works With Nest boiler through W1,
-    /// for a radio nestlocal holds.
+    /// Run a Heat Link model as heating a Works With Nest boiler through W1:
+    /// with no Heat Link, or a radio nestlocal holds.
     pub wwn_boiler: bool,
     /// Doom's files: the UNFR0ZEN screen offers it and nestlocal launches it.
     pub doom: Option<Overlay>,

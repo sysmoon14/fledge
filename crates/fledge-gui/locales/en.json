@@ -148,7 +148,6 @@
   "patch.technique.official_loader": "Official loader",
   "patch.technique.spray_stack": "CVE-2017-7936",
   "patch.wwn_boiler": "Works With Nest boiler",
-  "patch.wwn_boiler_hint": "With Zigbee or Thread on a Heat Link model (Display-3.x, Display-5.x): heat through W1 as a Works With Nest boiler. Without it, firmware 6.4-8 can stop on error H71/H74 with no Heat Link",
   "patch.zigbee_disabled_hint": "Turn off Thread support first: Zigbee and Thread cannot share the radio",
   "run.disabled_busy": "Finish the current operation, close any file picker, and disconnect any open console first",
   "run.done": "Done",
@@ -279,7 +278,6 @@
   "setup.view_log": "View the log",
   "setup.waiting_for_unit": "Looking for your thermostat…",
   "setup.whats_next": "What's next",
-  "setup.wwn_boiler_later": "The Works With Nest boiler option appears here once Zigbee or Thread is on.",
   "setup.zigbee": "Zigbee",
   "setup.zigbee_about": "Join a Zigbee network (Zigbee2MQTT or ZHA) as a thermostat and router. On models with a Heat Link, this disconnects the Heat Link.",
   "status.cancelled": "{task}: cancelled",
@@ -334,5 +332,13 @@
   "update.release_notes": "Release Notes",
   "update.restart": "Restart Now",
   "update.restart_description": "Restart Fledge to use the new version.",
-  "update.retry": "Try Again"
+  "update.retry": "Try Again",
+  "setup.group.heating": "Your heating",
+  "setup.heating_question": "How does this Nest switch your boiler?",
+  "setup.heat_link": "Through a Nest Heat Link",
+  "setup.heat_link_about": "The Heat Link, wired to the boiler, does the switching. The usual setup for a Nest bought in the UK or Europe, and the only choice that matters for other Nests.",
+  "setup.no_heat_link": "Wired to the Nest's base, or no Heat Link",
+  "setup.no_heat_link_about": "The Nest switches the boiler itself through the W1 wire on its base, or has no boiler (a panel on the wall). Without this, a Nest that can't find its Heat Link stops with error H71 or H74. A boiler wired to a Heat Link won't come on with it.",
+  "setup.heating_later": "Change it later from Home Assistant with the Nest's Works With Nest boiler switch (the Nest reboots). Nests without a Heat Link ignore it.",
+  "setup.radio_needs_no_heat_link": "Zigbee and Thread take the radio the Heat Link talks over, so the Nest can't reach a Heat Link: choose “Wired to the Nest's base, or no Heat Link” under Your heating."
 }

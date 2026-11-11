@@ -64,7 +64,9 @@ use crate::logf;
 ///   8  turning a dimmer down past its lowest turns the light off, a
 ///      switch's ring turns it off and on (dim_off, default on)
 ///   9  alarm cards (arm, disarm; <base>/set/alarm_result)
-pub const PROTOCOL: u32 = 9;
+///  10  the thermostat's card hidden (show_thermostat false); and the
+///      act_as_thermostat switch, off taking the card away too
+pub const PROTOCOL: u32 = 10;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -1409,7 +1411,8 @@ impl Runtime {
         match deck[at.rem_euclid(deck.len() as i64) as usize] {
             Slot::Thermostat => 0,
             Slot::Card(slot) => slot + 1,
-            Slot::Settings => deck.len() - 1,
+            // Past the cards, with the thermostat's card or without.
+            Slot::Settings => self.machine.cards.cards.len() + 1,
         }
     }
 
@@ -1712,7 +1715,13 @@ impl Runtime {
             return;
         }
         // While it's being set, the dial's own target stands.
+        let role = self.machine.nest.as_ref().is_some_and(|n| n.acting != nest.acting);
         self.machine.set_nest(nest);
+        if role {
+            // Its card comes or goes among the others.
+            logf!("ui: {}", if self.machine.thermostat_card() { "the thermostat's card is back" } else { "not a thermostat: no card of its own" });
+            self.revalidate();
+        }
         if self.machine.own_thermostat() && self.home.is_some() {
             self.draw_home();
         }

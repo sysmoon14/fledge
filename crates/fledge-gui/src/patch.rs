@@ -186,7 +186,7 @@ impl Form {
             matter_thread: self.matter.on && self.matter_thread,
             matter_code: self.matter.on.then(|| self.matter.code.clone()),
             zigbee: self.zigbee,
-            wwn_boiler: self.wwn_boiler && self.holds_radio(),
+            wwn_boiler: self.wwn_boiler,
             entry_point: self.entry_point,
             doom: self.doom,
             external_temperature: self.external_temperature,
@@ -282,6 +282,21 @@ impl Form {
     /// Doom last.
     pub fn features_ui(&mut self, ui: &mut egui::Ui) {
         self.drain_dialogs();
+        // First, as it decides whether the Nest heats at all: a Heat Link
+        // model (UK and Europe) without its Heat Link stops on H71/H74.
+        crate::group(ui, crate::tr!("setup.group.heating"));
+        ui.label(egui::RichText::new(crate::tr!("setup.heating_question")).size(14.5));
+        ui.add_space(8.0);
+        if crate::choice_card(ui, !self.wwn_boiler, crate::tr!("setup.heat_link"), crate::tr!("setup.heat_link_about"), None).clicked() {
+            self.wwn_boiler = false;
+        }
+        ui.add_space(10.0);
+        if crate::choice_card(ui, self.wwn_boiler, crate::tr!("setup.no_heat_link"), crate::tr!("setup.no_heat_link_about"),
+                              Some(crate::tr!("patch.wwn_boiler"))).clicked() {
+            self.wwn_boiler = true;
+        }
+        ui.add_space(6.0);
+        crate::muted_line(ui, crate::tr!("setup.heating_later"));
         crate::group(ui, crate::tr!("setup.group.privacy"));
         let block = crate::option_card(ui, &mut self.block_cloud, true, crate::tr!("patch.block_cloud"), crate::tr!("setup.block_cloud_about"), |ui| {
             ui.horizontal(|ui| {
@@ -319,12 +334,10 @@ impl Form {
         if thread {
             crate::muted_line(ui, crate::tr!("patch.zigbee_disabled_hint"));
         }
-        // Only a Heat Link model that gave its radio to nestlocal needs it.
-        if self.holds_radio() {
-            crate::option_card(ui, &mut self.wwn_boiler, true, crate::tr!("patch.wwn_boiler"), crate::tr!("patch.wwn_boiler_hint"), |_| {});
-        } else {
-            self.wwn_boiler = false;
-            crate::muted_line(ui, crate::tr!("setup.wwn_boiler_later"));
+        // The radio a Heat Link talks over goes to nestlocal.
+        if self.holds_radio() && !self.wwn_boiler {
+            ui.add(egui::Label::new(egui::RichText::new(crate::tr!("setup.radio_needs_no_heat_link")).size(13.0).color(crate::WARN)).wrap());
+            ui.add_space(4.0);
         }
 
         crate::group(ui, crate::tr!("setup.group.access"));
@@ -716,7 +729,7 @@ mod tests {
         assert_eq!(inputs.overlay.as_deref(), Some(std::path::Path::new("extra.tar")));
         form.doom = true;
         form.wwn_boiler = true;
-        assert!(!form.inputs().wwn_boiler, "only for a radio nestlocal holds");
+        assert!(form.inputs().wwn_boiler, "with or without a radio nestlocal holds");
         form.zigbee = true;
         assert!(form.inputs().wwn_boiler);
         form.ssh = false;

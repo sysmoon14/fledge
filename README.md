@@ -92,7 +92,7 @@ screens come back for Nest's dial and More Nest settings.
 | | Stock | With Fledge |
 |-|-|-|
 | Control from | the Nest/Google Home app, through Google's cloud | Home Assistant or any MQTT client, Matter controller or Zigbee coordinator, on your network |
-| On its screen | the thermostat | the thermostat, plus your lights, other heating zones and speakers (MQTT with Home Assistant) |
+| On its screen | the thermostat | the thermostat, plus your lights, other heating zones and speakers (MQTT with Home Assistant); or only your cards, as a panel (turn off **Act as a thermostat**) |
 | Internet access | required | not needed: the unit only has to join your Wi-Fi |
 | Nest and Google servers | always contacted | blocked with Block cloud (`--block-cloud`) |
 | Integrations | none | MQTT, Matter over Wi-Fi or Thread, Zigbee router |
@@ -232,7 +232,7 @@ Logs go to `~/.local/share/fledge/logs/<timestamp>/fledge.log` (or under
 ## The app and the command line
 
 **App:** Set up is one guided flow: Connect, Home Assistant (the broker, and
-updates through it), Features (blocking Google, Matter, Zigbee, SSH with a key
+updates through it), Features (how the Nest switches your boiler, blocking Google, Matter, Zigbee, SSH with a key
 it can create, and password login off unless you allow it, the USB console,
 Doom), then Review, which shows the choices,
 offers the whole-NAND backup and folds away the developer options (dry run,
@@ -244,6 +244,10 @@ application boot and a serial console on a patched unit's USB root shell. The
 external temperature option isn't in the app: on a 3rd generation unit, turn it
 on from Home Assistant with the Nest's **External temperature** switch (the unit
 reboots into it), or patch with `--external-temperature`.
+On a Heat Link model with no Heat Link (or with Zigbee or Thread on), answer
+**Wired to the Nest's base, or no Heat Link** under Your heating, or turn on the
+Nest's **Works With Nest boiler** switch in Home Assistant later (the unit
+reboots into it); without it the Nest stops with error H71 or H74.
 
 **CLI (Linux and macOS):** the same executable, run with arguments, works from a
 terminal, over SSH or headless, with a few things the app doesn't have

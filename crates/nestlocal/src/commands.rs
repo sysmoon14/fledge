@@ -33,6 +33,19 @@ fn on_off(arg: &str) -> Result<bool, String> {
 }
 
 /// A finite float, as strconv.ParseFloat read the numbers that matter here.
+/// Whether a command could start heating, cooling, the fan or hot water:
+/// refused while the Nest isn't a thermostat.
+fn heats(name: &str, arg: &str) -> bool {
+    match name {
+        "mode" => arg != "off",
+        "fan_mode" => arg != "auto",
+        "hot_water_boost" => !arg.eq_ignore_ascii_case("off"),
+        "hot_water_schedule" => on_off(arg).unwrap_or(true),
+        "preset" | "target" | "target_low" | "target_high" => true,
+        _ => false,
+    }
+}
+
 fn float(arg: &str) -> Option<f64> {
     arg.parse::<f64>().ok().filter(|f| f.is_finite())
 }
@@ -139,6 +152,22 @@ impl Bridge {
             self.set_external_temperature_option(&String::from_utf8_lossy(payload));
             return;
         }
+        if name == "wwn_boiler_option" {
+            let arg = String::from_utf8_lossy(payload);
+            match on_off(arg.trim()) {
+                Ok(on) => self.set_wwn_boiler_option(on),
+                Err(e) => logf!("mqtt: wwn_boiler_option {:?}: {e}", arg.trim()),
+            }
+            return;
+        }
+        if name == "act_as_thermostat" {
+            let arg = String::from_utf8_lossy(payload);
+            match on_off(arg.trim()) {
+                Ok(on) => self.act_as_thermostat(on),
+                Err(e) => logf!("mqtt: act_as_thermostat {:?}: {e}", arg.trim()),
+            }
+            return;
+        }
         if name == "screen_wake" {
             self.ui.wake();
             return;
@@ -158,8 +187,56 @@ impl Bridge {
         let _ = self.apply("mqtt", name, &arg);
     }
 
+    /// Whether a thermostat acts as one (role.rs), or is a panel with its
+    /// heating off, what it was kept to put back as it acts again.
+    pub fn act_as_thermostat(&self, on: bool) {
+        if on == self.role.acting() {
+            return logf!("role: already {}", if on { "a thermostat" } else { "not a thermostat" });
+        }
+        let has_hot_water = self.store.get(&format!("device.{}", self.serial))
+            .is_some_and(|d| crate::json::truthy(d.value.get("has_hot_water_control")));
+        if on {
+            let was = match self.role.start() {
+                Ok(was) => was,
+                Err(e) => return logf!("role: {e}"),
+            };
+            logf!("role: a thermostat again, back to {}", Value::Object(was.clone()));
+            if let Some(mode) = was.get("mode").and_then(Value::as_str).filter(|m| *m != "off") {
+                let _ = self.apply("role", "mode", mode);
+            }
+            if has_hot_water && was.get("hot_water_schedule").and_then(Value::as_bool) == Some(true) {
+                let _ = self.apply("role", "hot_water_schedule", "ON");
+            }
+        } else {
+            let buckets = self.buckets();
+            let Some(shown) = buckets.get("device").zip(buckets.get("shared")).map(|(d, s)| crate::bridge::state(d, s)) else {
+                return logf!("role: the unit hasn't reported yet");
+            };
+            let mut was = serde_json::Map::new();
+            was.insert("mode".into(), shown.get("mode").cloned().unwrap_or(Value::Null));
+            if has_hot_water {
+                was.insert("hot_water_schedule".into(), shown.get("hot_water_schedule").cloned().unwrap_or(Value::Null));
+            }
+            // Off while it still may be: then nothing turns it on again.
+            let _ = self.apply("role", "mode", "off");
+            if has_hot_water {
+                let _ = self.apply("role", "hot_water_boost", "OFF");
+                let _ = self.apply("role", "hot_water_schedule", "OFF");
+            }
+            if let Err(e) = self.role.stop(&was) {
+                return logf!("role: {e}");
+            }
+            logf!("role: not a thermostat; heating off, was {}", Value::Object(was));
+        }
+        self.publish_state();
+    }
+
     /// Applies one command, from MQTT, Matter or Zigbee (`from`, for the log).
     pub fn apply(&self, from: &str, name: &str, arg: &str) -> Result<(), String> {
+        if !self.role.acting() && heats(name, arg) {
+            logf!("{from}: {name} {arg:?}: not a thermostat (Act as a thermostat is off)");
+            return Err("not acting as a thermostat".into());
+        }
         let (bucket, fields) = match self.fields(name, arg) {
             Err(e) => {
                 logf!("{from}: {name} {arg:?}: {e}");
@@ -225,6 +302,27 @@ impl Bridge {
                 name != "target_change_pending" && current.value.get(name) != Some(&crate::json::canonical(value.clone()))
             }
         })
+    }
+
+    /// set/wwn_boiler_option ON/OFF: kept for nestlocal to put in nlclient's
+    /// settings before it next starts, and a reboot into it (heatlink.rs).
+    fn set_wwn_boiler_option(&self, on: bool) {
+        use std::path::Path;
+        let (choice, rcs) = (Path::new(crate::heatlink::CHOICE), Path::new(crate::heatlink::RCS));
+        let model = self.store.get(&format!("device.{}", self.serial))
+            .and_then(|d| d.value.get("model_version").and_then(Value::as_str).map(str::to_owned)).unwrap_or_default();
+        if !crate::heatlink::heat_link_model(&model) {
+            return logf!("mqtt: wwn_boiler_option: {model:?} has no Heat Link to do without");
+        }
+        if crate::heatlink::chosen(choice, rcs).unwrap_or(self.wwn_boiler) == on {
+            return logf!("mqtt: wwn_boiler_option: already {}", if on { "on" } else { "off" });
+        }
+        if let Err(e) = crate::heatlink::choose(choice, rcs, on) {
+            return logf!("mqtt: wwn_boiler_option: {}: {e}", choice.display());
+        }
+        logf!("mqtt: wwn_boiler_option: {}", if on { "on" } else { "off" });
+        self.publish_state();
+        crate::unit_options::reboot_soon("the Works With Nest boiler option");
     }
 
     /// set/external_temperature_option ON/OFF: the unit's start options
@@ -774,5 +872,50 @@ mod tests {
         assert!(b.apply("mqtt", "clear_schedule", "PRESS").is_err());
         assert_eq!(b.store.get("schedule.S").unwrap().revision, 1);
         assert!(b.store.get("device.S").is_none());
+    }
+
+    #[test]
+    fn not_a_thermostat_turns_the_heating_off_and_back_as_it_was() {
+        let b = test_bridge();
+        b.store.merge("device.S", &fields!{"has_hot_water_control" => true, "hot_water_mode" => "schedule"}, 0, 0, true);
+        b.store.merge("shared.S", &fields!{"can_heat" => true, "target_temperature_type" => "heat"}, 0, 0, true);
+        let value = |key: &str, field: &str| b.store.get(key).unwrap().value[field].clone();
+
+        b.act_as_thermostat(false);
+        assert!(!b.role.acting());
+        assert_eq!(value("shared.S", "target_temperature_type"), json!("off"));
+        assert_eq!(value("device.S", "hot_water_mode"), json!("off"));
+        for (name, arg) in [("mode", "heat"), ("target", "21"), ("preset", "eco"), ("fan_mode", "on"),
+                            ("hot_water_boost", "30"), ("hot_water_schedule", "ON")] {
+            assert!(b.apply("mqtt", name, arg).is_err(), "{name} {arg} heats");
+        }
+        for (name, arg) in [("mode", "off"), ("hot_water_boost", "OFF"), ("temperature_scale", "F")] {
+            assert!(b.apply("mqtt", name, arg).is_ok(), "{name} {arg} doesn't heat");
+        }
+        assert_eq!(value("shared.S", "target_temperature_type"), json!("off"));
+
+        b.act_as_thermostat(false);
+        b.act_as_thermostat(true);
+        assert!(b.role.acting());
+        assert_eq!(value("shared.S", "target_temperature_type"), json!("heat"), "its mode back");
+        assert_eq!(value("device.S", "hot_water_mode"), json!("schedule"), "and its hot water");
+        assert!(b.apply("mqtt", "target", "21").is_ok());
+    }
+
+    #[test]
+    fn a_thermostat_left_off_stays_off_when_it_acts_again() {
+        let b = test_bridge();
+        b.store.merge("device.S", &fields!{}, 0, 0, true);
+        b.store.merge("shared.S", &fields!{"can_heat" => true, "target_temperature_type" => "off"}, 0, 0, true);
+        b.act_as_thermostat(false);
+        b.act_as_thermostat(true);
+        assert_eq!(b.store.get("shared.S").unwrap().value["target_temperature_type"], json!("off"));
+    }
+
+    #[test]
+    fn the_role_waits_for_the_unit_to_report() {
+        let b = test_bridge();
+        b.act_as_thermostat(false);
+        assert!(b.role.acting(), "nothing to keep, so nothing changed");
     }
 }

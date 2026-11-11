@@ -22,6 +22,14 @@
 //!                                      screen_on (ON/OFF, retained),
 //!                                      screen_wake, alert (notifications) and
 //!                                      alarm_result (an alarm command's answer)
+//!   <prefix>/<serial>/set/act_as_thermostat
+//!                                      ON/OFF: OFF makes it a panel on the
+//!                                      wall, its heating and hot water off
+//!                                      and only its sensors announced (role.rs)
+//!   <prefix>/<serial>/set/wwn_boiler_option
+//!                                      ON/OFF: heat through W1 without a
+//!                                      Heat Link, from the next start; the
+//!                                      unit reboots (heatlink.rs)
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
 
@@ -48,6 +56,18 @@ use crate::weather::Outdoor;
 const UPDATE_ENTITIES: [(&str, &str); 2] = [("update", "nestlocal"), ("button", "check_update")];
 /// What -external-temperature adds (announce).
 const SENSOR_ENTITIES: [(&str, &str); 2] = [("sensor", "external_temperature"), ("sensor", "temperature_source")];
+/// What stays announced while the Nest isn't a thermostat (role.rs): what
+/// it senses and what keeps it, besides the motion sensors; nothing that
+/// controls or reports heating.
+const PANEL_ENTITIES: [&str; 14] = ["wwn_boiler_option", "current_temperature", "current_humidity", "backplate_temperature", "battery_level",
+    "rssi", "local_ip", "occupancy", "light_level", "infrared_light", "external_power", "backplate_input_voltage",
+    "temperature_scale", "act_as_thermostat"];
+
+/// Whether the entity `key` stays announced while the Nest isn't a thermostat.
+fn on_a_panel(key: &str) -> bool {
+    PANEL_ENTITIES.contains(&key) || UPDATE_ENTITIES.iter().any(|(_, k)| *k == key)
+        || crate::motion::Sensor::ALL.iter().any(|s| s.key() == key)
+}
 
 pub struct Bridge {
     pub serial: String,
@@ -58,7 +78,7 @@ pub struct Bridge {
     live: Option<Arc<Liveness>>,
     /// nlclient runs with using_wwn_boiler: it heats while it reports
     /// can_heat false (heatlink.rs).
-    wwn_boiler: bool,
+    pub wwn_boiler: bool,
     /// The stand-in sensor, with -external-temperature (sensor/).
     pub sensor: OnceLock<Arc<crate::sensor::Sensor>>,
     /// Someone about lately: motion.rs's events, held (occupancy.rs).
@@ -79,6 +99,8 @@ pub struct Bridge {
     updates: OnceLock<crate::update::Updates>,
     /// This bridge, for what a command starts that outlives it.
     me: std::sync::Weak<Bridge>,
+    /// Whether it acts as a thermostat (role.rs).
+    pub role: crate::role::Role,
 }
 
 impl Bridge {
@@ -106,6 +128,7 @@ impl Bridge {
             ui: Default::default(),
             updates: OnceLock::new(),
             me: me.clone(),
+            role: Default::default(),
         })
     }
 
@@ -490,6 +513,11 @@ impl Bridge {
     fn shown(&self, dev: &Fields, sh: &Fields) -> Fields {
         let mut shown = state(dev, sh);
         shown.insert("occupancy".into(), self.occupancy.occupied().into());
+        shown.insert("act_as_thermostat".into(), self.role.acting().into());
+        // What it runs with, or what Home Assistant chose for the next start.
+        let path = |p| std::path::Path::new(p);
+        let wwn = crate::heatlink::chosen(path(crate::heatlink::CHOICE), path(crate::heatlink::RCS)).unwrap_or(self.wwn_boiler);
+        shown.insert("wwn_boiler_option".into(), wwn.into());
         if crate::device::current().ble.is_some() {
             shown.insert("external_temperature_option".into(), crate::unit_options::external_temperature().into());
         }
@@ -726,6 +754,15 @@ impl Bridge {
                 "icon" => "mdi:thermometer-bluetooth",
             });
         }
+        // A Heat Link model can do without its Heat Link (heatlink.rs).
+        if crate::heatlink::heat_link_model(&sprint(dev.get("model_version"))) {
+            add("switch", "wwn_boiler_option", "Works With Nest boiler", fields!{
+                "value_template" => on_off("wwn_boiler_option"),
+                "command_topic" => format!("{set}wwn_boiler_option"),
+                "entity_category" => "config",
+                "icon" => "mdi:water-boiler",
+            });
+        }
         if truthy(dev.get("has_hot_water_control")) {
             add("switch", "hot_water_schedule", "Hot water schedule", fields!{
                 "value_template" => on_off("hot_water_schedule"),
@@ -858,6 +895,22 @@ impl Bridge {
             "entity_category" => "config",
             "icon" => "mdi:calendar-remove",
         });
+        // Off, the Nest is a panel on the wall: its heating off, and none of
+        // what controls it announced (role.rs).
+        add("switch", "act_as_thermostat", "Act as a thermostat", fields!{
+            "value_template" => on_off("act_as_thermostat"),
+            "command_topic" => format!("{set}act_as_thermostat"),
+            "entity_category" => "config",
+            "icon" => "mdi:thermostat",
+        });
+        let mut panel_only = Vec::new();
+        if !self.role.acting() {
+            configs.retain(|topic, _| {
+                // <discovery>/<component>/<id>/<key>/config
+                let key = topic.rsplit('/').nth(1).unwrap_or("");
+                on_a_panel(key) || { panel_only.push(topic.clone()); false }
+            });
+        }
 
         // Publish what changed; remove what the equipment no longer offers.
         let first = self.announced.lock().unwrap().is_none();
@@ -866,6 +919,8 @@ impl Bridge {
         if first {
             gone.extend(self.stale_update_topics(&id));
             gone.extend(self.stale_sensor_topics(&id));
+            // Kept by the broker from when it was a thermostat, before a restart.
+            gone.extend(panel_only);
         }
         for topic in &gone {
             self.publish(topic, true, b"");
@@ -1107,6 +1162,7 @@ impl crate::ui::Sender for Bridge {
         s.insert("can_cool".into(), truthy(sh.get("can_cool")).into());
         s.insert("has_hot_water_control".into(), truthy(dev.get("has_hot_water_control")).into());
         s.insert("version".into(), crate::update::VERSION.into());
+        s.insert("acting".into(), self.role.acting().into());
         let newer = self.updates().and_then(|u| u.latest.lock().unwrap().clone())
             .filter(|r| crate::update::newer(&r.tag, crate::update::VERSION));
         s.insert("update".into(), newer.map_or(Value::Null, |r| r.tag.into()));
@@ -1135,7 +1191,9 @@ pub mod tests {
     use serde_json::json;
 
     pub fn test_bridge() -> Arc<Bridge> {
-        Bridge::new("nestlocal", "homeassistant", "S", temp_store(), Arc::new(Outdoor::default()), None, false)
+        let b = Bridge::new("nestlocal", "homeassistant", "S", temp_store(), Arc::new(Outdoor::default()), None, false);
+        b.role.move_to(crate::role::tests::temp_file());
+        b
     }
 
     fn obj(v: Value) -> Fields {
@@ -1430,6 +1488,8 @@ pub mod tests {
         let mut s = b.shown(&dev, &sh);
         // What publish_state adds on a unit with a BLE chip.
         s.entry("external_temperature_option").or_insert(false.into());
+        s.entry("act_as_thermostat").or_insert(true.into());
+        s.entry("wwn_boiler_option").or_insert(false.into());
         let schedule_keys = match crate::schedule::simple(&Fields::new(), "C") {
             Value::Object(o) => o,
             _ => unreachable!(),
@@ -1467,7 +1527,7 @@ pub mod tests {
                 if k.ends_with("command_topic") {
                     let name = v.strip_prefix("nestlocal/S/set/").unwrap_or_else(|| panic!("{topic}: {k} {v}"));
                     // Not a bucket's: commands.rs takes it before fields.
-                    if name == "external_temperature_option" {
+                    if ["external_temperature_option", "act_as_thermostat", "wwn_boiler_option"].contains(&name) {
                         continue;
                     }
                     let arg = match name {
@@ -1603,5 +1663,45 @@ pub mod tests {
             |t, _| t == "homeassistant/binary_sensor/nestlocal_s/leaf/config").await;
         assert_eq!(serde_json::from_slice::<Value>(&payload).unwrap()["unique_id"], json!("nestlocal_s_leaf"));
     }
-}
 
+    #[test]
+    fn not_a_thermostat_announces_only_what_it_senses() {
+        let b = test_bridge();
+        b.has_sensors();
+        let (dev, sh) = everything();
+        let keys = |b: &Bridge| -> Vec<String> {
+            b.announced.lock().unwrap().clone().unwrap().keys().map(|t| t.rsplit('/').nth(1).unwrap().to_string()).collect()
+        };
+        b.announce(&dev, &sh);
+        let all = keys(&b);
+        assert!(all.contains(&"thermostat".to_string()) && all.contains(&"act_as_thermostat".to_string()));
+
+        b.role.stop(&Fields::new()).unwrap();
+        b.announce(&dev, &sh);
+        let panel = keys(&b);
+        for key in ["thermostat", "hvac_action", "time_to_target", "heating", "learning_mode", "away_temperature_low",
+                    "auto_away_enable", "hot_water_schedule", "hot_water_boost", "heating_times", "clear_schedule",
+                    "fan_timer_duration", "target_humidity"] {
+            assert!(all.contains(&key.to_string()) && !panel.contains(&key.to_string()), "{key}");
+        }
+        for key in ["current_temperature", "current_humidity", "act_as_thermostat", "occupancy", "light_level",
+                    "temperature_scale", "motion"] {
+            assert!(panel.contains(&key.to_string()), "{key}");
+        }
+        assert!(panel.iter().all(|k| on_a_panel(k)));
+    }
+
+    #[test]
+    fn only_a_heat_link_model_offers_the_works_with_nest_boiler_switch() {
+        let has = |model: &str| {
+            let b = test_bridge();
+            let (mut dev, sh) = everything();
+            dev.insert("model_version".into(), model.into());
+            b.announce(&dev, &sh);
+            let configs = b.announced.lock().unwrap().clone().unwrap();
+            configs.contains_key("homeassistant/switch/nestlocal_s/wwn_boiler_option/config")
+        };
+        assert!(has("Display-3.4") && has("Display-5.1"));
+        assert!(!has("Display-2.9"));
+    }
+}
