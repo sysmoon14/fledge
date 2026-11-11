@@ -1427,22 +1427,29 @@ fn condition_name(condition: &str) -> String {
     }
 }
 
-/// What's on among the cards: lights, and what's playing by its title.
+/// What's on among the cards: lights, switches and fans, each counted by
+/// what Home Assistant calls them (a smart plug is a switch, not a light),
+/// and what's playing by its title.
 fn whats_on(cards: &[Card]) -> String {
-    let lights: usize = cards.iter().map(|c| match c {
-        Card::Lights(card) => card.lights.iter().filter(|l| l.on).count(),
-        _ => 0,
-    }).sum();
+    // (one, many, how many on), in the order they're said.
+    let mut kinds = [("light", "lights", 0usize), ("switch", "switches", 0), ("fan", "fans", 0)];
+    for card in cards {
+        let Card::Lights(card) = card else { continue };
+        for light in card.lights.iter().filter(|l| l.on) {
+            let kind = match light.id.split_once('.').map_or("", |(domain, _)| domain) {
+                "light" => 0,
+                "fan" => 2,
+                _ => 1, // switch, input_boolean and the like
+            };
+            kinds[kind].2 += 1;
+        }
+    }
     let playing = cards.iter().find_map(|c| match c {
         Card::Media(m) if m.state == "playing" => Some(if m.title.is_empty() { m.name.clone() } else { m.title.clone() }),
         _ => None,
     });
-    let mut parts = Vec::new();
-    match lights {
-        0 => {}
-        1 => parts.push("1 light on".to_owned()),
-        n => parts.push(format!("{n} lights on")),
-    }
+    let mut parts: Vec<String> = kinds.iter().filter(|(_, _, n)| *n > 0)
+        .map(|(one, many, n)| format!("{n} {} on", if *n == 1 { one } else { many })).collect();
     if let Some(title) = playing {
         parts.push(format!("playing {title}"));
     }
@@ -1915,6 +1922,20 @@ fn alarm_open(fonts: &Fonts, card: &AlarmCard, arm: &AlarmMode, sensors: &[Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_glance_counts_lights_switches_and_fans_apart() {
+        let on = |ids: &[&str]| {
+            let lights: Vec<String> = ids.iter().map(|id| format!(r#"{{"id":"{id}","name":"x","on":true}}"#)).collect();
+            let payload = format!(r#"{{"cards":[{{"kind":"lights","name":"Room","icon":"","lights":[{}]}}]}}"#, lights.join(","));
+            super::whats_on(&super::super::model::Cards::parse(payload.as_bytes()).unwrap().cards)
+        };
+        assert_eq!(on(&[]), "All quiet");
+        assert_eq!(on(&["light.lamp"]), "1 light on");
+        assert_eq!(on(&["light.lamp", "switch.plug"]), "1 light on · 1 switch on", "a smart plug isn't a light");
+        assert_eq!(on(&["switch.a", "input_boolean.b", "fan.c", "fan.d", "light.e", "light.f"]),
+                   "2 lights on · 2 switches on · 2 fans on");
+    }
+
     #[test]
     fn list_rows_lie_on_the_round_display() {
         // The highlight's ends are half circles: each row's four are the
