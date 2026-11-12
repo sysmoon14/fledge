@@ -375,7 +375,9 @@ fn parked_words(p: &mut Canvas, fonts: &Fonts, edge: &Edge, y: f32, soft: [u8; 3
             if edge.pressed == 0 {
                 return false;
             }
-            line(p, fonts, y + 28.0, &format!("Keep turning to go past {limit}"), WHITE);
+            // Without the limit, which the number above shows: with it the
+            // line ran into the Nest look's ring.
+            line(p, fonts, y + 28.0, "Keep turning to go past", WHITE);
         }
     }
     true
