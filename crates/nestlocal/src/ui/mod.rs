@@ -77,7 +77,10 @@ use crate::logf;
 ///      rings stop at their limits from Home Assistant (light.brightness_limits,
 ///      media.volume_limits, cover.position_limits; a climate's min/max and a
 ///      light's kelvins come narrowed), a value past one parked at that end
-pub const PROTOCOL: u32 = 13;
+///  14  a ring's limits can give way to being turned on past, each end
+///      apart (<what>_push; a climate's temperature_whole and a light's
+///      kelvin_whole say how far), and it says when it's at one
+pub const PROTOCOL: u32 = 14;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -1822,6 +1825,7 @@ impl Runtime {
 
     /// A device's own screen for `mode`.
     fn screen<'a>(machine: &'a Machine, mode: &Mode) -> Option<Screen<'a>> {
+        screens::set_pushing(machine.pushing());
         let card = |slot: usize| machine.cards.cards.get(slot);
         Some(match mode {
             Mode::LightList { slot, selected } => match card(*slot)? {
@@ -2866,11 +2870,26 @@ mod shots {
         // Past their rings' limits (protocol 13): each waits at that end.
         let limited = Cards::parse(br#"{"cards":[
             {"kind":"media","id":"media_player.kitchen","name":"Bedroom speaker","state":"playing","volume":80,"volume_limits":[10,50]},
-            {"kind":"climate","id":"climate.kitchen","name":"Kitchen","mode":"heat","action":"idle","target":16,"current":17,"min":18,"max":25,"step":0.5},
+            {"kind":"climate","id":"climate.kitchen","name":"Kitchen","mode":"heat","action":"idle","target":16,"current":17,"min":18,"max":25,"step":0.5,"temperature_whole":[7,35]},
             {"kind":"lights","name":"Reading Lamp","lights":[{"id":"light.reading_lamp","name":"Reading Lamp","icon":"m3s:table-lamp",
              "on":true,"dimmable":true,"brightness":5,"brightness_limits":[20,80],"rgb":[255,169,87]}]},
-            {"kind":"climate","id":"climate.office","name":"Office","mode":"heat","action":"heating","target":28,"current":21,"min":18,"max":25,"step":0.5}]}"#).unwrap();
-        let [Card::Media(speaker), Card::Climate(kitchen), Card::Lights(reading), Card::Climate(office)] = &limited.cards[..] else { panic!() };
+            {"kind":"climate","id":"climate.office","name":"Office","mode":"heat","action":"heating","target":28,"current":21,"min":18,"max":25,"step":0.5,"temperature_whole":[7,35]},
+            {"kind":"media","id":"media_player.den","name":"Den speaker","state":"playing","volume":50,"volume_limits":[10,50],"volume_push":[false,true]},
+            {"kind":"climate","id":"climate.den","name":"Den","mode":"heat","action":"heating","target":26.5,"current":21,"min":18,"max":25,"step":0.5,
+             "temperature_whole":[7,35],"temperature_push":[true,true]}]}"#).unwrap();
+        let [Card::Media(speaker), Card::Climate(kitchen), Card::Lights(reading), Card::Climate(office), Card::Media(den),
+             Card::Climate(den_heat)] = &limited.cards[..] else { panic!() };
+        // A limit that gives way (protocol 14): at it, pushing on it, over it.
+        for (name, pushing, screen) in [
+            ("l6-volume-at-limit", 0, Screen::Volume { card: den, value: 50 }),
+            ("l7-volume-pushing", 2, Screen::Volume { card: den, value: 50 }),
+            ("l8-volume-pushed-over", 0, Screen::Volume { card: den, value: 65 }),
+            ("l9-climate-pushed-over", 0, Screen::NestSet { nest: Cow::Owned(Nest::of_card(den_heat)), target: 26.5, pulse: None, setting: false, shown: None }),
+        ] {
+            screens::set_pushing(pushing);
+            save(&screens::draw(&fonts, &screen, None), &format!("{out}/{name}.png"));
+        }
+        screens::set_pushing(0);
         for (name, screen) in [
             ("l1-volume-over", Screen::Volume { card: speaker, value: 80 }),
             ("l2-volume-back", Screen::Volume { card: speaker, value: 50 }),
@@ -2907,7 +2926,7 @@ mod shots {
         save(&screens::draw(&fonts, &Screen::OptionsCard { card: &boost }, None), &format!("{out}/b1-options.png"));
         save(&screens::draw(&fonts, &Screen::OptionList { card: Cow::Borrowed(&boost), selected: 2 }, None), &format!("{out}/b2-option-list.png"));
         let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
-            state: "open".into(), position: Some(60), positionable: true, position_limits: None };
+            state: "open".into(), position: Some(60), positionable: true, position_limits: None, position_push: [false; 2] };
         save(&screens::draw(&fonts, &Screen::CoverCard { card: &blind }, None), &format!("{out}/b3-cover.png"));
         save(&screens::draw(&fonts, &Screen::CoverSet { card: &blind, value: 60 }, None), &format!("{out}/b4-cover-set.png"));
         let group = model::LightsCard { name: "Bedroom Lights".into(), icon: String::new(), lights: vec![lights.lights[2].clone()],

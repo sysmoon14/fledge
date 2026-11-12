@@ -492,12 +492,19 @@ pub struct CoverCard {
     /// Where its ring stops (protocol 13): None, 0 to 100.
     #[serde(default)]
     pub position_limits: Option<[u8; 2]>,
+    /// Whether its lowest and its highest can be pushed past (protocol 14).
+    #[serde(default)]
+    pub position_push: [bool; 2],
 }
 
 impl CoverCard {
     /// Its ring's ends, percent open.
     pub fn position_ends(&self) -> [u8; 2] {
         ends(self.position_limits, [0, 100])
+    }
+
+    pub fn position_ring(&self) -> Ring {
+        Ring { ends: self.position_ends().map(i32::from), whole: [0, 100], push: self.position_push }
     }
 }
 
@@ -507,6 +514,49 @@ pub fn ends<T: PartialOrd + Copy>(limits: Option<[T; 2]>, whole: [T; 2]) -> [T; 
     match limits {
         Some([low, high]) if low < high && low >= whole[0] && high <= whole[1] => [low, high],
         _ => whole,
+    }
+}
+
+/// A ring as it turns: its ends, the whole range it could take (an end
+/// short of that is a limit, set in Home Assistant), and whether its
+/// lowest and its highest limit give way to being turned on past.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ring {
+    pub ends: [i32; 2],
+    pub whole: [i32; 2],
+    pub push: [bool; 2],
+}
+
+impl Ring {
+    /// The limit at the ring's start (`side` -1) or end (1): None, that
+    /// end is as far as the device goes.
+    pub fn limit(&self, side: i8) -> Option<i32> {
+        let i = match side {
+            1 => 1,
+            -1 => 0,
+            _ => return None,
+        };
+        (self.ends[i] != self.whole[i]).then_some(self.ends[i])
+    }
+
+    /// Whether that end is a limit that can be pushed past.
+    pub fn pushes(&self, side: i8) -> bool {
+        self.limit(side).is_some() && self.push[if side > 0 { 1 } else { 0 }]
+    }
+
+    pub fn past(&self, value: i32) -> i8 {
+        past(value, self.ends)
+    }
+
+    /// The limit `value` is at or past: -1, 1, or 0 for neither.
+    pub fn edge(&self, value: i32) -> i8 {
+        if value >= self.ends[1] && self.limit(1).is_some() {
+            1
+        } else if value <= self.ends[0] && self.limit(-1).is_some() {
+            -1
+        } else {
+            0
+        }
     }
 }
 
@@ -740,6 +790,14 @@ pub struct Light {
     #[serde(default)]
     pub brightness_limits: Option<[u8; 2]>,
     #[serde(default)]
+    pub brightness_push: [bool; 2],
+    /// The warmth it takes at all, where `kelvins` are its limits, and
+    /// whether those can be pushed past (protocol 14).
+    #[serde(default)]
+    pub kelvin_whole: Option<[u16; 2]>,
+    #[serde(default)]
+    pub kelvin_push: [bool; 2],
+    #[serde(default)]
     pub rgb: Option<[u8; 3]>,
     /// Its white's warmth, in kelvin, and the range it takes (within its
     /// limits, if it has any): None, it has no warmth to set.
@@ -777,6 +835,12 @@ pub struct ClimateCard {
     pub max: f64,
     #[serde(default = "temp_step")]
     pub step: f64,
+    /// The range it takes at all, where min and max are its limits, and
+    /// whether those can be pushed past (protocol 14).
+    #[serde(default)]
+    pub temperature_whole: Option<[f64; 2]>,
+    #[serde(default)]
+    pub temperature_push: [bool; 2],
     /// Its presets (eco, away, ...) but none, and the one it's in. Home
     /// Assistant's whole list, none included, is `preset_modes` (Fledge
     /// 0.18.0 on); a list of its own off its menu.
@@ -860,6 +924,18 @@ impl ClimateChoice {
 }
 
 impl ClimateCard {
+    /// The range its target takes at all: wider than min to max where
+    /// those are limits.
+    pub fn whole(&self) -> [f64; 2] {
+        self.temperature_whole.filter(|[low, high]| *low <= self.min && *high >= self.max).unwrap_or([self.min, self.max])
+    }
+
+    /// Its ring, in tenths of a degree.
+    pub fn ring(&self) -> Ring {
+        let tenths = |t: f64| (t * 10.0).round() as i32;
+        Ring { ends: [self.min, self.max].map(tenths), whole: self.whole().map(tenths), push: self.temperature_push }
+    }
+
     /// Its action as its mode allows: off while off, and idle if it says
     /// it's cooling in heat (heating in cool), as an integration can leave
     /// a stale action behind. Every view of it then glows alike.
@@ -1075,6 +1151,8 @@ pub struct MediaCard {
     /// Where its ring stops (protocol 13): None, 0 to 100.
     #[serde(default)]
     pub volume_limits: Option<[u8; 2]>,
+    #[serde(default)]
+    pub volume_push: [bool; 2],
     /// Its album art, from its own topic.
     #[serde(skip)]
     pub art: Option<Arc<Art>>,
@@ -1092,6 +1170,10 @@ impl MediaCard {
     /// Its volume ring's ends.
     pub fn volume_ends(&self) -> [u8; 2] {
         ends(self.volume_limits, [0, 100])
+    }
+
+    pub fn volume_ring(&self) -> Ring {
+        Ring { ends: self.volume_ends().map(i32::from), whole: [0, 100], push: self.volume_push }
     }
 
     /// How far through the track it is at `now` (Unix seconds), 0..1: on
@@ -1240,6 +1322,16 @@ impl Light {
     /// Its warmth dial's ends, kelvin.
     pub fn kelvin_ends(&self) -> [u16; 2] {
         self.kelvins.filter(|[low, high]| low < high).unwrap_or([2000, 6500])
+    }
+
+    pub fn brightness_ring(&self) -> Ring {
+        Ring { ends: self.brightness_ends().map(i32::from), whole: [1, 100], push: self.brightness_push }
+    }
+
+    pub fn kelvin_ring(&self) -> Ring {
+        let ends = self.kelvin_ends();
+        let whole = self.kelvin_whole.filter(|[low, high]| *low <= ends[0] && *high >= ends[1]).unwrap_or(ends);
+        Ring { ends: ends.map(i32::from), whole: whole.map(i32::from), push: self.kelvin_push }
     }
 
     /// The colour the light shows in: its own while on, Home Assistant's
