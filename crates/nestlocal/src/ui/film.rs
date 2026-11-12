@@ -250,7 +250,7 @@ fn ui_film() {
     };
     let scene = model::ActionCard { id: "scene.goodnight".into(), name: "Goodnight".into(), icon: "mdi:weather-night".into() };
     let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
-        state: "open".into(), position: Some(60), positionable: true };
+        state: "open".into(), position: Some(60), positionable: true, position_limits: None };
     let glance = model::Glance { offset: 0, weather: Some(model::Weather { condition: "partlycloudy".into(),
         temperature: Some(8.4), unit: "°C".into() }), ..model::Glance::default() };
     let mut film = Film { dir, frames: 0, last: Vec::new(), captions: Vec::new() };

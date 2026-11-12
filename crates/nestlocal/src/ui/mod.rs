@@ -73,7 +73,10 @@ use crate::logf;
 ///      date in Home Assistant's words and order (glance.words/date_order);
 ///      how dim the night's glance is (glance.dim_level)
 ///  13  glance faces as cards (kind "face": a glance, actions run or
-///      switched round its ring, one of them held for)
+///      switched round its ring, one of them held for);
+///      rings stop at their limits from Home Assistant (light.brightness_limits,
+///      media.volume_limits, cover.position_limits; a climate's min/max and a
+///      light's kelvins come narrowed), a value past one parked at that end
 pub const PROTOCOL: u32 = 13;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
@@ -2860,6 +2863,23 @@ mod shots {
         for (name, screen) in shots {
             save(&screens::draw(&fonts, &screen, None), &format!("{out}/{name}.png"));
         }
+        // Past their rings' limits (protocol 13): each waits at that end.
+        let limited = Cards::parse(br#"{"cards":[
+            {"kind":"media","id":"media_player.kitchen","name":"Bedroom speaker","state":"playing","volume":80,"volume_limits":[10,50]},
+            {"kind":"climate","id":"climate.kitchen","name":"Kitchen","mode":"heat","action":"idle","target":16,"current":17,"min":18,"max":25,"step":0.5},
+            {"kind":"lights","name":"Reading Lamp","lights":[{"id":"light.reading_lamp","name":"Reading Lamp","icon":"m3s:table-lamp",
+             "on":true,"dimmable":true,"brightness":5,"brightness_limits":[20,80],"rgb":[255,169,87]}]},
+            {"kind":"climate","id":"climate.office","name":"Office","mode":"heat","action":"heating","target":28,"current":21,"min":18,"max":25,"step":0.5}]}"#).unwrap();
+        let [Card::Media(speaker), Card::Climate(kitchen), Card::Lights(reading), Card::Climate(office)] = &limited.cards[..] else { panic!() };
+        for (name, screen) in [
+            ("l1-volume-over", Screen::Volume { card: speaker, value: 80 }),
+            ("l2-volume-back", Screen::Volume { card: speaker, value: 50 }),
+            ("l3-climate-under", Screen::NestSet { nest: Cow::Owned(Nest::of_card(kitchen)), target: 16.0, pulse: None, setting: false, shown: None }),
+            ("l4-climate-over-heating", Screen::NestSet { nest: Cow::Owned(Nest::of_card(office)), target: 28.0, pulse: None, setting: false, shown: None }),
+            ("l5-dim-under", Screen::LightDim { light: &reading.lights[0], on: true, value: 5 }),
+        ] {
+            save(&screens::draw(&fonts, &screen, None), &format!("{out}/{name}.png"));
+        }
         let lamp_options = [screens::Opt { icon: "mdi:arrow-left", name: "Back", under: "To the cards" },
                             screens::Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn it off" }];
         save(&screens::options(&fonts, "Reading Lamp", &lamp_options, 0, lights.lights[0].colour()), &format!("{out}/9-menu.png"));
@@ -2887,7 +2907,7 @@ mod shots {
         save(&screens::draw(&fonts, &Screen::OptionsCard { card: &boost }, None), &format!("{out}/b1-options.png"));
         save(&screens::draw(&fonts, &Screen::OptionList { card: Cow::Borrowed(&boost), selected: 2 }, None), &format!("{out}/b2-option-list.png"));
         let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
-            state: "open".into(), position: Some(60), positionable: true };
+            state: "open".into(), position: Some(60), positionable: true, position_limits: None };
         save(&screens::draw(&fonts, &Screen::CoverCard { card: &blind }, None), &format!("{out}/b3-cover.png"));
         save(&screens::draw(&fonts, &Screen::CoverSet { card: &blind, value: 60 }, None), &format!("{out}/b4-cover-set.png"));
         let group = model::LightsCard { name: "Bedroom Lights".into(), icon: String::new(), lights: vec![lights.lights[2].clone()],
