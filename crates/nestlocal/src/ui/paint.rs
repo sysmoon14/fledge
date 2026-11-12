@@ -835,6 +835,52 @@ pub fn picture(canvas: &mut Canvas, rgb: &[u8], size: u32, cx: f32, cy: f32, rad
     }
 }
 
+/// A square picture `size` wide drawn `side` wide (no larger), centred on
+/// (cx, cy), over what's there: each pixel the average of those it covers,
+/// as solid as `alpha` says (all of it without).
+pub fn picture_over(canvas: &mut Canvas, rgb: &[u8], alpha: Option<&[u8]>, size: u32, side: u32, cx: f32, cy: f32) {
+    let side = side.min(size).max(1);
+    let (x0, y0) = ((cx - side as f32 / 2.0).round() as i32, (cy - side as f32 / 2.0).round() as i32);
+    for y in 0..side {
+        let py = y0 + y as i32;
+        if !(0..SIZE as i32).contains(&py) {
+            continue;
+        }
+        let (sy0, sy1) = (y * size / side, ((y + 1) * size / side).max(y * size / side + 1));
+        for x in 0..side {
+            let px = x0 + x as i32;
+            if !(0..SIZE as i32).contains(&px) {
+                continue;
+            }
+            let (sx0, sx1) = (x * size / side, ((x + 1) * size / side).max(x * size / side + 1));
+            // Colour weighted by how solid each pixel is, so a see-through
+            // edge doesn't darken it.
+            let (mut sum, mut solid) = ([0u32; 3], 0u32);
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let at = (sy * size + sx) as usize;
+                    let a = alpha.map_or(255, |alpha| alpha[at] as u32);
+                    solid += a;
+                    for k in 0..3 {
+                        sum[k] += rgb[3 * at + k] as u32 * a;
+                    }
+                }
+            }
+            if solid == 0 {
+                continue;
+            }
+            let cover = solid as f32 / (255 * (sy1 - sy0) * (sx1 - sx0)) as f32;
+            let colour = canvas.rgb(sum.map(|v| (v / solid) as u8));
+            let at = canvas.at(px as u32, py as u32);
+            let data = canvas.pixmap.data_mut();
+            for (channel, value) in colour.into_iter().enumerate() {
+                let old = data[at + channel] as f32;
+                data[at + channel] = (old + (value as f32 - old) * cover).round() as u8;
+            }
+        }
+    }
+}
+
 /// A square RGB picture `size` wide drawn `side` wide (smaller), each pixel
 /// the average of those it covers, centred on (cx, cy), corners rounded.
 pub fn picture_scaled(canvas: &mut Canvas, rgb: &[u8], size: u32, side: u32, cx: f32, cy: f32, radius: f32) {

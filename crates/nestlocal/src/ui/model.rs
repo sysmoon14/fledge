@@ -281,6 +281,12 @@ pub struct Battery {
     pub critical: Option<f32>,
     #[serde(default)]
     pub icon: String,
+    /// Its picture instead of the icon: its key among the art
+    /// (<base>/set/art/<key>), and the picture once it's come.
+    #[serde(default)]
+    pub picture: Option<String>,
+    #[serde(skip)]
+    pub art: Pic,
 }
 
 /// How a battery is doing, for its colour.
@@ -1247,6 +1253,23 @@ impl MediaCard {
 pub struct Art {
     pub size: u32,
     pub rgb: Vec<u8>,
+    /// How solid each pixel is, where the picture is see-through anywhere
+    /// (a battery face's picture, a car cut out of its background).
+    pub alpha: Option<Vec<u8>>,
+}
+
+/// A picture held by something drawn, told apart by which it is rather
+/// than by its pixels (in a screen's key).
+#[derive(Clone, Default, PartialEq)]
+pub struct Pic(pub Option<Arc<Art>>);
+
+impl std::fmt::Debug for Pic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(art) => write!(f, "Pic({:p})", Arc::as_ptr(art)),
+            None => write!(f, "Pic(none)"),
+        }
+    }
 }
 
 /// A camera's still fills the display.
@@ -1294,10 +1317,10 @@ impl Art {
                 rgb.extend_from_slice(&pixels[at..at + 3]);
             }
         }
-        Ok(Art { size: size as u32, rgb })
+        Ok(Art { size: size as u32, rgb, alpha: None })
     }
 
-    /// A PNG, square and 8-bit RGB or RGBA (alpha dropped).
+    /// A PNG, square and 8-bit RGB or RGBA.
     fn decode_png(png_data: &[u8]) -> Result<Art, String> {
         let mut reader = png::Decoder::new(png_data).read_info().map_err(|e| format!("art: {e}"))?;
         // Its size checked before anything is allocated for it: a huge one
@@ -1319,7 +1342,10 @@ impl Art {
             png::ColorType::Rgba => pixels.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(),
             other => return Err(format!("art: {other:?}: wants RGB")),
         };
-        Ok(Art { size: info.width, rgb })
+        // Its alpha kept only where it's see-through somewhere.
+        let alpha = (info.color_type == png::ColorType::Rgba && pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 255))
+            .then(|| pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect());
+        Ok(Art { size: info.width, rgb, alpha })
     }
 }
 

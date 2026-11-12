@@ -213,7 +213,7 @@ fn cover() -> Arc<Art> {
         };
         [r as u8, g as u8, b as u8]
     }).collect();
-    Arc::new(Art { size, rgb })
+    Arc::new(Art { size, rgb, alpha: None })
 }
 
 fn nest(target: f64, current: f64) -> Nest {

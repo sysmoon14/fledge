@@ -181,12 +181,22 @@ impl Ui {
         self.cards.lock().unwrap().0
     }
 
-    /// The cards, each media player's with its art.
+    /// The cards, each media player's with its art, and a battery face's
+    /// with its picture.
     fn snapshot(&self) -> (u64, Cards) {
         let (generation, mut cards) = self.cards.lock().unwrap().clone();
         let art = self.art.lock().unwrap();
+        let pictured = |glance: &mut model::Glance| {
+            if let Some(battery) = &mut glance.battery {
+                battery.art = model::Pic(battery.picture.as_deref().and_then(|key| art.get(key).cloned()));
+            }
+        };
+        if let Some(glance) = &mut cards.glance {
+            pictured(glance);
+        }
         for card in &mut cards.cards {
             match card {
+                Card::Face(face) => pictured(&mut face.glance),
                 Card::Media(media) => media.art = art.get(&media.id).cloned(),
                 Card::Camera(camera) => camera.art = art.get(&camera.id).cloned(),
                 _ => {}
@@ -841,6 +851,12 @@ impl Runtime {
             for effect in effects {
                 self.apply(effect);
             }
+            if let (Some(view), true) = (self.view, !matches!(before, Mode::Chooser(_) | Mode::Home)
+                                         && matches!(self.machine.mode, Mode::Chooser(_))) {
+                // Back among the cards from one's menu, where they showed
+                // behind it: what was done there shows on its card at once.
+                self.refresh(view.round() as i64);
+            }
             if self.machine.mode != Mode::Home || !self.machine.owns() || self.machine.position().is_some() {
                 self.black = false;
             }
@@ -1218,6 +1234,8 @@ impl Runtime {
     fn zoom_in(&mut self) {
         let Some(view) = self.view else { return };
         let at = view.round();
+        // The card as it is now, not as it was when last drawn.
+        self.refresh(at as i64);
         let mut last = Instant::now();
         while self.zoom < 1.0 {
             std::thread::sleep(Duration::from_millis(8));
@@ -1246,6 +1264,8 @@ impl Runtime {
             // Onto the cards: from a turn on the thermostat, where it is;
             // back from a card's own screens, faded in.
             let start = if self.transition != Transition::Cut { target } else { target.round() };
+            // Each as it is now: they may have changed while they didn't show.
+            self.refresh(start.round() as i64);
             self.view = Some(start);
             if self.transition != Transition::Cut {
                 let to = self.card_frame(start.round() as i64);
@@ -1448,6 +1468,21 @@ impl Runtime {
         changed
     }
 
+    /// Draws again, now, any of the cards round `at` whose frame is out of
+    /// date: before they zoom or slide into view, so a card never shows
+    /// what it was and then jumps to what it is. (While they move, a frame
+    /// that goes out of date waits for them to rest: prepare_key.)
+    fn refresh(&mut self, at: i64) {
+        self.revalidate();
+        for near in [at, at - 1, at + 1] {
+            let index = self.key(near);
+            if index != 0 && self.stale.contains(&index) {
+                self.cards.remove(&index);
+                self.prepare_key(index);
+            }
+        }
+    }
+
     /// Forgets the frames of the card with key `index`.
     fn forget(&mut self, index: usize) {
         self.cards.remove(&index);
@@ -1534,7 +1569,15 @@ impl Runtime {
         let card = |slot: usize| self.machine.cards.cards.get(slot);
         let mode = self.shown_mode();
         match &mode {
-            Mode::LightDim { on: true, value, .. } | Mode::Volume { value, .. } => Some(*value as f32 / 100.0),
+            // Along its ring's ends: its limits, where it has them.
+            Mode::LightDim { slot, light, on: true, value } => match card(*slot) {
+                Some(Card::Lights(c)) => Some(ring_fraction(*value, c.lights.get(*light)?.brightness_ends())),
+                _ => None,
+            },
+            Mode::Volume { slot, value } => match card(*slot) {
+                Some(Card::Media(c)) => Some(ring_fraction(*value, c.volume_ends())),
+                _ => None,
+            },
             Mode::LightWarmth { slot, light, value } => match card(*slot) {
                 Some(Card::Lights(c)) => {
                     let [low, high] = c.lights.get(*light)?.kelvins.unwrap_or([2000, 6500]);
@@ -1543,7 +1586,10 @@ impl Runtime {
                 _ => None,
             },
             Mode::LightHue { value, .. } => Some(*value as f32 / 360.0),
-            Mode::CoverSet { value, .. } => Some(*value as f32 / 100.0),
+            Mode::CoverSet { slot, value } => match card(*slot) {
+                Some(Card::Cover(c)) => Some(ring_fraction(*value, c.position_ends())),
+                _ => None,
+            },
             Mode::Dial { of, target } => {
                 // The mark follows the hand between steps.
                 let card = self.machine.climate(*of)?;
@@ -2236,6 +2282,12 @@ impl Runtime {
 /// Which screen a sweep belongs to: the kind of value, and whose.
 type SweepKey = (u8, usize, usize);
 
+/// How far round its ring `value` is, between the ring's ends (0..1): as
+/// screens.rs draws it at rest, so the ring swept to it lands the same.
+fn ring_fraction(value: u8, [low, high]: [u8; 2]) -> f32 {
+    ((value as f32 - low as f32) / (high as f32 - low as f32).max(1e-3)).clamp(0.0, 1.0)
+}
+
 fn sweep_key(mode: &Mode) -> Option<SweepKey> {
     match *mode {
         Mode::LightDim { slot, light, .. } => Some((0, slot, light)),
@@ -2501,6 +2553,15 @@ mod tests {
     }
 
     #[test]
+    fn a_ring_sweeps_between_its_limits() {
+        assert_eq!(ring_fraction(90, [10, 90]), 1.0, "at its highest: full");
+        assert_eq!(ring_fraction(10, [10, 90]), 0.0);
+        assert_eq!(ring_fraction(50, [10, 90]), 0.5);
+        assert_eq!(ring_fraction(95, [10, 90]), 1.0, "past it: still full");
+        assert_eq!(ring_fraction(50, [0, 100]), 0.5);
+    }
+
+    #[test]
     fn a_media_player_s_art_joins_its_card() {
         let ui = Ui::default();
         ui.configure(br#"{"cards":[{"kind":"media","id":"media_player.speaker","name":"Speaker"}]}"#).unwrap();
@@ -2509,7 +2570,7 @@ mod tests {
         let (after, cards) = ui.snapshot();
         assert!(after > before, "new art redraws");
         let Card::Media(card) = &cards.cards[0] else { panic!() };
-        assert_eq!(card.art.as_deref(), Some(&Art { size: 4, rgb: [10, 20, 30].repeat(16) }), "alpha dropped");
+        assert_eq!(card.art.as_deref(), Some(&Art { size: 4, rgb: [10, 20, 30].repeat(16), alpha: None }), "alpha dropped");
         ui.set_art("media_player.speaker", &png(4, png::ColorType::Rgba, &[10, 20, 30, 255])).unwrap();
         assert_eq!(ui.snapshot().0, after, "the same art: nothing to redraw");
         assert!(ui.set_art("media_player.speaker", &png(600, png::ColorType::Rgb, &[0, 0, 0])).is_err(), "too big");
@@ -2517,6 +2578,20 @@ mod tests {
         ui.set_art("media_player.speaker", b"").unwrap();
         let (_, cards) = ui.snapshot();
         assert!(matches!(&cards.cards[0], Card::Media(card) if card.art.is_none()), "empty: none");
+    }
+
+    #[test]
+    fn a_battery_face_s_picture_joins_it_see_through() {
+        let ui = Ui::default();
+        let battery = r#"{"layout":"battery","battery":{"label":"Car","level":64,"picture":"battery:glance"}}"#;
+        ui.configure(format!(r#"{{"cards":[{{"kind":"face","id":"fledge_face.a","name":"Car","glance":{battery}}}],"glance":{battery}}}"#)
+            .replace("battery:glance\"}}}],", "battery:fledge_face.a\"}}}],").as_bytes()).unwrap();
+        ui.set_art("battery:glance", &png(4, png::ColorType::Rgba, &[10, 20, 30, 128])).unwrap();
+        let (_, cards) = ui.snapshot();
+        let own = cards.glance.as_ref().and_then(|g| g.battery.as_ref()).unwrap();
+        assert_eq!(own.art.0.as_deref(), Some(&Art { size: 4, rgb: [10, 20, 30].repeat(16), alpha: Some(vec![128; 16]) }));
+        let Card::Face(face) = &cards.cards[0] else { panic!() };
+        assert!(face.glance.battery.as_ref().unwrap().art.0.is_none(), "its own key, not the glance's");
     }
 }
 
@@ -2913,7 +2988,7 @@ mod shots {
         let still = Arc::new(Art { size, rgb: (0..size * size).flat_map(|i| {
             let (x, y) = (i % size, i / size);
             [(60 + x / 6) as u8, (70 + y / 5) as u8, (90 + (x + y) / 12) as u8]
-        }).collect() });
+        }).collect(), alpha: None });
         let camera = model::CameraCard { id: "camera.front_door".into(), name: "Front door".into(), icon: String::new(), art: Some(still.clone()) };
         save(&screens::draw(&fonts, &Screen::CameraCard { card: &camera }, None), &format!("{out}/a3-camera.png"));
         let note = model::Alert { id: "wash".into(), title: "Washing's done".into(),
@@ -3015,7 +3090,7 @@ mod shots {
         // The size the integration sends album art at.
         let size = 168;
         let rgb = (0..size * size).flat_map(|i| [(i % size * 255 / size) as u8, (i / size * 255 / size) as u8, 160]);
-        with_art.art = Some(Arc::new(Art { size, rgb: rgb.collect() }));
+        with_art.art = Some(Arc::new(Art { size, rgb: rgb.collect(), alpha: None }));
         save(&screens::draw(&fonts, &Screen::MediaCard { card: &with_art, volume: None, progress: Some(0.4) }, None), &format!("{out}/3b-art.png"));
         let state = |extra: serde_json::Value| {
             let mut s = serde_json::json!({"mode": "heat", "action": "idle", "target": 20.5, "current_temperature": 19.5,
@@ -3061,6 +3136,21 @@ mod shots {
                 "lines":[{"kind":"date"},{"text":""},{"icon":"mdi:calendar","text":"Zażółć gęślą jaźń · août"}]}"#),
             ("g8-clock-lines", r#"{"layout":"clock","lines":[{"kind":"inside"},{"kind":"heating"},{"icon":"mdi:calendar","text":"16:30 Dentist"}]}"#),
         ];
+        // A battery face with its own picture: wide, see-through round it.
+        let mut pictured: model::Glance = serde_json::from_str(glances.iter().find(|(name, _)| *name == "k1-battery-charging").unwrap().1).unwrap();
+        let side = 168u32;
+        let solid = |x: u32, y: u32| {
+            let (dx, dy) = ((x as f32 - 84.0) / 80.0, (y as f32 - 84.0) / 30.0);
+            dx * dx + dy * dy <= 1.0
+        };
+        let pixels: Vec<(u32, u32)> = (0..side * side).map(|i| (i % side, i / side)).collect();
+        pictured.battery.as_mut().unwrap().art = model::Pic(Some(Arc::new(Art {
+            size: side,
+            rgb: pixels.iter().flat_map(|(x, y)| [(150 + x / 2) as u8, (170 + y / 4) as u8, 210]).collect(),
+            alpha: Some(pixels.iter().map(|(x, y)| if solid(*x, *y) { 255 } else { 0 }).collect()),
+        })));
+        let at = screens::GlanceIn { glance: &pictured, cards: &cards.cards, nest: Some(&heating), now: now as i64 };
+        save(&screens::draw(&fonts, &Screen::Glance { at }, None), &format!("{out}/k5-battery-picture.png"));
         for (name, json) in glances {
             let mut glance: model::Glance = serde_json::from_str(json).unwrap();
             glance.weather = Some(model::Weather { condition: "partlycloudy".into(), temperature: Some(8.4), unit: "°C".into() });

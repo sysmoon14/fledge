@@ -1834,8 +1834,14 @@ fn battery_face(p: &mut Canvas, fonts: &Fonts, battery: Option<&model::Battery>,
         let (inner, outer) = (at(199.0), at(225.0));
         paint::line(p, inner.0, inner.1, outer.0, outer.1, 3.0, alpha(WHITE, 0.85));
     }
-    let picture = if battery.icon.is_empty() { "mdi:battery" } else { &battery.icon };
-    icon(p, picture, "", HALF, 96.0, 52.0, if filled || tone.is_none() { WHITE } else { ring });
+    match &battery.art.0 {
+        // Its own picture, wide and low in its square, in the icon's place.
+        Some(art) => paint::picture_over(p, &art.rgb, art.alpha.as_deref(), art.size, 132, HALF, 92.0),
+        None => {
+            let picture = if battery.icon.is_empty() { "mdi:battery" } else { &battery.icon };
+            icon(p, picture, "", HALF, 96.0, 52.0, if filled || tone.is_none() { WHITE } else { ring });
+        }
+    }
     glance_label(p, fonts, 156.0, &battery.label);
     match level {
         Some(level) => big_number_on(p, None, fonts, level.round() as f64, false, "%", WHITE),
