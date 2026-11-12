@@ -43,6 +43,24 @@ pub struct Cards {
     /// and a switch's ring turns it off and on (protocol 8); on without.
     #[serde(default)]
     dim_off: Option<bool>,
+    /// Where the thermostat's own ring stops (protocol 15); without, as
+    /// far as the Nest goes.
+    #[serde(default)]
+    thermostat_limits: Option<OwnLimits>,
+}
+
+/// Limits on the thermostat's own card, as Home Assistant keeps them: the
+/// lowest and highest its ring turns to (either may be left out), whether
+/// each gives way to being turned on past, and the scale they're in
+/// (Home Assistant's, "°C" or "°F").
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct OwnLimits {
+    #[serde(default)]
+    temperature: [Option<f64>; 2],
+    #[serde(default)]
+    push: [bool; 2],
+    #[serde(default)]
+    unit: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -412,6 +430,10 @@ impl Cards {
     }
 
     /// This thermostat's name in Home Assistant, if it sent one.
+    pub fn thermostat_limits(&self) -> Option<&OwnLimits> {
+        self.thermostat_limits.as_ref()
+    }
+
     pub fn thermostat_name(&self) -> Option<&str> {
         self.thermostat_name.as_deref().map(str::trim).filter(|n| !n.is_empty())
     }
@@ -1166,6 +1188,30 @@ impl Nest {
         }
     }
 
+    /// Its ring between `limits`, in its own scale: an end left out, or
+    /// outside what it takes, stays where the Nest has it. Without any, the
+    /// whole of what it takes.
+    pub fn limit(&mut self, limits: Option<&OwnLimits>) {
+        let whole = if self.fahrenheit { [48.0, 90.0] } else { [9.0, 32.0] };
+        let card = &mut self.card;
+        (card.min, card.max, card.temperature_whole, card.temperature_push) = (whole[0], whole[1], None, [false; 2]);
+        let Some(limits) = limits else { return };
+        let theirs = limits.unit.as_deref().is_some_and(|unit| unit.contains('F'));
+        let fahrenheit = self.fahrenheit;
+        let shown = |t: f64| match (theirs, fahrenheit) {
+            (true, false) => ((t - 32.0) / 1.8 * 2.0).round() / 2.0,
+            (false, true) => (t * 1.8 + 32.0).round(),
+            _ => t,
+        };
+        let [low, high] = limits.temperature.map(|end| end.map(shown).filter(|t| *t > whole[0] && *t < whole[1]));
+        let (min, max) = (low.unwrap_or(whole[0]), high.unwrap_or(whole[1]));
+        if min >= max || (low.is_none() && high.is_none()) {
+            return;
+        }
+        (card.min, card.max, card.temperature_whole) = (min, max, Some(whole));
+        card.temperature_push = [limits.push[0] && low.is_some(), limits.push[1] && high.is_some()];
+    }
+
     /// A temperature as shown, in °C for its commands.
     pub fn celsius(&self, shown: f64) -> f64 {
         if self.fahrenheit { ((shown - 32.0) / 1.8 * 2.0).round() / 2.0 } else { shown }
@@ -1561,6 +1607,33 @@ mod tests {
         let with = Nest::from_state(state(true).as_object().unwrap());
         assert_eq!(with.card.choices(ClimateChoice::Fan), (&["auto".to_owned(), "on".to_owned()][..], Some("auto")));
         assert_eq!(with.card.choices(ClimateChoice::Preset).0, ["none", "eco"]);
+    }
+
+    #[test]
+    fn the_thermostat_s_own_ring_stops_at_its_limits() {
+        let state = |scale: &str| serde_json::json!({"mode": "heat", "target": 20.0, "temperature_scale": scale});
+        let mut nest = Nest::from_state(state("C").as_object().unwrap());
+        let cards = Cards::parse(br#"{"cards":[],"thermostat_limits":{"temperature":[16,24],"push":[false,true],"unit":"\u00b0C"}}"#).unwrap();
+        nest.limit(cards.thermostat_limits());
+        assert_eq!((nest.card.min, nest.card.max, nest.card.whole(), nest.card.temperature_push), (16.0, 24.0, [9.0, 32.0], [false, true]));
+        nest.limit(None);
+        assert_eq!((nest.card.min, nest.card.max, nest.card.temperature_whole), (9.0, 32.0, None), "taken off again");
+        let top = Cards::parse(br#"{"cards":[],"thermostat_limits":{"temperature":[null,22.5],"push":[true,true]}}"#).unwrap();
+        nest.limit(top.thermostat_limits());
+        assert_eq!((nest.card.min, nest.card.max, nest.card.temperature_push), (9.0, 22.5, [false, true]), "one end: the other as far as it goes");
+        let out = Cards::parse(br#"{"cards":[],"thermostat_limits":{"temperature":[5,40]}}"#).unwrap();
+        nest.limit(out.thermostat_limits());
+        assert_eq!((nest.card.min, nest.card.max, nest.card.temperature_whole), (9.0, 32.0, None), "outside what it takes: none");
+        // Home Assistant in Celsius, the Nest showing Fahrenheit, and the other way.
+        let mut nest = Nest::from_state(state("F").as_object().unwrap());
+        nest.limit(cards.thermostat_limits());
+        assert_eq!((nest.card.min, nest.card.max), (61.0, 75.0));
+        let theirs = Cards::parse(br#"{"cards":[],"thermostat_limits":{"temperature":[60,72],"unit":"\u00b0F"}}"#).unwrap();
+        nest.limit(theirs.thermostat_limits());
+        assert_eq!((nest.card.min, nest.card.max), (60.0, 72.0));
+        let mut nest = Nest::from_state(state("C").as_object().unwrap());
+        nest.limit(theirs.thermostat_limits());
+        assert_eq!((nest.card.min, nest.card.max), (15.5, 22.0));
     }
 
     #[test]

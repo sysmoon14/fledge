@@ -546,7 +546,8 @@ impl Machine {
     }
 
     /// The thermostat's state, as nestlocal has it now.
-    pub fn set_nest(&mut self, nest: Nest) {
+    pub fn set_nest(&mut self, mut nest: Nest) {
+        nest.limit(self.cards.thermostat_limits());
         if self.nest.as_ref() != Some(&nest) {
             self.nest = Some(nest);
             self.dirty = true;
@@ -628,6 +629,10 @@ impl Machine {
     /// New cards from Home Assistant: keeps the mode if what it shows exists.
     pub fn set_cards(&mut self, cards: Cards, out: &mut Vec<Effect>) {
         self.cards = cards;
+        // Its own ring's limits come with the cards.
+        if let Some(nest) = self.nest.as_mut() {
+            nest.limit(self.cards.thermostat_limits());
+        }
         // What was just sent stands until Home Assistant has caught up.
         for (command, _) in self.expected.clone() {
             self.apply_sent(&command);
@@ -3905,6 +3910,24 @@ mod tests {
         assert_eq!(sent(&rig.press()), vec![("target".into(), "9".into())], "a press sends it, then its menu");
         rig.press();
         assert_eq!(rig.machine.mode, Mode::Chooser(0), "its menu's Back");
+    }
+
+    #[test]
+    fn the_thermostat_s_own_dial_stops_at_its_limits_from_home_assistant() {
+        let mut rig = nest_rig();
+        let limited = Cards::parse(br#"{"cards":[],"thermostat_limits":{"temperature":[16,22],"unit":"\u00b0C"}}"#).unwrap();
+        rig.machine.set_cards(limited, &mut vec![]);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 });
+        rig.turn(CLIMATE_STEP * 40);
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 22.0 }, "no higher than its limit");
+        rig.turn(-CLIMATE_STEP * 40);
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 16.0 }, "no lower than its limit");
+        // The Nest's state coming again keeps them; the cards without them take them off.
+        rig.machine.set_nest(nest(serde_json::json!({"current_temperature": 18.0})));
+        assert_eq!(rig.machine.nest.as_ref().map(|n| (n.card.min, n.card.max)), Some((16.0, 22.0)));
+        rig.machine.set_cards(Cards::parse(br#"{"cards":[]}"#).unwrap(), &mut vec![]);
+        assert_eq!(rig.machine.nest.as_ref().map(|n| (n.card.min, n.card.max)), Some((9.0, 32.0)));
     }
 
     #[test]

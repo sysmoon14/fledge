@@ -38,11 +38,12 @@
 </ul>
 
 <h2 id="limits">Ring limits</h2>
-<p>Each card with a ring can have a <strong>Lowest</strong> and <strong>Highest</strong>: a thermostat's temperature, a speaker's volume, a cover's position, a light's brightness and warmth. Leave them blank to go as far as the device does. Set them on the card in the panel's Cards tab.</p>
+<p>Each card with a ring can have a <strong>Lowest</strong> and <strong>Highest</strong>: a thermostat's temperature (the Nest's own card too), a speaker's volume, a cover's position, a light's brightness and warmth. Leave them blank to go as far as the device does. Set them on the card in the panel's Cards tab.</p>
 <ul>
   <li>The ring's ends are the limits: a full ring is your highest, an empty ring your lowest. The card says <em>At your limit</em> when you reach one.</li>
   <li>The Nest's commands stay within them. Home Assistant, its app and your automations can still set anything.</li>
   <li>A light group's limits hold for its lights too, unless a light has its own.</li>
+  <li>The Nest's own card's limits hold on its card, not on Nest's own dial (if you choose it in Settings) or its schedule.</li>
   <li><strong>Can be pushed past</strong>, for each end: keep turning, three arrows light one a click, and the next click goes through. Past the limit the ring stays full (or empty), and the arrows, number and words turn amber.</li>
   <li>A limit that can't be pushed past holds. Opened while the value is already beyond it, the card waits at that end: the number shows grey, and it says which way to turn. The first turn back sets the limit.</li>
 </ul>

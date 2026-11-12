@@ -81,7 +81,8 @@ use crate::logf;
 ///      apart (<what>_push; a climate's temperature_whole and a light's
 ///      kelvin_whole say how far), and it says when it's at one; the
 ///      battery face (glance layout "battery", glance.battery)
-pub const PROTOCOL: u32 = 14;
+///  15  the thermostat's own ring stops at limits too (thermostat_limits)
+pub const PROTOCOL: u32 = 15;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
