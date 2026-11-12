@@ -1068,6 +1068,56 @@ pub fn slide_band(out: &mut Canvas, old: &Canvas, new: &Canvas, top: f32, bottom
     }
 }
 
+/// `layer` (drawn alone on black) over `canvas` between `top` and `bottom`,
+/// moved `dx` to the right, at `opacity`: a device's option leaving the
+/// middle of its ring or arriving there. What's black on the layer leaves
+/// the canvas as it is. `columns` is where the layer has anything
+/// (columns_drawn): only those are gone over, on the unit's one slow core.
+pub fn slide_over(canvas: &mut Canvas, layer: &Canvas, columns: (u32, u32), top: u32, bottom: u32, dx: f32, opacity: f32) {
+    let weight = (opacity.clamp(0.0, 1.0) * 255.0) as u16;
+    if weight == 0 {
+        return;
+    }
+    let shift = dx.round() as i32;
+    let from = layer.pixmap.data();
+    for sx in columns.0..columns.1.min(SIZE) {
+        let x = sx as i32 + shift;
+        if x < 0 || x >= SIZE as i32 {
+            continue;
+        }
+        let x = x as u32;
+        for y in top..bottom.min(SIZE) {
+            let source = layer.at(sx, y);
+            let pixel = &from[source..source + 3];
+            let most = *pixel.iter().max().unwrap_or(&0) as u16;
+            if most == 0 {
+                continue;
+            }
+            // As much of the canvas goes as the layer's brightest channel covers.
+            let cover = most * weight / 255;
+            let at = canvas.at(x, y);
+            let data = canvas.pixmap.data_mut();
+            for k in 0..3 {
+                data[at + k] = ((pixel[k] as u16 * weight + data[at + k] as u16 * (255 - cover)) / 255) as u8;
+            }
+        }
+    }
+}
+
+/// The columns of `layer` (drawn on black) with anything on them between
+/// `top` and `bottom`: from the first to one past the last.
+pub fn columns_drawn(layer: &Canvas, top: u32, bottom: u32) -> (u32, u32) {
+    let data = layer.pixmap.data();
+    let drawn = |x: &u32| (top..bottom.min(SIZE)).any(|y| {
+        let at = layer.at(*x, y);
+        data[at..at + 3] != [0, 0, 0]
+    });
+    match ((0..SIZE).find(drawn), (0..SIZE).rev().find(drawn)) {
+        (Some(first), Some(last)) => (first, last + 1),
+        _ => (0, 0),
+    }
+}
+
 /// `text`'s width at `size`, `spacing` added between letters.
 pub fn measure(font: &FontArc, size: f32, text: &str, spacing: f32) -> f32 {
     let scaled = font.as_scaled(PxScale::from(size));
@@ -1407,6 +1457,27 @@ mod tests {
             }
         }
         c
+    }
+
+    #[test]
+    fn a_layer_slides_over_at_its_opacity_and_its_black_leaves_what_s_under() {
+        let mut layer = canvas_for(BLACK, false);
+        let at = layer.at(100, 200);
+        layer.pixmap.data_mut()[at..at + 3].copy_from_slice(&[255, 255, 255]);
+        let mut out = canvas_for([40, 40, 40], false);
+        assert_eq!(columns_drawn(&layer, 150, 250), (100, 101));
+        slide_over(&mut out, &layer, (100, 101), 150, 250, 10.0, 1.0);
+        let moved = out.at(110, 200);
+        assert_eq!(out.pixmap.data()[moved..moved + 3], [255, 255, 255], "moved 10 right, whole");
+        let under = out.at(100, 200);
+        assert_eq!(out.pixmap.data()[under..under + 3], [40, 40, 40], "black on the layer: left alone");
+        let mut out = canvas_for([40, 40, 40], false);
+        slide_over(&mut out, &layer, (100, 101), 150, 250, 0.0, 0.5);
+        let half = out.pixmap.data()[under];
+        assert!((145..=150).contains(&half), "half there, over half of what was under: {half}");
+        let mut out = canvas_for([40, 40, 40], false);
+        slide_over(&mut out, &layer, (100, 101), 210, 250, 0.0, 1.0);
+        assert_eq!(out.pixmap.data()[under..under + 3], [40, 40, 40], "outside its band: nothing");
     }
 
     #[test]

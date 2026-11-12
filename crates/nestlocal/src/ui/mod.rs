@@ -413,6 +413,9 @@ struct Runtime {
     progress_drawn: Instant,
     /// The next frame fades in (the media page's track back).
     fade_next: bool,
+    /// The ring of options that shows (its title, its options and which is
+    /// chosen), so a turn to the next one moves there (draw_options).
+    options_shown: Option<OptionsShown>,
     /// The thermostat's dial changing colour: the frame it fades from, and
     /// when it began; and the still parts kept for it, by still_key.
     recolour: Option<(device::Frame, Instant)>,
@@ -586,7 +589,7 @@ impl Runtime {
             scratch: vec![0; (paint::SIZE * paint::SIZE * 4) as usize], sweep: None, live: None, ticker: None, last_frame: now,
             last_check: now - Duration::from_secs(10), nlclient: false, frames: Default::default(), spent: Default::default(), paced: Default::default(),
             pressed: None, back_chosen: None, back_since: None, native_input: now, settings_checked: now, settings_seen: 0, native_settings: false,
-            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, home_from: None, set_words: false, volume_view: false, progress_drawn: now, fade_next: false,
+            nest_checked: now - Duration::from_secs(10), pulse: None, next_pulse: now, glide: None, force_draw: false, last_click: now, cards_stale: false, home_from: None, set_words: false, volume_view: false, progress_drawn: now, fade_next: false, options_shown: None,
             recolour: None, stills: HashMap::new(), now_shown: (0.0, 0.0), now_side: 1.0,
             dial: None, last_dial: now - Duration::from_secs(60), count: None, press_lit: false,
         }
@@ -2016,21 +2019,68 @@ impl Runtime {
             (Action::Face(i), Some(face)) if *i < face.actions.len() => face_item(&face.actions[*i]),
             _ => menu_item(*action, now(action)),
         }).collect();
+        let accent = screens::accent(&screen);
+        let kind = std::mem::replace(&mut self.transition, Transition::Cut);
+        self.draw_options(title, items, selected, accent, kind);
+    }
+
+    /// A ring of options (a device's menu, an alarm's modes) with
+    /// `selected` chosen, arriving by `kind`; or, where the same ring shows
+    /// already with another chosen, turning from that one to this.
+    fn draw_options(&mut self, title: String, items: Vec<(String, String, String)>, selected: usize, accent: [u8; 3], kind: Transition) {
         let options: Vec<screens::Opt> = items.iter()
             .map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
-        let canvas = screens::options(&self.fonts, &title, &options, selected, screens::accent(&screen));
-        let frame = device::frame(canvas);
+        let frame = device::frame(screens::options(&self.fonts, &title, &options, selected, accent));
         // The device's screen redraws whole when the menu closes.
         self.live = None;
-        let kind = std::mem::replace(&mut self.transition, Transition::Cut);
-        self.transit(&frame, kind);
+        let from = match &self.options_shown {
+            Some((shown, were, from)) if kind == Transition::Cut && *shown == title && *were == items && *from != selected => Some(*from),
+            _ => None,
+        };
+        if let (Some(from), false) = (from, self.display.lost()) {
+            let mut turn = screens::options_turn(&self.fonts, &title);
+            let middle = |k: usize| options.get(k).map(|item| screens::option_middle(&self.fonts, item, accent));
+            if let (Some(old), Some(new)) = (middle(from), middle(selected)) {
+                let (started, length) = (Instant::now(), OPTION_TURN.as_secs_f32());
+                let mut frames = 0;
+                loop {
+                    let t = started.elapsed().as_secs_f32() / length;
+                    if t >= 1.0 {
+                        break;
+                    }
+                    let canvas = screens::options_turning(&mut turn, &options, from, selected, motion::curve(t), accent, &old, &new);
+                    self.display.show(&device::frame(canvas));
+                    frames += 1;
+                }
+                // Too few to read as movement: say so, as for frames that miss the display's.
+                if frames < 10 {
+                    logf!("ui: options turned in {frames} frames over {} ms", started.elapsed().as_millis());
+                }
+            }
+        } else {
+            self.transit(&frame, kind);
+        }
         self.display.show(&frame);
+        self.options_shown = Some((title, items, selected));
     }
 
     fn draw(&mut self) {
         if let Mode::Menu { view, actions, selected } = self.machine.mode.clone() {
             return self.draw_menu(&view, &actions, selected);
         }
+        // An alarm's modes are a ring of options too, and turn as one.
+        if let Mode::AlarmModes { slot, selected } = self.machine.mode {
+            if let Some(Card::Alarm(card)) = self.machine.cards.cards.get(slot) {
+                let (title, items, accent) = screens::alarm_choices(card, selected);
+                let kind = match (std::mem::replace(&mut self.transition, Transition::Cut), std::mem::take(&mut self.fade_next)) {
+                    (Transition::Cut, true) => Transition::Fade,
+                    (kind, _) => kind,
+                };
+                (self.ticker, self.glide) = (None, None);
+                return self.draw_options(title, items, selected, accent, kind);
+            }
+        }
+        self.options_shown = None;
         if self.machine.mode == Mode::Home {
             // Held at rest: nothing, as the display goes out by itself.
             if self.black && self.transition == Transition::Cut && !self.display.lost() {
@@ -2321,6 +2371,14 @@ fn with_number(mode: Mode, at: f64) -> Mode {
         other => other,
     }
 }
+
+/// A ring of options as it shows: its title, each option's icon, name and
+/// what a press does, and which is chosen.
+type OptionsShown = (String, Vec<(String, String, String)>, usize);
+
+/// How long the ring of options takes to turn from one to the next: under
+/// machine::MENU_EVERY, so a hand turning on is never kept waiting.
+const OPTION_TURN: Duration = Duration::from_millis(200);
 
 /// How the display moves from one screen to the next (motion::Kind).
 /// Turning between the cards isn't one: the cards follow the ring
@@ -2978,6 +3036,27 @@ mod shots {
         let lamp_options = [screens::Opt { icon: "mdi:arrow-left", name: "Back", under: "To the cards" },
                             screens::Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn it off" }];
         save(&screens::options(&fonts, "Reading Lamp", &lamp_options, 0, lights.lights[0].colour()), &format!("{out}/9-menu.png"));
+        // The ring of options turning from Back to the next, and back again.
+        let (mut turn, accent) = (screens::options_turn(&fonts, "Reading Lamp"), lights.lights[0].colour());
+        let middles: Vec<screens::Middle> = lamp_options.iter().map(|o| screens::option_middle(&fonts, o, accent)).collect();
+        for (name, from, to) in [("on", 0, 1), ("back", 1, 0)] {
+            for step in 0..=4 {
+                let e = step as f32 / 4.0;
+                save(&screens::options_turning(&mut turn, &lamp_options, from, to, e, accent, &middles[from], &middles[to]),
+                     &format!("{out}/9-menu-{name}-{step}.png"));
+            }
+        }
+        if !paint::fledge() {
+            for (from, to) in [(0, 1), (1, 0)] {
+                let mut ends = |e: f32, at: usize| {
+                    let turning = screens::options_turning(&mut turn, &lamp_options, from, to, e, accent, &middles[from], &middles[to]);
+                    assert!(turning.pixmap.data() == screens::options(&fonts, "Reading Lamp", &lamp_options, at, accent).pixmap.data(),
+                            "turning {from} to {to}: at {e} it is option {at} at rest");
+                };
+                ends(0.0, from);
+                ends(1.0, to);
+            }
+        }
         let lamp = model::LightsCard { name: "Reading Lamp".into(), icon: String::new(), lights: vec![lights.lights[0].clone()], members: vec![] };
         save(&screens::draw(&fonts, &Screen::LightsCard { card: &lamp }, None), &format!("{out}/1b-lamp.png"));
         let scene = model::ActionCard { id: "scene.goodnight".into(), name: "Goodnight".into(), icon: "mdi:weather-night".into() };

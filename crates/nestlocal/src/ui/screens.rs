@@ -2487,23 +2487,118 @@ pub struct Opt<'a> {
 pub fn options(fonts: &Fonts, title: &str, items: &[Opt], selected: usize, accent: [u8; 3]) -> Canvas {
     let n = items.len().max(1);
     let selected = selected.min(n - 1);
-    let mut p = paint::face(BLACK);
-    let Some(chosen) = items.get(selected) else { return p };
-    let back = chosen.icon == "mdi:arrow-left";
-    let tint = if back { WHITE } else { accent };
+    let mut p = options_still(fonts, title);
+    let Some(chosen) = items.get(selected) else { return paint::face(BLACK) };
     let (mark, _, _) = mode_place(selected, n);
-    paint::ring(&mut p, |i| if i.abs_diff(mark) <= 3 { colour(if back { GREY } else { accent }) } else { colour(DIM) }, &[mark]);
+    options_ring(&mut p, mark, option_tints(chosen, accent).0);
     for (k, item) in items.iter().enumerate() {
         let (_, x, y) = mode_place(k, n);
         let on = k == selected;
         icon(&mut p, item.icon, "option", x, y, if on { 40.0 } else { 32.0 }, if on { WHITE } else { GREY });
     }
-    icon(&mut p, chosen.icon, "option", HALF, 212.0, 80.0, tint);
-    let name = paint::fit(fonts.medium(), 42.0, chosen.name, 0.0, 320.0);
-    paint::text(&mut p, fonts.medium(), 42.0, HALF, 300.0, &name, 0.0, WHITE);
-    line(&mut p, fonts, 340.0, chosen.under, GREY);
+    option_words(&mut p, fonts, chosen, accent);
+    p
+}
+
+/// What stays as a device's options turn: the face, and the device's name.
+pub fn options_still(fonts: &Fonts, title: &str) -> Canvas {
+    let mut p = paint::face(BLACK);
     let label = paint::fit(fonts.medium(), 20.0, title, 0.0, 210.0);
     paint::text(&mut p, fonts.medium(), 20.0, HALF, 404.0, &label, 0.0, GREY);
+    p
+}
+
+/// An option's colours: its marker's on the ring, and its own in the
+/// middle. Back's are grey and white, any other's the device's.
+fn option_tints(item: &Opt, accent: [u8; 3]) -> ([u8; 3], [u8; 3]) {
+    if item.icon == "mdi:arrow-left" { (GREY, WHITE) } else { (accent, accent) }
+}
+
+/// The marker on the options' ring, at tick `mark`.
+fn options_ring(p: &mut Canvas, mark: usize, tint: [u8; 3]) {
+    paint::ring(p, |i| if i.abs_diff(mark) <= 3 { colour(tint) } else { colour(DIM) }, &[mark]);
+}
+
+/// The option chosen, large in the middle: its icon, its name, and what a
+/// press does.
+fn option_words(p: &mut Canvas, fonts: &Fonts, item: &Opt, accent: [u8; 3]) {
+    icon(p, item.icon, "option", HALF, 212.0, 80.0, option_tints(item, accent).1);
+    let name = paint::fit(fonts.medium(), 42.0, item.name, 0.0, 320.0);
+    paint::text(p, fonts.medium(), 42.0, HALF, 300.0, &name, 0.0, WHITE);
+    line(p, fonts, 340.0, item.under, GREY);
+}
+
+/// An option's middle alone on black, to slide in and out as the ring
+/// turns from one option to the next (options_turning), and the columns
+/// it's on.
+pub struct Middle {
+    layer: Canvas,
+    columns: (u32, u32),
+}
+
+/// Where an option's middle is, down the display.
+const MIDDLE: (u32, u32) = (160, 364);
+
+pub fn option_middle(fonts: &Fonts, item: &Opt, accent: [u8; 3]) -> Middle {
+    let mut layer = paint::canvas(BLACK);
+    option_words(&mut layer, fonts, item, accent);
+    let columns = paint::columns_drawn(&layer, MIDDLE.0, MIDDLE.1);
+    Middle { layer, columns }
+}
+
+/// How far an option's middle slides as it gives way to the next.
+const OPTION_SLIDE: f32 = 44.0;
+
+/// A ring of options while it turns: what stays (the face, the device's
+/// name) with the ring on it, kept from frame to frame so only the ticks
+/// the marker leaves and reaches are drawn again.
+pub struct Turn {
+    ringed: Canvas,
+    live: paint::Live,
+}
+
+pub fn options_turn(fonts: &Fonts, title: &str) -> Turn {
+    let still = options_still(fonts, title);
+    Turn { live: paint::Live::new(&still), ringed: still }
+}
+
+/// A device's options `e` (0 to 1) of the way from option `from` to `to`:
+/// the marker running round the ring between them, the one left shrinking
+/// back as the one reached grows, and in the middle the old option sliding
+/// away as the new one comes in from the side the ring was turned to.
+/// `old` and `new` are their option_middle.
+#[allow(clippy::too_many_arguments)] // a frame of one movement: all of what moves
+pub fn options_turning(turn: &mut Turn, items: &[Opt], from: usize, to: usize, e: f32, accent: [u8; 3],
+                       old: &Middle, new: &Middle) -> Canvas {
+    let n = items.len().max(1);
+    let (from, to) = (from.min(n - 1), to.min(n - 1));
+    let (Some(left), Some(reached)) = (items.get(from), items.get(to)) else { return turn.ringed.clone() };
+    let e = e.clamp(0.0, 1.0);
+    let (start, end) = (mode_place(from, n).0 as f32, mode_place(to, n).0 as f32);
+    let mark = (start + (end - start) * e).round() as usize;
+    let (was, will) = (option_tints(left, accent).0, option_tints(reached, accent).0);
+    let tint: [u8; 3] = std::array::from_fn(|k| (was[k] as f32 + (will[k] as f32 - was[k] as f32) * e).round() as u8);
+    paint::ring_live(&mut turn.ringed, &mut turn.live, |i| if i.abs_diff(mark) <= 3 { colour(tint) } else { colour(DIM) }, &[mark]);
+    paint::settle(&mut turn.live);
+    let mut p = turn.ringed.clone();
+    // The old one gone by half way, the new one in from a little before:
+    // they barely show together, so the words never run into each other.
+    let side = if to > from { 1.0 } else { -1.0 };
+    let (going, coming) = (1.0 - (e / 0.5).min(1.0), ((e - 0.4) / 0.6).max(0.0));
+    paint::slide_over(&mut p, &old.layer, old.columns, MIDDLE.0, MIDDLE.1, -side * OPTION_SLIDE * e, going);
+    paint::slide_over(&mut p, &new.layer, new.columns, MIDDLE.0, MIDDLE.1, side * OPTION_SLIDE * (1.0 - e), coming);
+    for (k, item) in items.iter().enumerate() {
+        let (_, x, y) = mode_place(k, n);
+        // How far this one is the one chosen: large and white, else small and grey.
+        let on = if k == to { e } else if k == from { 1.0 - e } else { 0.0 };
+        let Some(found) = icons::lookup(item.icon, "option") else { continue };
+        if on < 1.0 {
+            paint::icon(&mut p, found, x, y, 32.0, alpha(GREY, 1.0 - on));
+        }
+        if on > 0.0 {
+            paint::icon(&mut p, found, x, y, 40.0, alpha(WHITE, on));
+        }
+    }
     p
 }
 
@@ -2525,30 +2620,38 @@ pub fn accent(screen: &Screen) -> [u8; 3] {
 /// An alarm's options, as its state offers them: Back, then its modes to
 /// arm to (violet), Disarm (green) or Cancel (amber).
 fn alarm_modes(fonts: &Fonts, card: &AlarmCard, selected: usize) -> Canvas {
+    let (title, items, accent) = alarm_choices(card, selected);
+    let items: Vec<Opt> = items.iter().map(|(icon, name, under)| Opt { icon, name, under }).collect();
+    options(fonts, &title, &items, selected, accent)
+}
+
+/// What alarm_modes draws: the alarm's name, each option's icon, name and
+/// what a press does, and the colour of the one chosen.
+pub fn alarm_choices(card: &AlarmCard, selected: usize) -> (String, Vec<(String, String, String)>, [u8; 3]) {
     use super::machine::{alarm_options, AlarmOption};
     let choices = alarm_options(card);
-    let names: Vec<String> = choices.iter().map(|o| match o {
-        AlarmOption::Arm(i) => card.modes.get(*i as usize).map_or(String::new(), |m| card.mode_name(&m.mode)),
-        _ => String::new(),
-    }).collect();
     let code = card.wants_digits();
-    let items: Vec<Opt> = choices.iter().zip(&names).map(|(option, name)| match option {
-        AlarmOption::Back => Opt { icon: "mdi:arrow-left", name: "Back", under: "To the cards" },
-        AlarmOption::Arm(i) => Opt {
-            icon: card.modes.get(*i as usize).map_or("mdi:shield-lock", |m| alarm_mode_icon(&m.mode)), name,
-            under: if code { "Press, then the code" } else { "Press to arm" },
-        },
-        AlarmOption::Disarm => Opt { icon: "mdi:shield-lock-open", name: "Disarm",
-                                     under: if code { "Press, then the code" } else { "Press to disarm" } },
-        AlarmOption::Cancel => Opt { icon: "mdi:window-close", name: "Cancel", under: "Press to stop it arming" },
+    let items = choices.iter().map(|option| {
+        let (icon, name, under) = match option {
+            AlarmOption::Back => ("mdi:arrow-left", "Back".to_owned(), "To the cards"),
+            AlarmOption::Arm(i) => {
+                let mode = card.modes.get(*i as usize);
+                (mode.map_or("mdi:shield-lock", |m| alarm_mode_icon(&m.mode)), mode.map_or(String::new(), |m| card.mode_name(&m.mode)),
+                 if code { "Press, then the code" } else { "Press to arm" })
+            }
+            AlarmOption::Disarm => ("mdi:shield-lock-open", "Disarm".to_owned(),
+                                    if code { "Press, then the code" } else { "Press to disarm" }),
+            AlarmOption::Cancel => ("mdi:window-close", "Cancel".to_owned(), "Press to stop it arming"),
+        };
+        (icon.to_owned(), name, under.to_owned())
     }).collect();
-    let accent = match choices.get(selected.min(choices.len() - 1)) {
+    let accent = match choices.get(selected.min(choices.len().max(1) - 1)) {
         Some(AlarmOption::Disarm) => ECO,
         Some(AlarmOption::Cancel) => AMBER,
         _ => ALARM_ARMED,
     };
-    let title = if card.name.is_empty() { "Alarm" } else { card.name.as_str() };
-    options(fonts, title, &items, selected, accent)
+    let title = if card.name.is_empty() { "Alarm".to_owned() } else { card.name.clone() };
+    (title, items, accent)
 }
 
 /// Arming refused with a door or window open: what's open, and arming
