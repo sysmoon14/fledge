@@ -210,7 +210,7 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
 pub fn still_key(screen: &Screen) -> Option<String> {
     // Past its ring's limits, it says so under its number.
     still_part_key(screen).map(|key| match parked(screen) {
-        Some((past, limit)) => format!("{key} parked {past} {limit}"),
+        Some(edge) => format!("{key} {edge:?}"),
         None => key,
     })
 }
@@ -257,40 +257,72 @@ fn line(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
     paint::text(pixmap, fonts.regular(), 24.0, HALF, y, &text, 0.0, c);
 }
 
-/// A value past its ring's limits (Home Assistant set it there): which way
-/// (model::past) and that limit in words, its unit after it.
-pub type Parked = Option<(i8, String)>;
-
-fn parked_at<T: PartialOrd + Copy>(value: T, ends: [T; 2], words: impl Fn(T) -> String) -> Parked {
-    match model::past(value, ends) {
-        0 => None,
-        past => Some((past, words(if past > 0 { ends[1] } else { ends[0] }))),
-    }
+/// A value at or past one of its ring's limits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Edge {
+    /// Which limit: -1 its lowest, 1 its highest.
+    pub side: i8,
+    /// That limit in words, its unit after it.
+    pub limit: String,
+    /// Past it (Home Assistant set it there, or it was pushed through),
+    /// not just at it.
+    pub past: bool,
+    /// Whether that limit gives way to being turned on past.
+    pub pushes: bool,
+    /// The clicks pushing on it so far.
+    pub pressed: u8,
 }
 
-/// Whether a value screen's value is past its ring's limits: its ring then
-/// waits at that end, arrows beyond it pointing on out, its number grey,
-/// and under it which limit and which way to turn to it.
+pub type Parked = Option<Edge>;
+
+/// The push on a limit under way (Machine::pushing), for the screens drawn
+/// next: the arrows past that end light one a click.
+static PUSHING: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
+
+pub fn set_pushing(pushing: i8) {
+    PUSHING.store(pushing, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn edge_of(value: i32, ring: model::Ring, words: impl Fn(i32) -> String) -> Parked {
+    let side = ring.edge(value);
+    let limit = ring.limit(side)?;
+    let past = ring.past(value) != 0;
+    let pushing = PUSHING.load(std::sync::atomic::Ordering::Relaxed);
+    let pressed = if !past && pushing.signum() == side { pushing.unsigned_abs() } else { 0 };
+    Some(Edge { side, limit: words(limit), past, pushes: ring.pushes(side), pressed })
+}
+
+/// Whether a value screen's value is at or past one of its ring's limits.
+/// At one, it says so. Past one that holds, the ring waits at that end,
+/// arrows beyond it pointing on out, its number grey, and under it which
+/// limit and which way to turn to it; past one that gives way, the arrows
+/// and the number are amber and it says which limit it's over.
 pub fn parked(screen: &Screen) -> Parked {
     match screen {
         Screen::LightDim { light, on: true, value } if light.dimmable => {
-            parked_at(*value, light.brightness_ends(), |v| format!("{v}%"))
+            edge_of(*value as i32, light.brightness_ring(), |v| format!("{v}%"))
         }
-        Screen::LightWarmth { light, value } => parked_at(*value, light.kelvin_ends(), |v| format!("{v}K")),
-        Screen::Volume { card, value } => parked_at(*value, card.volume_ends(), |v| v.to_string()),
-        Screen::CoverSet { card, value } if card.positionable => parked_at(*value, card.position_ends(), |v| format!("{v}%")),
+        Screen::LightWarmth { light, value } => edge_of(*value as i32, light.kelvin_ring(), |v| format!("{v}K")),
+        Screen::Volume { card, value } => edge_of(*value as i32, card.volume_ring(), |v| v.to_string()),
+        Screen::CoverSet { card, value } if card.positionable => {
+            edge_of(*value as i32, card.position_ring(), |v| format!("{v}%"))
+        }
         Screen::NestSet { nest, target, .. } if nest.card.target.is_some() && nest.card.mode != "off" => {
-            parked_at(*target, [nest.card.min, nest.card.max], degrees)
+            edge_of((*target * 10.0).round() as i32, nest.card.ring(), |v| degrees(v as f64 / 10.0))
         }
         _ => None,
     }
 }
 
-/// Three small arrows beyond the end of the ring a value is past (`past`:
-/// -1 its start, 1 its end), in the ring's gap, pointing on out: brightest
-/// nearest the ring.
-fn past_arrows(p: &mut Canvas, past: i8) {
-    let way = past as f32;
+/// A value over a limit that gives way: its number and words, its arrows.
+const OVER: [u8; 3] = [250, 199, 117];
+const OVER_ARROW: [u8; 3] = [239, 159, 39];
+
+/// Three small arrows beyond the end of the ring (`side`: -1 its start, 1
+/// its end), in the ring's gap, pointing on out: `lit` of them in `tint`,
+/// brightest nearest the ring, the rest faint where `faint`.
+fn past_arrows(p: &mut Canvas, side: i8, lit: u8, tint: [u8; 3], faint: bool) {
+    let way = side as f32;
     let end = way * paint::tick_angle(paint::TICKS - 1, paint::TICKS);
     let radius = if paint::fledge() { 212.0 } else { 206.0 };
     let at = |degrees: f32, r: f32| {
@@ -298,31 +330,65 @@ fn past_arrows(p: &mut Canvas, past: i8) {
         (HALF + r * a.sin(), HALF - r * a.cos())
     };
     for (k, shade) in [0.9, 0.6, 0.35].into_iter().enumerate() {
+        let colour = match (k < lit as usize, faint) {
+            (true, _) => alpha(tint, shade),
+            (false, true) => alpha(GREY, 0.3),
+            (false, false) => continue,
+        };
         let centre = end + way * (8.0 + 5.0 * k as f32);
         let tip = at(centre + way * 1.6, radius);
-        for side in [-11.0, 11.0] {
-            let arm = at(centre - way * 1.6, radius + side);
-            paint::line(p, arm.0, arm.1, tip.0, tip.1, 3.0, alpha(WHITE, shade));
+        for arm in [-11.0, 11.0] {
+            let arm = at(centre - way * 1.6, radius + arm);
+            paint::line(p, arm.0, arm.1, tip.0, tip.1, 3.0, colour);
         }
     }
 }
 
-/// Where the words under a parked value go: high enough that the second
-/// line clears the long mark waiting at the ring's end.
+/// Where the words under a value at or past a limit go: high enough that
+/// the second line clears the long mark waiting at the ring's end.
 const PARKED_WORDS: f32 = 331.0;
 
-/// Under the number of a value past its ring's limits: which limit, and
-/// which way to turn to it, from `y`; the arrows past that end.
-fn parked_words(p: &mut Canvas, fonts: &Fonts, (past, limit): &(i8, String), y: f32, soft: [u8; 3]) {
-    let (over, way) = if *past > 0 { ("Above", "left") } else { ("Below", "right") };
-    line(p, fonts, y, &format!("{over} your limit of {limit}"), soft);
-    line(p, fonts, y + 28.0, &format!("Turn {way} to set {limit}"), WHITE);
-    past_arrows(p, *past);
+/// Under the number of a value at or past one of its ring's limits, from
+/// `y`, and the arrows past that end. Whether it took both lines: at a
+/// limit and not pushing on it, the screen's own hint keeps its place.
+fn parked_words(p: &mut Canvas, fonts: &Fonts, edge: &Edge, y: f32, soft: [u8; 3]) -> bool {
+    let limit = &edge.limit;
+    match (edge.past, edge.pushes) {
+        (true, true) => {
+            let over = if edge.side > 0 { "Over" } else { "Under" };
+            // On a coloured face (heating, cooling), amber wouldn't read.
+            let plain = soft == GREY;
+            line(p, fonts, y, &format!("{over} your limit of {limit}"), if plain { OVER } else { WHITE });
+            past_arrows(p, edge.side, 3, if plain { OVER_ARROW } else { WHITE }, false);
+        }
+        (true, false) => {
+            let (over, way) = if edge.side > 0 { ("Above", "left") } else { ("Below", "right") };
+            line(p, fonts, y, &format!("{over} your limit of {limit}"), soft);
+            line(p, fonts, y + 28.0, &format!("Turn {way} to set {limit}"), WHITE);
+            past_arrows(p, edge.side, 3, WHITE, false);
+        }
+        (false, pushes) => {
+            line(p, fonts, y, "At your limit", soft);
+            if pushes {
+                past_arrows(p, edge.side, edge.pressed, WHITE, true);
+            }
+            if edge.pressed == 0 {
+                return false;
+            }
+            line(p, fonts, y + 28.0, &format!("Keep turning to go past {limit}"), WHITE);
+        }
+    }
+    true
 }
 
-/// A value's number: white, grey while it's past its ring's limits.
-fn number_tint(parked: bool) -> [u8; 3] {
-    if parked { GREY } else { WHITE }
+/// A value's number: white; past a limit that holds, grey; over one that
+/// gives way, amber.
+fn number_tint(ring: model::Ring, value: i32) -> [u8; 3] {
+    match ring.past(value) {
+        0 => WHITE,
+        over if ring.pushes(over) => OVER,
+        _ => GREY,
+    }
 }
 
 /// Where `value` sits along a ring from `low` to `high` (0..1, clamped
@@ -624,10 +690,10 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
     }
     if let Some(t) = target.filter(|_| card.mode != "off") {
         // Past its limits: softer, until it's turned back to them.
-        let tint = match model::past(t, [card.min, card.max]) {
-            0 => WHITE,
+        let tint = match number_tint(card.ring(), (t * 10.0).round() as i32) {
+            WHITE => WHITE,
             _ if active => [255, 225, 205],
-            _ => GREY,
+            tint => tint,
         };
         big_number_on(p, live, fonts, t, card.step < 1.0, "", tint);
     }
@@ -912,11 +978,10 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
     let (background, active) = climate_colours(card);
     let mut p = paint::face(background);
     let soft = if active { [255, 225, 205] } else { GREY };
-    if let Some(parked) = parked.as_ref().filter(|_| card.mode != "off" && target.is_some()) {
-        // Past its limits: which, and which way to turn to it, where the
-        // preset and the thermostat's name go.
-        parked_words(&mut p, fonts, parked, PARKED_WORDS, soft);
-    } else {
+    let parked = parked.filter(|_| card.mode != "off" && target.is_some());
+    // At or past a limit: it says so where the preset goes, and where the
+    // thermostat's name goes too if it has more to say.
+    if !parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, soft)) {
         // At the foot, in the ring's gap: a hot water boost running, else
         // which thermostat this is.
         match nest.hot_water_boost {
@@ -1261,10 +1326,8 @@ fn light_dim_still(fonts: &Fonts, light: &Light, on: bool, opened: bool, parked:
         (false, true) => "Hold to turn off",
         (false, false) => "Hold to turn on",
     };
-    match (&parked, opened) {
-        (Some(parked), _) => parked_words(&mut p, fonts, parked, PARKED_WORDS, GREY),
-        (None, true) => line(&mut p, fonts, 366.0, hint, GREY),
-        (None, false) => {}
+    if !parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, GREY)) && opened {
+        line(&mut p, fonts, 366.0, hint, GREY);
     }
     p
 }
@@ -1283,8 +1346,7 @@ fn light_dim_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &
     ring_on(p, live.as_deref_mut(), |i| if on && i <= top { colour(accent) } else { colour(DIM) },
             &if on { vec![top] } else { vec![] });
     if on {
-        let parked = model::past(value, light.brightness_ends()) != 0;
-        big_number_on(p, live, fonts, value as f64, false, "%", number_tint(parked));
+        big_number_on(p, live, fonts, value as f64, false, "%", number_tint(light.brightness_ring(), value as i32));
     }
 }
 
@@ -1294,9 +1356,8 @@ fn light_dial_still(fonts: &Fonts, light: &Light, what: &str, parked: Parked) ->
     let mut p = paint::face(BLACK);
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, GREY);
     label(&mut p, fonts, 150.0, &light.name, GREY);
-    match &parked {
-        Some(parked) => parked_words(&mut p, fonts, parked, PARKED_WORDS, GREY),
-        None => line(&mut p, fonts, 366.0, &format!("{what} · press when done"), GREY),
+    if !parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, GREY)) {
+        line(&mut p, fonts, 366.0, &format!("{what} · press when done"), GREY);
     }
     p
 }
@@ -1338,8 +1399,7 @@ fn warmth_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fon
     let mark = paint::tick_at(fraction);
     let last = (paint::TICKS - 1) as f32;
     ring_on(p, live.as_deref_mut(), |i| colour(kelvin_rgb(low as f32 + span * i as f32 / last)), &[mark]);
-    let parked = model::past(value, [low, high]) != 0;
-    big_text_on(p, live, fonts, &value.to_string(), "K", 120.0, number_tint(parked));
+    big_text_on(p, live, fonts, &value.to_string(), "K", 120.0, number_tint(light.kelvin_ring(), value as i32));
 }
 
 /// The colour dial: the ring round the colour wheel, the mark at the
@@ -1380,12 +1440,9 @@ fn big_text_on(pixmap: &mut Canvas, live: Option<&mut paint::Live>, fonts: &Font
 fn volume_still(fonts: &Fonts, card: &MediaCard, parked: Parked) -> Canvas {
     let mut p = paint::face(BLACK);
     label(&mut p, fonts, 150.0, &card.name, MEDIA);
-    match &parked {
-        Some(parked) => parked_words(&mut p, fonts, parked, PARKED_WORDS, GREY),
-        None => {
-            let action = if card.state == "playing" { "Hold to pause" } else { "Hold to play" };
-            line(&mut p, fonts, 366.0, action, GREY);
-        }
+    if !parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, GREY)) {
+        let action = if card.state == "playing" { "Hold to pause" } else { "Hold to play" };
+        line(&mut p, fonts, 366.0, action, GREY);
     }
     p
 }
@@ -1394,8 +1451,7 @@ fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fon
                  sweep: Option<f32>) {
     let top = paint::tick_at(sweep.unwrap_or(along(value as f32, card.volume_ends().map(f32::from))));
     ring_on(p, live.as_deref_mut(), |i| if i <= top { colour(MEDIA) } else { colour(DIM) }, &[top]);
-    let parked = model::past(value, card.volume_ends()) != 0;
-    big_number_on(p, live, fonts, value as f64, false, "", number_tint(parked));
+    big_number_on(p, live, fonts, value as f64, false, "", number_tint(card.volume_ring(), value as i32));
 }
 
 /// What a glance draws from: Home Assistant's glance, the cards (what's
@@ -2080,8 +2136,7 @@ fn cover_still(fonts: &Fonts, card: &CoverCard, opened: bool, parked: Parked) ->
         };
         paint::text(&mut p, fonts.regular(), 80.0, HALF, NUMBER_BASELINE - 12.0, &words, 0.0, WHITE);
     }
-    if let Some(parked) = &parked {
-        parked_words(&mut p, fonts, parked, PARKED_WORDS, GREY);
+    if parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, GREY)) {
     } else if opened {
         let open = card.state == "open" || card.state == "opening";
         line(&mut p, fonts, 366.0, if open { "Hold to close" } else { "Hold to open" }, GREY);
@@ -2094,8 +2149,7 @@ fn cover_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Font
     let top = paint::tick_at(sweep.unwrap_or(along(value as f32, card.position_ends().map(f32::from))));
     ring_on(p, live.as_deref_mut(), |i| if i <= top && value > 0 { colour(COVER) } else { colour(DIM) }, &[top]);
     if card.positionable {
-        let parked = model::past(value, card.position_ends()) != 0;
-        big_number_on(p, live, fonts, value as f64, false, "%", number_tint(parked));
+        big_number_on(p, live, fonts, value as f64, false, "%", number_tint(card.position_ring(), value as i32));
     }
 }
 
