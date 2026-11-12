@@ -27,6 +27,8 @@ sofa bed home house power toggle switch outlet plug socket
 door doorbell bell cctv camera garage gate lock
 water coffee kettle blinds curtains window robot vacuum washing dishwasher
 night moon movie sleep party weather sun star
+car battery mower scooter bike bicycle motorbike moped van truck bus caravan tractor
+cellphone laptop tablet
 """.split())
 
 # The cards' own: Nest settings, the lists' Back, the menus' actions.
