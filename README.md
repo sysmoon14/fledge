@@ -7,7 +7,7 @@
 <p align="center">
   <b>Your Nest thermostat, out of the nest.</b><br>
   Root a Nest Learning Thermostat over USB, cut it loose from Google's cloud, and put Home Assistant on its own screen.<br>
-  <a href="https://sysmoon14.github.io/fledge/">See it move: a 50-second walk through the screens</a>
+  <a href="https://sysmoon14.github.io/fledge/">See it move: a 50-second walk through the screens</a> · <a href="https://sysmoon14.github.io/fledge/docs/"><b>Read the documentation</b></a>
 </p>
 
 <p align="center">
@@ -71,6 +71,14 @@ pick your devices, and choose (or automate) what the thermostat wakes to.
 >
 > Claude Code has been used throughout Fledge's development. Fledge comes
 > **without any warranty**: you use it at your own risk ([Disclaimers](#disclaimers)).
+
+> [!TIP]
+> **[The documentation](https://sysmoon14.github.io/fledge/docs/)** covers
+> everything in more depth: [installing](https://sysmoon14.github.io/fledge/docs/install.html), [the Home Assistant
+> integration](https://sysmoon14.github.io/fledge/docs/integration.html), [the cards and ring](https://sysmoon14.github.io/fledge/docs/cards.html),
+> [the glance](https://sysmoon14.github.io/fledge/docs/glance.html), [the panel](https://sysmoon14.github.io/fledge/docs/panel.html),
+> [automations](https://sysmoon14.github.io/fledge/docs/automations.html), [updates](https://sysmoon14.github.io/fledge/docs/updates.html) and
+> [troubleshooting](https://sysmoon14.github.io/fledge/docs/troubleshooting.html).
 
 ## How it works
 
@@ -153,6 +161,8 @@ keeps the stock nlclient beside the run log. Running a version not listed here?
 [Open an issue](https://github.com/sysmoon14/fledge/issues) with the run log.
 
 ## Get started
+Step by step, with pictures: [Install on the thermostat](https://sysmoon14.github.io/fledge/docs/install.html), then [add it to Home Assistant](https://sysmoon14.github.io/fledge/docs/integration.html).
+
 
 1. **A micro-USB data cable.** Charge-only cables won't work.
 2. **The Fledge app.** Download it from the
@@ -278,6 +288,8 @@ Run it with `--help` for every option.
 you turned on: Matter's pairing code and QR, Zigbee pairing, and Doom.
 
 ## Updating
+More in [Updates](https://sysmoon14.github.io/fledge/docs/updates.html), including test releases.
+
 
 - **The thermostat:** a unit patched with updates on (the app's default with
   Home Assistant; `--updates` on the command line) shows a Home Assistant update
@@ -321,7 +333,7 @@ online only while the thermostat's app calls in to nestlocal and nestlocal is
 connected to the broker. Check that the unit is on Wi-Fi (Settings → Network)
 and that it reaches the broker URL you gave it.
 
-Still stuck? [Open an issue](https://github.com/sysmoon14/fledge/issues/new) with:
+More in [Troubleshooting](https://sysmoon14.github.io/fledge/docs/troubleshooting.html). Still stuck? [Open an issue](https://github.com/sysmoon14/fledge/issues/new) with:
 - How you ran it (app or CLI, with the options used) and the OS of your computer
 - The full log of the run
 - What the thermostat screen showed

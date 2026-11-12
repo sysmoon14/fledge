@@ -19,6 +19,7 @@
   <tr><td>Analog</td><td>a clock face</td></tr>
   <tr><td>Big number</td><td>one sensor's value</td></tr>
   <tr><td>Up next</td><td>your next calendar event</td></tr>
+  <tr><td>Battery</td><td>a battery's level as the ring: a car, a home battery, a mower. See <a href="#battery">Battery</a>.</td></tr>
 </table></div>
 <p>Each layout keeps the lines you chose for it. The <strong>Glance layout</strong> select on the <em>Nest Thermostat cards</em> device switches layout from an automation.</p>
 
@@ -37,7 +38,18 @@
 <h3 id="calendars">Calendars</h3>
 <p>Up next and the next event's line look through the calendars you choose for the next event that isn't over, and can leave out all-day ones.</p>
 
+<h3 id="battery">Battery</h3>
+<p>For anything with a battery. Choose its level entity, and optionally its charging, plugged-in, power and charge-limit entities.</p>
+<ul>
+  <li>The ring is the level: green while charging, amber and then red as it runs low (you set both points), with a white notch at the charge limit. In the Nest look, charging fills the face green.</li>
+  <li>The line under the number is worked out from those entities (Charging · 7.2 kW, Plugged in), with one more line of your choice.</li>
+  <li>Give it an icon, or an image: a <code>/local/</code> file, an image uploaded to Home Assistant, or a web address.</li>
+</ul>
+
+<h3 id="faces">The same faces as cards</h3>
+<p>Every layout here can also be a card among your others, with actions on its ring. See <a href="cards.html#face-cards">Face cards</a>.</p>
+
 <h2 id="night">At night</h2>
 <p>A different layout and lines from sunset to sunrise (shifted by up to three hours), between set times, or while a sensor such as a bedtime switch is on (or off). It can be drawn dimmer and warmer, as dim as you choose. This dims what Fledge draws; the Nest keeps its own backlight level, which follows the room's light. The <strong>Night glance</strong> binary sensor is on while the night layout shows.</p>
 
-<p class="muted">The glance's layouts need the thermostat on Fledge v0.9.0 or later; an older build shows the clock.</p>
+<p class="muted">The glance's layouts need the thermostat on Fledge v0.9.0 or later, and the battery layout v0.10.0; an older build shows the clock.</p>

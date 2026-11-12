@@ -48,7 +48,6 @@ NAV = [
     ]),
     ("Reference", [
         ("reference", "Entities, actions, CLI"),
-        ("testing", "In testing: v0.10"),
     ]),
 ]
 

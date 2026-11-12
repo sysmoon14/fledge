@@ -23,11 +23,29 @@
   <tr><td><strong>Option (select)</strong></td><td>through its options</td><td></td><td>for example the Nest's hot water boost</td></tr>
   <tr><td><strong>Blind, cover</strong></td><td>the position</td><td>open / close</td><td>open, close</td></tr>
   <tr><td><strong>Scene, script, button</strong></td><td></td><td>runs it</td><td>Run</td></tr>
+  <tr><td><strong>Face</strong></td><td></td><td>the action you chose, if any</td><td>Back, then up to four actions you choose. See <a href="#face-cards">Face cards</a>.</td></tr>
   <tr><td><strong>Camera</strong></td><td></td><td></td><td>opening it takes a fresh picture; the latest still fills the round screen</td></tr>
   <tr><td><strong>Alarm</strong></td><td>the option, or each digit of the code</td><td></td><td>arm (its modes), Disarm or Cancel. See <a href="alarm.html">Alarm panels</a>.</td></tr>
   <tr><td><strong>The thermostat</strong></td><td>the target temperature</td><td></td><td>Eco, heating on or off, hot water boost. See <a href="thermostat.html">The thermostat and Settings</a>.</td></tr>
   <tr><td><strong>Settings</strong></td><td colspan="3">always last. The thermostat's everyday Settings, and Nest's own menus one press further.</td></tr>
 </table></div>
+
+<h2 id="face-cards">Face cards</h2>
+<p>A card can be a glance face of its own: a clock, the weather, a big number, your next event or a battery, designed like the glance. Add one in the panel's Cards tab (<strong>Add a card</strong>, then <strong>A glance face</strong>) and design it on the Glance tab. Each starts as a copy of the glance, and is its own from then on.</p>
+<ul>
+  <li>Its options hold actions you choose, up to four after <strong>Back</strong>: scenes, scripts and buttons run; lights and switches turn on or off.</li>
+  <li>A hold can do one of those actions. Without one, a hold does nothing.</li>
+</ul>
+
+<h2 id="limits">Ring limits</h2>
+<p>Each card with a ring can have a <strong>Lowest</strong> and <strong>Highest</strong>: a thermostat's temperature, a speaker's volume, a cover's position, a light's brightness and warmth. Leave them blank to go as far as the device does. Set them on the card in the panel's Cards tab.</p>
+<ul>
+  <li>The ring's ends are the limits: a full ring is your highest, an empty ring your lowest. The card says <em>At your limit</em> when you reach one.</li>
+  <li>The Nest's commands stay within them. Home Assistant, its app and your automations can still set anything.</li>
+  <li>A light group's limits hold for its lights too, unless a light has its own.</li>
+  <li><strong>Can be pushed past</strong>, for each end: keep turning, three arrows light one a click, and the next click goes through. Past the limit the ring stays full (or empty), and the arrows, number and words turn amber.</li>
+  <li>A limit that can't be pushed past holds. Opened while the value is already beyond it, the card waits at that end: the number shows grey, and it says which way to turn. The first turn back sets the limit.</li>
+</ul>
 
 <h2 id="looks">Two looks</h2>
 <p>Everything is drawn in Fledge's own look by default. The Nest's original look is one setting away: <strong>Settings → Theme</strong> on the thermostat. The Fledge panel in Home Assistant can preview either.</p>
@@ -37,4 +55,4 @@
 </figure>
 
 <h2 id="what-it-may-do">What the thermostat is allowed to do</h2>
-<p>Only to the devices you chose, and only: switch a light, switch or fan on or off; set a light's brightness, warmth or colour; set a thermostat's temperature; set a speaker's volume and play or pause it; run a scene, script or button; take a camera's picture; arm or disarm an alarm. Anything else it asks for is refused and logged. See <a href="security.html">Security</a>.</p>
+<p>Only to the devices you chose, and only: switch a light, switch or fan on or off; set a light's brightness, warmth or colour; set a thermostat's temperature; set a speaker's volume and play or pause it; run a scene, script or button (and a face card's actions); take a camera's picture; arm or disarm an alarm. Anything else it asks for is refused and logged. See <a href="security.html">Security</a>.</p>
