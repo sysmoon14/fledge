@@ -489,6 +489,37 @@ pub struct CoverCard {
     /// Whether it can be set part open (else only opened and closed).
     #[serde(default)]
     pub positionable: bool,
+    /// Where its ring stops (protocol 13): None, 0 to 100.
+    #[serde(default)]
+    pub position_limits: Option<[u8; 2]>,
+}
+
+impl CoverCard {
+    /// Its ring's ends, percent open.
+    pub fn position_ends(&self) -> [u8; 2] {
+        ends(self.position_limits, [0, 100])
+    }
+}
+
+/// A ring's ends: its limits from Home Assistant where they make sense
+/// (within `whole`, the lowest under the highest), else `whole`.
+pub fn ends<T: PartialOrd + Copy>(limits: Option<[T; 2]>, whole: [T; 2]) -> [T; 2] {
+    match limits {
+        Some([low, high]) if low < high && low >= whole[0] && high <= whole[1] => [low, high],
+        _ => whole,
+    }
+}
+
+/// Which way a value is past its ring's ends: -1 under the lowest, 1 over
+/// the highest, 0 within them.
+pub fn past<T: PartialOrd>(value: T, [low, high]: [T; 2]) -> i8 {
+    if value > high {
+        1
+    } else if value < low {
+        -1
+    } else {
+        0
+    }
 }
 
 /// An alarm panel (protocol 9), as any Home Assistant alarm gives it; Alarmo
@@ -705,10 +736,13 @@ pub struct Light {
     /// Percent; None while Home Assistant doesn't know (an off light).
     #[serde(default)]
     pub brightness: Option<u8>,
+    /// Where its dimmer stops (protocol 13): None, 1 to 100.
+    #[serde(default)]
+    pub brightness_limits: Option<[u8; 2]>,
     #[serde(default)]
     pub rgb: Option<[u8; 3]>,
-    /// Its white's warmth, in kelvin, and the range it takes: None, it has
-    /// no warmth to set.
+    /// Its white's warmth, in kelvin, and the range it takes (within its
+    /// limits, if it has any): None, it has no warmth to set.
     #[serde(default)]
     pub kelvin: Option<u16>,
     #[serde(default)]
@@ -1038,6 +1072,9 @@ pub struct MediaCard {
     /// Percent.
     #[serde(default)]
     pub volume: Option<u8>,
+    /// Where its ring stops (protocol 13): None, 0 to 100.
+    #[serde(default)]
+    pub volume_limits: Option<[u8; 2]>,
     /// Its album art, from its own topic.
     #[serde(skip)]
     pub art: Option<Arc<Art>>,
@@ -1052,6 +1089,11 @@ pub struct MediaCard {
 }
 
 impl MediaCard {
+    /// Its volume ring's ends.
+    pub fn volume_ends(&self) -> [u8; 2] {
+        ends(self.volume_limits, [0, 100])
+    }
+
     /// How far through the track it is at `now` (Unix seconds), 0..1: on
     /// from where it was while it plays. None without a length.
     pub fn progress(&self, now: f64) -> Option<f32> {
@@ -1190,6 +1232,16 @@ impl Cards {
 }
 
 impl Light {
+    /// Its dimmer's ends, percent.
+    pub fn brightness_ends(&self) -> [u8; 2] {
+        ends(self.brightness_limits, [1, 100])
+    }
+
+    /// Its warmth dial's ends, kelvin.
+    pub fn kelvin_ends(&self) -> [u16; 2] {
+        self.kelvins.filter(|[low, high]| low < high).unwrap_or([2000, 6500])
+    }
+
     /// The colour the light shows in: its own while on, Home Assistant's
     /// rgb_color (which it gives colour-temperature lights too), lifted so a
     /// dim colour still reads on black; warm white when it has none.

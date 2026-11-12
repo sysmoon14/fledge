@@ -167,13 +167,14 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
 /// other screen whole.
 pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
     match screen {
-        Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on, true),
-        Screen::LightWarmth { light, .. } => light_dial_still(fonts, light, "Warmth"),
-        Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour"),
-        Screen::Volume { card, .. } => volume_still(fonts, card),
-        Screen::CoverSet { card, .. } => cover_still(fonts, card, true),
+        Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on, true, parked(screen)),
+        Screen::LightWarmth { light, .. } => light_dial_still(fonts, light, "Warmth", parked(screen)),
+        Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour", None),
+        Screen::Volume { card, .. } => volume_still(fonts, card, parked(screen)),
+        Screen::CoverSet { card, .. } => cover_still(fonts, card, true, parked(screen)),
         Screen::NestSet { nest, target, setting, .. } => {
-            nest_still(fonts, &setting_to(nest, *target, *setting), nest.card.target.map(|_| *target), *setting, unix_now())
+            nest_still(fonts, &setting_to(nest, *target, *setting), nest.card.target.map(|_| *target), *setting, unix_now(),
+                       parked(screen))
         }
         Screen::SettingSet { setting, .. } => setting_still(fonts, *setting),
         _ => draw(fonts, screen, None),
@@ -187,7 +188,7 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
         Screen::LightDim { light, on, value } => light_dim_moving(p, live.as_deref_mut(), fonts, light, *on, *value, sweep),
         Screen::LightWarmth { light, value } => warmth_moving(p, live.as_deref_mut(), fonts, light, *value, sweep),
         Screen::LightHue { value, .. } => hue_moving(p, live.as_deref_mut(), fonts, *value, sweep),
-        Screen::Volume { value, .. } => volume_moving(p, live.as_deref_mut(), fonts, *value, sweep),
+        Screen::Volume { card, value } => volume_moving(p, live.as_deref_mut(), fonts, card, *value, sweep),
         Screen::CoverSet { card, value } => cover_moving(p, live.as_deref_mut(), fonts, card, *value, sweep),
         Screen::NestSet { nest, target, pulse, shown, setting } => {
             // A mode with no temperature (dry, fan only): nothing to set.
@@ -207,6 +208,14 @@ pub fn moving(p: &mut Canvas, fonts: &Fonts, screen: &Screen, sweep: Option<f32>
 /// as the ring turns (a light's brightness, a speaker's volume) mustn't
 /// draw the whole screen again mid-turn.
 pub fn still_key(screen: &Screen) -> Option<String> {
+    // Past its ring's limits, it says so under its number.
+    still_part_key(screen).map(|key| match parked(screen) {
+        Some((past, limit)) => format!("{key} parked {past} {limit}"),
+        None => key,
+    })
+}
+
+fn still_part_key(screen: &Screen) -> Option<String> {
     match screen {
         Screen::LightDim { light, on, .. } => {
             Some(format!("dim {} {} {} {:?} {} {on}", light.id, light.name, light.icon, light.rgb, light.dimmable))
@@ -246,6 +255,80 @@ fn label(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
 fn line(pixmap: &mut Canvas, fonts: &Fonts, y: f32, text: &str, c: [u8; 3]) {
     let text = paint::fit(fonts.regular(), 24.0, text, 0.0, 330.0);
     paint::text(pixmap, fonts.regular(), 24.0, HALF, y, &text, 0.0, c);
+}
+
+/// A value past its ring's limits (Home Assistant set it there): which way
+/// (model::past) and that limit in words, its unit after it.
+pub type Parked = Option<(i8, String)>;
+
+fn parked_at<T: PartialOrd + Copy>(value: T, ends: [T; 2], words: impl Fn(T) -> String) -> Parked {
+    match model::past(value, ends) {
+        0 => None,
+        past => Some((past, words(if past > 0 { ends[1] } else { ends[0] }))),
+    }
+}
+
+/// Whether a value screen's value is past its ring's limits: its ring then
+/// waits at that end, arrows beyond it pointing on out, its number grey,
+/// and under it which limit and which way to turn to it.
+pub fn parked(screen: &Screen) -> Parked {
+    match screen {
+        Screen::LightDim { light, on: true, value } if light.dimmable => {
+            parked_at(*value, light.brightness_ends(), |v| format!("{v}%"))
+        }
+        Screen::LightWarmth { light, value } => parked_at(*value, light.kelvin_ends(), |v| format!("{v}K")),
+        Screen::Volume { card, value } => parked_at(*value, card.volume_ends(), |v| v.to_string()),
+        Screen::CoverSet { card, value } if card.positionable => parked_at(*value, card.position_ends(), |v| format!("{v}%")),
+        Screen::NestSet { nest, target, .. } if nest.card.target.is_some() && nest.card.mode != "off" => {
+            parked_at(*target, [nest.card.min, nest.card.max], degrees)
+        }
+        _ => None,
+    }
+}
+
+/// Three small arrows beyond the end of the ring a value is past (`past`:
+/// -1 its start, 1 its end), in the ring's gap, pointing on out: brightest
+/// nearest the ring.
+fn past_arrows(p: &mut Canvas, past: i8) {
+    let way = past as f32;
+    let end = way * paint::tick_angle(paint::TICKS - 1, paint::TICKS);
+    let radius = if paint::fledge() { 212.0 } else { 206.0 };
+    let at = |degrees: f32, r: f32| {
+        let a = degrees.to_radians();
+        (HALF + r * a.sin(), HALF - r * a.cos())
+    };
+    for (k, shade) in [0.9, 0.6, 0.35].into_iter().enumerate() {
+        let centre = end + way * (8.0 + 5.0 * k as f32);
+        let tip = at(centre + way * 1.6, radius);
+        for side in [-11.0, 11.0] {
+            let arm = at(centre - way * 1.6, radius + side);
+            paint::line(p, arm.0, arm.1, tip.0, tip.1, 3.0, alpha(WHITE, shade));
+        }
+    }
+}
+
+/// Where the words under a parked value go: high enough that the second
+/// line clears the long mark waiting at the ring's end.
+const PARKED_WORDS: f32 = 331.0;
+
+/// Under the number of a value past its ring's limits: which limit, and
+/// which way to turn to it, from `y`; the arrows past that end.
+fn parked_words(p: &mut Canvas, fonts: &Fonts, (past, limit): &(i8, String), y: f32, soft: [u8; 3]) {
+    let (over, way) = if *past > 0 { ("Above", "left") } else { ("Below", "right") };
+    line(p, fonts, y, &format!("{over} your limit of {limit}"), soft);
+    line(p, fonts, y + 28.0, &format!("Turn {way} to set {limit}"), WHITE);
+    past_arrows(p, *past);
+}
+
+/// A value's number: white, grey while it's past its ring's limits.
+fn number_tint(parked: bool) -> [u8; 3] {
+    if parked { GREY } else { WHITE }
+}
+
+/// Where `value` sits along a ring from `low` to `high` (0..1, clamped
+/// when drawn).
+fn along(value: f32, [low, high]: [f32; 2]) -> f32 {
+    (value - low) / (high - low).max(1e-3)
 }
 
 /// A large number as the Nest's dial shows a temperature: 21, or 21 with a
@@ -349,7 +432,7 @@ fn light_card(fonts: &Fonts, card: &LightsCard, light: &Light) -> Canvas {
     }
     let value = light.brightness.unwrap_or(100);
     // Among the cards, no hold hint: a hold there puts the screen away.
-    let mut p = light_dim_still(fonts, &light, light.on, false);
+    let mut p = light_dim_still(fonts, &light, light.on, false, None);
     if light.dimmable {
         light_dim_moving(&mut p, None, fonts, &light, light.on, value, None);
     } else {
@@ -540,7 +623,13 @@ fn climate_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fo
         now_label(p, fonts, card, None, 1.0);
     }
     if let Some(t) = target.filter(|_| card.mode != "off") {
-        big_number_on(p, live, fonts, t, card.step < 1.0, "", WHITE);
+        // Past its limits: softer, until it's turned back to them.
+        let tint = match model::past(t, [card.min, card.max]) {
+            0 => WHITE,
+            _ if active => [255, 225, 205],
+            _ => GREY,
+        };
+        big_number_on(p, live, fonts, t, card.step < 1.0, "", tint);
     }
 }
 
@@ -818,16 +907,22 @@ pub fn predicted(nest: &Nest, target: f64) -> Nest {
 /// (set to, while the ring turns; when it'll get there; heating), under it
 /// until when the schedule keeps it there, and the temperature now by its
 /// tick.
-fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, now: f64) -> Canvas {
+fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, now: f64, parked: Parked) -> Canvas {
     let card = &nest.card;
     let (background, active) = climate_colours(card);
     let mut p = paint::face(background);
     let soft = if active { [255, 225, 205] } else { GREY };
-    // At the foot, in the ring's gap: a hot water boost running, else
-    // which thermostat this is.
-    match nest.hot_water_boost {
-        Some(minutes) => line(&mut p, fonts, 392.0, &format!("Hot water boost · {minutes} min"), soft),
-        None => line(&mut p, fonts, 392.0, &card.name, soft),
+    if let Some(parked) = parked.as_ref().filter(|_| card.mode != "off" && target.is_some()) {
+        // Past its limits: which, and which way to turn to it, where the
+        // preset and the thermostat's name go.
+        parked_words(&mut p, fonts, parked, PARKED_WORDS, soft);
+    } else {
+        // At the foot, in the ring's gap: a hot water boost running, else
+        // which thermostat this is.
+        match nest.hot_water_boost {
+            Some(minutes) => line(&mut p, fonts, 392.0, &format!("Hot water boost · {minutes} min"), soft),
+            None => line(&mut p, fonts, 392.0, &card.name, soft),
+        }
     }
     if card.mode == "off" {
         paint::text(&mut p, fonts.digits(), 96.0, HALF, NUMBER_BASELINE - 18.0, "OFF", 0.0, WHITE);
@@ -878,7 +973,7 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
             card.active_preset().map(climate_label),
             nest.next_change.as_ref().map(|until| format!("Until {until}")),
         ].into_iter().flatten().collect();
-        if !under.is_empty() {
+        if !under.is_empty() && parked.is_none() {
             let icon_name = card.active_preset().map(preset_icon);
             dial_words(&mut p, fonts, UNDER_BASELINE, &under.join(" · "), soft, icon_name);
         }
@@ -891,7 +986,7 @@ fn nest_card(fonts: &Fonts, nest: &Nest, now: f64) -> Canvas {
     let card = &nest.card;
     // Off: the ring without a target on it.
     let target = card.target.filter(|_| card.mode != "off");
-    let mut p = nest_still(fonts, nest, target, false, now);
+    let mut p = nest_still(fonts, nest, target, false, now, None);
     if nest.eco && card.mode != "off" {
         let (_, active) = climate_colours(card);
         let tick = card.current.map(|t| paint::tick_at(((t - card.min) / (card.max - card.min).max(0.5)) as f32));
@@ -1151,7 +1246,7 @@ fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, l
 /// A light's dimmer (and its card) without the ring and number: its icon
 /// and name, Off, and what holding (a press, for one that only switches)
 /// does.
-fn light_dim_still(fonts: &Fonts, light: &Light, on: bool, opened: bool) -> Canvas {
+fn light_dim_still(fonts: &Fonts, light: &Light, on: bool, opened: bool, parked: Parked) -> Canvas {
     let mut p = paint::face(BLACK);
     let accent = if on { light.colour() } else { GREY };
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, accent);
@@ -1166,8 +1261,10 @@ fn light_dim_still(fonts: &Fonts, light: &Light, on: bool, opened: bool) -> Canv
         (false, true) => "Hold to turn off",
         (false, false) => "Hold to turn on",
     };
-    if opened {
-        line(&mut p, fonts, 366.0, hint, GREY);
+    match (&parked, opened) {
+        (Some(parked), _) => parked_words(&mut p, fonts, parked, PARKED_WORDS, GREY),
+        (None, true) => line(&mut p, fonts, 366.0, hint, GREY),
+        (None, false) => {}
     }
     p
 }
@@ -1181,21 +1278,26 @@ fn light_dim_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &
         ring_on(p, live.as_deref_mut(), |_| if on { colour(accent) } else { colour(DIM) }, &[]);
         return;
     }
-    let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
+    let ends = light.brightness_ends().map(f32::from);
+    let top = paint::tick_at(sweep.unwrap_or(along(value as f32, ends)));
     ring_on(p, live.as_deref_mut(), |i| if on && i <= top { colour(accent) } else { colour(DIM) },
             &if on { vec![top] } else { vec![] });
     if on {
-        big_number_on(p, live, fonts, value as f64, false, "%", WHITE);
+        let parked = model::past(value, light.brightness_ends()) != 0;
+        big_number_on(p, live, fonts, value as f64, false, "%", number_tint(parked));
     }
 }
 
 /// A light's warmth or colour dial without its ring and value: its name and
 /// what the dial sets.
-fn light_dial_still(fonts: &Fonts, light: &Light, what: &str) -> Canvas {
+fn light_dial_still(fonts: &Fonts, light: &Light, what: &str, parked: Parked) -> Canvas {
     let mut p = paint::face(BLACK);
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, GREY);
     label(&mut p, fonts, 150.0, &light.name, GREY);
-    line(&mut p, fonts, 366.0, &format!("{what} · press when done"), GREY);
+    match &parked {
+        Some(parked) => parked_words(&mut p, fonts, parked, PARKED_WORDS, GREY),
+        None => line(&mut p, fonts, 366.0, &format!("{what} · press when done"), GREY),
+    }
     p
 }
 
@@ -1230,13 +1332,14 @@ pub fn hue_rgb(hue: f32) -> [u8; 3] {
 /// mark at its white, the kelvin in the middle.
 fn warmth_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, light: &Light, value: u16,
                  sweep: Option<f32>) {
-    let [low, high] = light.kelvins.unwrap_or([2000, 6500]);
+    let [low, high] = light.kelvin_ends();
     let span = (high as f32 - low as f32).max(1.0);
     let fraction = sweep.unwrap_or((value as f32 - low as f32) / span);
     let mark = paint::tick_at(fraction);
     let last = (paint::TICKS - 1) as f32;
     ring_on(p, live.as_deref_mut(), |i| colour(kelvin_rgb(low as f32 + span * i as f32 / last)), &[mark]);
-    big_text_on(p, live, fonts, &value.to_string(), "K", 120.0, WHITE);
+    let parked = model::past(value, [low, high]) != 0;
+    big_text_on(p, live, fonts, &value.to_string(), "K", 120.0, number_tint(parked));
 }
 
 /// The colour dial: the ring round the colour wheel, the mark at the
@@ -1274,18 +1377,25 @@ fn big_text_on(pixmap: &mut Canvas, live: Option<&mut paint::Live>, fonts: &Font
     }
 }
 
-fn volume_still(fonts: &Fonts, card: &MediaCard) -> Canvas {
+fn volume_still(fonts: &Fonts, card: &MediaCard, parked: Parked) -> Canvas {
     let mut p = paint::face(BLACK);
     label(&mut p, fonts, 150.0, &card.name, MEDIA);
-    let action = if card.state == "playing" { "Hold to pause" } else { "Hold to play" };
-    line(&mut p, fonts, 366.0, action, GREY);
+    match &parked {
+        Some(parked) => parked_words(&mut p, fonts, parked, PARKED_WORDS, GREY),
+        None => {
+            let action = if card.state == "playing" { "Hold to pause" } else { "Hold to play" };
+            line(&mut p, fonts, 366.0, action, GREY);
+        }
+    }
     p
 }
 
-fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, value: u8, sweep: Option<f32>) {
-    let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
+fn volume_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, card: &MediaCard, value: u8,
+                 sweep: Option<f32>) {
+    let top = paint::tick_at(sweep.unwrap_or(along(value as f32, card.volume_ends().map(f32::from))));
     ring_on(p, live.as_deref_mut(), |i| if i <= top { colour(MEDIA) } else { colour(DIM) }, &[top]);
-    big_number_on(p, live, fonts, value as f64, false, "", WHITE);
+    let parked = model::past(value, card.volume_ends()) != 0;
+    big_number_on(p, live, fonts, value as f64, false, "", number_tint(parked));
 }
 
 /// What a glance draws from: Home Assistant's glance, the cards (what's
@@ -1945,7 +2055,7 @@ fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer)
 /// open or closed in words if it doesn't, so opening it moves nothing.
 fn cover_card(fonts: &Fonts, card: &CoverCard) -> Canvas {
     let open = card.state == "open" || card.state == "opening";
-    let mut p = cover_still(fonts, card, false);
+    let mut p = cover_still(fonts, card, false, None);
     let value = card.position.unwrap_or(if open { 100 } else { 0 });
     cover_moving(&mut p, None, fonts, card, value, None);
     p
@@ -1953,7 +2063,7 @@ fn cover_card(fonts: &Fonts, card: &CoverCard) -> Canvas {
 
 /// `opened`: its own screen, which says what a hold does; among the cards,
 /// no hint.
-fn cover_still(fonts: &Fonts, card: &CoverCard, opened: bool) -> Canvas {
+fn cover_still(fonts: &Fonts, card: &CoverCard, opened: bool, parked: Parked) -> Canvas {
     let mut p = paint::face(BLACK);
     let open = card.state == "open" || card.state == "opening";
     let name = if open { "mdi:window-shutter-open" } else { "mdi:window-shutter" };
@@ -1970,7 +2080,9 @@ fn cover_still(fonts: &Fonts, card: &CoverCard, opened: bool) -> Canvas {
         };
         paint::text(&mut p, fonts.regular(), 80.0, HALF, NUMBER_BASELINE - 12.0, &words, 0.0, WHITE);
     }
-    if opened {
+    if let Some(parked) = &parked {
+        parked_words(&mut p, fonts, parked, PARKED_WORDS, GREY);
+    } else if opened {
         let open = card.state == "open" || card.state == "opening";
         line(&mut p, fonts, 366.0, if open { "Hold to close" } else { "Hold to open" }, GREY);
     }
@@ -1979,10 +2091,11 @@ fn cover_still(fonts: &Fonts, card: &CoverCard, opened: bool) -> Canvas {
 
 fn cover_moving(p: &mut Canvas, mut live: Option<&mut paint::Live>, fonts: &Fonts, card: &CoverCard, value: u8,
                 sweep: Option<f32>) {
-    let top = paint::tick_at(sweep.unwrap_or(value as f32 / 100.0));
+    let top = paint::tick_at(sweep.unwrap_or(along(value as f32, card.position_ends().map(f32::from))));
     ring_on(p, live.as_deref_mut(), |i| if i <= top && value > 0 { colour(COVER) } else { colour(DIM) }, &[top]);
     if card.positionable {
-        big_number_on(p, live, fonts, value as f64, false, "%", WHITE);
+        let parked = model::past(value, card.position_ends()) != 0;
+        big_number_on(p, live, fonts, value as f64, false, "%", number_tint(parked));
     }
 }
 

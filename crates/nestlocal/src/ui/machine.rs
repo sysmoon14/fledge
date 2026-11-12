@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::model::{AlarmCard, AlarmResult, Alert, Card, Cards, ClimateCard, ClimateChoice, Code, Command, Far, Glance, Near, Nest, Wake};
+use super::model::{past, AlarmCard, AlarmResult, Alert, Card, Cards, ClimateCard, ClimateChoice, Code, Command, Far, Glance, Near, Nest, Wake};
 use crate::motion::Sensor;
 use crate::logf;
 
@@ -32,6 +32,20 @@ pub const MENU_EVERY: Duration = Duration::from_millis(220);
 pub const PROMPT_TURN: i32 = 250;
 /// A percent of brightness or volume; a thermostat's step (half a degree).
 pub const VALUE_STEP: i32 = 30;
+
+/// `value` on a ring turned `steps`, within its ends `low` to `high`. Past
+/// an end already (Home Assistant set it there, beyond the ring's limits),
+/// the first turn back takes it to that end, and turning on out does
+/// nothing, as at an end. None: it doesn't move.
+pub fn stepped(value: i32, steps: i32, low: i32, high: i32) -> Option<i32> {
+    let next = match past(value, [low, high]) {
+        1 if steps < 0 => high,
+        -1 if steps > 0 => low,
+        0 => (value + steps).clamp(low, high),
+        _ => value,
+    };
+    (next != value).then_some(next)
+}
 pub const CLIMATE_STEP: i32 = 90;
 /// The thermostat's ring clicks this often: twice a step, its target
 /// following the hand between, as the Nest's ring does.
@@ -1075,12 +1089,13 @@ impl Machine {
                     return;
                 }
                 let start = if on { value as i32 } else { 0 };
-                if dim_off && on && steps < 0 && start + steps < 1 {
+                let [low, high] = card.lights[light].brightness_ends().map(i32::from);
+                if dim_off && on && steps < 0 && start + steps < low {
                     // Past the lowest: it holds there for a moment, then
                     // turning on down turns it off.
                     let now = self.last_input;
                     match self.floor {
-                        Some((s, l, at)) if (s, l) == (slot, light) && start <= 1 => {
+                        Some((s, l, at)) if (s, l) == (slot, light) && start <= low => {
                             if now.duration_since(at) >= DETENT {
                                 self.floor = None;
                                 self.pending = None;
@@ -1092,8 +1107,33 @@ impl Machine {
                         }
                         _ => self.floor = Some((slot, light, now)),
                     }
-                } else if !(on && start <= 1 && steps < 0) {
+                } else if !(on && start <= low && steps < 0) {
                     self.floor = None;
+                }
+                if !(dim_off && on && steps < 0) && stepped(start, steps, low, high).is_none() {
+                    // At an end, or past one and turned on out: nothing.
+                    return;
+                }
+            }
+            Mode::LightWarmth { slot, light, value } => {
+                let Some(Card::Lights(card)) = self.card(slot) else { return };
+                let [low, high] = card.lights[light].kelvin_ends().map(i32::from);
+                if stepped(value as i32, steps * KELVIN_STEP, low, high).is_none() {
+                    return;
+                }
+            }
+            Mode::Volume { slot, value } => {
+                let Some(Card::Media(card)) = self.card(slot) else { return };
+                let [low, high] = card.volume_ends().map(i32::from);
+                if stepped(value as i32, steps, low, high).is_none() {
+                    return;
+                }
+            }
+            Mode::CoverSet { slot, value } => {
+                let Some(Card::Cover(card)) = self.card(slot) else { return };
+                let [low, high] = card.position_ends().map(i32::from);
+                if card.positionable && stepped(value as i32, steps, low, high).is_none() {
+                    return;
                 }
             }
             Mode::LightHue { value, .. } if (steps < 0 && value == 0) || (steps > 0 && value >= HUE_MAX) => return,
@@ -1126,18 +1166,20 @@ impl Machine {
                 }
             }
             Mode::LightDim { slot, light, on, value } => {
-                let start = if on { value as i32 } else { 0 };
-                let value = (start + steps).clamp(1, 100) as u8;
                 if let Some(Card::Lights(card)) = self.card(slot) {
+                    let start = if on { value as i32 } else { 0 };
+                    let [low, high] = card.lights[light].brightness_ends().map(i32::from);
+                    // Held at its lowest (on to off): where it is.
+                    let value = stepped(start, steps, low, high).unwrap_or(start.max(1)) as u8;
                     self.pending = Some(Command::Brightness(card.lights[light].id.clone(), value));
+                    self.mode = Mode::LightDim { slot, light, on: true, value };
                 }
-                self.mode = Mode::LightDim { slot, light, on: true, value };
             }
             Mode::LightWarmth { slot, light, value } => {
                 if let Some(Card::Lights(card)) = self.card(slot) {
                     let one = &card.lights[light];
-                    let [low, high] = one.kelvins.unwrap_or([2000, 6500]);
-                    let value = (value as i32 + steps * KELVIN_STEP).clamp(low as i32, high as i32) as u16;
+                    let [low, high] = one.kelvin_ends().map(i32::from);
+                    let value = stepped(value as i32, steps * KELVIN_STEP, low, high).unwrap_or(value as i32) as u16;
                     self.pending = Some(Command::Kelvin(one.id.clone(), value));
                     self.mode = Mode::LightWarmth { slot, light, value };
                 }
@@ -1156,7 +1198,8 @@ impl Machine {
             }
             Mode::Volume { slot, value } => {
                 if let Some(Card::Media(card)) = self.card(slot) {
-                    let value = (value as i32 + steps).clamp(0, 100) as u8;
+                    let [low, high] = card.volume_ends().map(i32::from);
+                    let value = stepped(value as i32, steps, low, high).unwrap_or(value as i32) as u8;
                     self.pending = Some(Command::Volume(card.id.clone(), value));
                     self.mode = Mode::Volume { slot, value };
                 }
@@ -1176,7 +1219,8 @@ impl Machine {
             Mode::CoverSet { slot, value } => {
                 if let Some(Card::Cover(card)) = self.card(slot) {
                     if card.positionable {
-                        let value = (value as i32 + steps).clamp(0, 100) as u8;
+                        let [low, high] = card.position_ends().map(i32::from);
+                        let value = stepped(value as i32, steps, low, high).unwrap_or(value as i32) as u8;
                         self.pending = Some(Command::Position(card.id.clone(), value));
                         self.mode = Mode::CoverSet { slot, value };
                     }
@@ -1236,7 +1280,10 @@ impl Machine {
                     }
                     Some(Card::Lights(_)) => Mode::LightList { slot, selected: 0 },
                     Some(Card::Climate(_)) => self.dial_at(Dial::Card(slot)),
-                    Some(Card::Media(card)) => Mode::Volume { slot, value: card.volume.unwrap_or(30) },
+                    Some(Card::Media(card)) => {
+                        let [low, high] = card.volume_ends();
+                        Mode::Volume { slot, value: card.volume.unwrap_or(30.clamp(low, high)) }
+                    }
                     // A scene, script or button: its own screen, to run from.
                     Some(Card::Action(_)) => Mode::ActionView { slot },
                     Some(Card::Camera(card)) => {
@@ -1544,6 +1591,11 @@ impl Machine {
         if clicks == 0 {
             return;
         }
+        if past(target, [min, max]) * clicks.signum() as i8 == 1 {
+            // Past an end (its limits) and turned on out: nothing.
+            self.turn = 0;
+            return;
+        }
         self.turn %= CLIMATE_CLICK;
         let mut offset = self.dial_offset + clicks as f64 * CLIMATE_CLICK as f64 / CLIMATE_STEP as f64;
         let mut next = target;
@@ -1701,8 +1753,9 @@ impl Machine {
             (Action::Warmth, Mode::LightDim { slot, light, .. }) => {
                 if let Some(Card::Lights(card)) = self.card(slot) {
                     let one = &card.lights[light];
-                    let [low, high] = one.kelvins.unwrap_or([2000, 6500]);
-                    let value = one.kelvin.unwrap_or((low + high) / 2).clamp(low, high);
+                    // Past its limits, as it is: the dial waits at that end.
+                    let [low, high] = one.kelvin_ends();
+                    let value = one.kelvin.unwrap_or((low + high) / 2);
                     self.mode = Mode::LightWarmth { slot, light, value };
                 }
             }
@@ -2834,6 +2887,63 @@ mod tests {
         rig.press();
         rig.lit = true;
         rig
+    }
+
+    #[test]
+    fn a_value_past_its_limits_waits_at_that_end_until_turned_back() {
+        let mut rig = deck_of(br#"{"cards":[
+            {"kind":"media","id":"media_player.speaker","name":"Speaker","state":"playing","volume":80,"volume_limits":[10,50]},
+            {"kind":"climate","id":"climate.kitchen","name":"Kitchen","mode":"heat","target":16,"min":18,"max":25,"step":0.5},
+            {"kind":"lights","name":"Lamp","lights":[{"id":"light.lamp","name":"Lamp","on":true,"dimmable":true,
+             "brightness":5,"brightness_limits":[20,80]}]},
+            {"kind":"cover","id":"cover.blind","name":"Blind","state":"open","position":40,"positionable":true,
+             "position_limits":[0,40]}],"dim_off":false}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 80 }, "opened as it is, past its highest");
+        let out = rig.input_with_clicks(Input::Turn(VALUE_STEP * 3));
+        assert!(out.is_empty() && rig.machine.mode == Mode::Volume { slot: 0, value: 80 },
+                "turned on out: nothing, not even a click: {out:?}");
+        assert!(rig.input_with_clicks(Input::Turn(-VALUE_STEP)).contains(&Effect::Click));
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 50 }, "back: straight to its highest");
+        assert_eq!(Rig::sends(&rig.wait(SEND_EVERY)), vec![Command::Volume("media_player.speaker".into(), 50)]);
+        rig.turn(VALUE_STEP);
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 50 }, "and it stops there");
+        rig.turn(-VALUE_STEP * 60);
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 10 }, "and at its lowest");
+
+        rig.machine.go(Mode::Chooser(2), &mut vec![]);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 16.0 });
+        rig.turn(-CLIMATE_STEP * 2);
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 16.0 }, "under its lowest, turned down: nothing");
+        rig.turn(CLIMATE_CLICK);
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 18.0 }, "up: its lowest at the first click");
+
+        rig.machine.go(Mode::Chooser(3), &mut vec![]);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 2, light: 0, on: true, value: 5 });
+        assert!(rig.input_with_clicks(Input::Turn(-VALUE_STEP)).is_empty(), "under its lowest, turned down: nothing");
+        rig.turn(VALUE_STEP);
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 2, light: 0, on: true, value: 20 });
+        rig.turn(VALUE_STEP * 90);
+        assert_eq!(rig.machine.mode, Mode::LightDim { slot: 2, light: 0, on: true, value: 80 }, "no brighter than its highest");
+
+        rig.machine.go(Mode::Chooser(4), &mut vec![]);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::CoverSet { slot: 3, value: 40 });
+        assert!(rig.input_with_clicks(Input::Turn(VALUE_STEP)).is_empty(), "at its highest: nothing");
+    }
+
+    #[test]
+    fn stepped_keeps_a_value_within_its_ends() {
+        assert_eq!(stepped(80, 1, 10, 50), None);
+        assert_eq!(stepped(80, -3, 10, 50), Some(50));
+        assert_eq!(stepped(5, -1, 10, 50), None);
+        assert_eq!(stepped(5, 1, 10, 50), Some(10));
+        assert_eq!(stepped(20, 5, 10, 50), Some(25));
+        assert_eq!(stepped(48, 5, 10, 50), Some(50));
+        assert_eq!(stepped(50, 1, 10, 50), None);
     }
 
     #[test]
