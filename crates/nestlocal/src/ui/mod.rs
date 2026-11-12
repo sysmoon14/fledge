@@ -3121,6 +3121,8 @@ mod shots {
             ("g3-weather", r#"{"layout":"weather","lines":[{"icon":"mdi:thermometer","text":"High 12° · Low 5°"},{"text":"Rain from 15:00"}]}"#),
             ("g4-analog", r#"{"layout":"analog","lines":[{"kind":"date_short"}]}"#),
             ("k1-battery-charging", r#"{"layout":"battery","battery":{"label":"Family car","level":64,"status":"charging","text":"Charging · 7.2 kW","limit":80,"low":20,"critical":10,"icon":"mdi:car-electric"},"lines":[{"text":"Full by 06:30"}]}"#),
+            ("k6-battery-car-side", r#"{"layout":"battery","battery":{"label":"Mooneymobile","level":72,"status":"idle","text":"","low":40,"critical":20,"icon":"mdi:car-side"},"lines":[]}"#),
+            ("k7-battery-unknown-icon", r#"{"layout":"battery","battery":{"label":"Mooneymobile","level":35,"status":"plugged","text":"Plugged in","low":40,"critical":20,"icon":"mdi:no-such-icon"},"lines":[]}"#),
             ("k2-battery-low-plugged", r#"{"layout":"battery","battery":{"label":"Family car","level":18,"status":"plugged","text":"Plugged in","limit":80,"low":20,"critical":10,"icon":"mdi:car-electric"},"lines":[{"text":"142 km range"}]}"#),
             ("k3-battery-very-low", r#"{"layout":"battery","battery":{"label":"Mower","level":7,"status":"idle","text":"Battery very low","low":20,"critical":10,"icon":"mdi:robot-mower"},"lines":[{"text":"Returning to dock"}]}"#),
             ("k4-battery-discharging", r#"{"layout":"battery","battery":{"label":"Home battery","level":81,"status":"discharging","text":"Discharging · 1.4 kW","low":20,"critical":10,"icon":"mdi:home-battery"},"lines":[{"text":"Solar 2.1 kW"}]}"#),

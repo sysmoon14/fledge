@@ -1838,7 +1838,8 @@ fn battery_face(p: &mut Canvas, fonts: &Fonts, battery: Option<&model::Battery>,
         // Its own picture, wide and low in its square, in the icon's place.
         Some(art) => paint::picture_over(p, &art.rgb, art.alpha.as_deref(), art.size, 132, HALF, 92.0),
         None => {
-            let picture = if battery.icon.is_empty() { "mdi:battery" } else { &battery.icon };
+            // An icon the Nest doesn't carry: a battery, not a gap.
+            let picture = if icons::lookup(&battery.icon, "").is_some() { battery.icon.as_str() } else { "mdi:battery" };
             icon(p, picture, "", HALF, 96.0, 52.0, if filled || tone.is_none() { WHITE } else { ring });
         }
     }
