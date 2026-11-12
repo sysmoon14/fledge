@@ -1,0 +1,20 @@
+<!-- title: Back up and undo -->
+<!-- description: Back up the Nest's whole NAND before patching, verify it, and restore the thermostat to stock. -->
+<h1>Back up and undo</h1>
+<p class="lede">A whole-NAND backup, bad blocks and all, puts the thermostat back exactly as it was.</p>
+
+<h2 id="backup">Back up</h2>
+<ul>
+  <li>In Set up, Review's <strong>Back up, then patch</strong> (the default) saves it before patching.</li>
+  <li>Any time, the app's <strong>Backups</strong> page → <strong>Back up unit</strong>, or <code>fledge backup</code> on the command line.</li>
+</ul>
+<p>The backup is checked with a second read of the NAND. Keep the file somewhere safe: the app lists the images it keeps on its Backups page.</p>
+<p><code>fledge verify</code> compares a backup with what's on the thermostat now.</p>
+
+<h2 id="restore">Go back to stock</h2>
+<p><strong>Restore to unit</strong> on the Backups page (or <code>fledge restore</code>) writes the backup back to the thermostat.</p>
+
+<h2 id="root-volume">Each patch</h2>
+<p>On the command line, <code>--backup</code> also saves the original root volume before each patch. The patch keeps the stock nlclient beside the run log, and can always be undone.</p>
+
+<div class="note"><p>Just want your devices off the screen? You don't need to restore: remove the Fledge integration, or turn off what it wakes to. See <a href="integration.html#remove">Removing it</a>.</p></div>

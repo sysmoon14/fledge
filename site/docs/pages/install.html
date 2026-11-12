@@ -1,0 +1,70 @@
+<!-- title: Install on the thermostat -->
+<!-- description: Back up and patch a Nest Learning Thermostat (3rd generation) with the Fledge app on macOS, Windows or Linux. -->
+<h1>Install on the thermostat</h1>
+<p class="lede">The Fledge app does it in one guided flow: connect the thermostat, point it at your MQTT broker, choose features, back up, patch.</p>
+
+<div class="warn"><p><strong>Back up first.</strong> The app offers a whole-NAND backup before it patches (<em>Back up, then patch</em>, the default). Take it on the first run: it is the only way to put the thermostat back exactly as it was.</p></div>
+
+<h2 id="download">1. Get the app</h2>
+<p>Download it from the <a href="https://github.com/sysmoon14/fledge/releases/latest">latest release</a>, under Assets:</p>
+<div class="table"><table>
+  <tr><th>Your computer</th><th>Download</th></tr>
+  <tr><td>Mac (macOS 13 or later)</td><td><code>Fledge-macos-universal-&lt;version&gt;.zip</code></td></tr>
+  <tr><td>Windows</td><td><code>Fledge-windows-x86_64-&lt;version&gt;.zip</code>, or <code>-arm64</code></td></tr>
+  <tr><td>Linux (glibc 2.28 or later)</td><td><code>Fledge-linux-x86_64-&lt;version&gt;.tar.gz</code>, or <code>-arm64</code>, <code>-riscv64</code></td></tr>
+</table></div>
+<p>Or build it yourself: see <a href="https://github.com/sysmoon14/fledge/blob/main/BUILDING.md">BUILDING.md</a>.</p>
+
+<h3 id="macos">macOS</h3>
+<p>The app is signed ad hoc, not notarized, so macOS refuses it at first. Allow it under System Settings → Privacy &amp; Security, or run:</p>
+<pre><code>xattr -dr com.apple.quarantine Fledge.app</code></pre>
+
+<h3 id="linux">Linux</h3>
+<p>Run the app as your normal user, never with <code>sudo</code>. It needs a one-time udev rule for USB access. Keep the <code>70-</code> prefix: the rule must run before systemd's <code>73-seat-late.rules</code>.</p>
+<pre><code>sudo tee /etc/udev/rules.d/70-fledge.rules &gt; /dev/null &lt;&lt;'EOF'
+# i.MX ROM serial download, recovery U-Boot
+ATTRS{idVendor}=="15a2", ATTRS{idProduct}=="0071", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{idVendor}=="18d1", ATTRS{idProduct}=="4ee0", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+# the recovery initramfs shell and the Nest application's console
+ATTRS{idVendor}=="0525", ATTRS{idProduct}=="a4a7", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{idVendor}=="0525", ATTRS{idProduct}=="b4a4", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{idVendor}=="2464", ATTRS{idProduct}=="0030", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{idVendor}=="2464", ATTRS{idProduct}=="0031", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+EOF
+sudo udevadm control --reload-rules &amp;&amp; sudo udevadm trigger</code></pre>
+<p>Reconnect the thermostat afterwards if it was already plugged in. The app also needs a Wayland or X11 desktop with OpenGL or Vulkan drivers, <code>xdg-desktop-portal</code> with your desktop's backend (for the file picker), and <code>libudev</code>. Logs go to <code>~/.local/share/fledge/logs/</code>.</p>
+
+<h3 id="windows">Windows</h3>
+<p>If a run stops with <code>ACM interface for 18d1:4ee0 did not appear</code>, see <a href="troubleshooting.html#windows-driver">Troubleshooting</a>.</p>
+
+<h2 id="connect">2. Connect the thermostat</h2>
+<p>Take the display off its base and plug the micro-USB cable into the port on the back of the display. Not the power-only USB port on a European stand or Heat Link base, and not a charge-only cable: those are the usual reasons the app sees nothing. Open the app and choose <strong>Set up</strong>.</p>
+<figure>
+  <img src="../app.png" alt="The Fledge app's Set up page, on its first step: Connect your thermostat, with a 3rd generation thermostat found over USB.">
+  <figcaption>Set up's first step, with a thermostat found over USB.</figcaption>
+</figure>
+
+<h2 id="set-up">3. Follow Set up</h2>
+<ol>
+  <li><strong>Connect</strong>: the app finds the thermostat and says what it is. A generation Fledge doesn't support is recognised and left alone.</li>
+  <li><strong>Home Assistant</strong>: your MQTT broker's address, user and password (and a CA certificate for TLS if you use one), and whether the thermostat should take <strong>updates</strong> through Home Assistant. Leave updates on unless you have a reason not to; see <a href="updates.html">Updates</a>.</li>
+  <li><strong>Features</strong>:
+    <ul>
+      <li><strong>Your heating</strong>: how the Nest switches your boiler. On a Heat Link model with no Heat Link (or with Zigbee or Thread on), answer <em>Wired to the Nest's base, or no Heat Link</em>, or the Nest stops with error H71 or H74.</li>
+      <li><strong>Block cloud</strong>: cuts the thermostat off from Nest's and Google's servers.</li>
+      <li><strong>Matter</strong> (over Wi-Fi, or Thread) and <strong>Zigbee</strong> (as a router). Thread and Zigbee share the thermostat's radio, so only one can be on, and on European models either one replaces the wireless Heat Link connection.</li>
+      <li><strong>SSH</strong>, with a key the app can create for you. Password login stays off unless you allow it.</li>
+      <li>The <strong>USB console</strong>, and <strong>Doom</strong>. While Doom runs, the thermostat doesn't control the heating.</li>
+    </ul>
+  </li>
+  <li><strong>Review</strong>: shows your choices and offers <strong>Back up, then patch</strong>. Developer options (dry run, slot, entry point and the like) are folded away here; you don't need them.</li>
+</ol>
+<p>The run shows its steps in place. When it finishes, <strong>Done</strong> says what to do next. The thermostat reboots into Fledge; put it back on its base.</p>
+
+<h2 id="wifi">4. Wi-Fi and Home Assistant</h2>
+<p>If the thermostat isn't on Wi-Fi yet, join it from its own menu (Settings → Network). Once it reaches the broker, it appears in Home Assistant through MQTT discovery as a <strong>Nest Thermostat</strong> device with its climate entity and the rest; see <a href="reference.html#entities">Entities</a>.</p>
+<p>Now <a href="integration.html">add the Fledge integration</a> to put your devices on its screen.</p>
+
+<h2 id="nest-settings">On the thermostat</h2>
+<p>Fledge adds a page to the Nest's own Settings for what you turned on: Matter's pairing code and QR, Zigbee pairing, and Doom.</p>
+<p>A few options can be changed later from Home Assistant without the app: the Nest's <strong>External temperature</strong> switch (see <a href="weather.html#room-thermometer">Room thermometer</a>) and its <strong>Works With Nest boiler</strong> switch. Changing either reboots the thermostat into it.</p>

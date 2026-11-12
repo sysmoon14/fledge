@@ -1,0 +1,25 @@
+<!-- title: Alarm panels -->
+<!-- description: Arm and disarm a Home Assistant alarm panel from the Nest's ring, with the code entered digit by digit. -->
+<h1>Alarm panels</h1>
+<p class="lede">Any alarm panel in Home Assistant can be a card. Arm it from the ring, and disarm it with the code entered on the ring.</p>
+
+<h2 id="using">Using it</h2>
+<ul>
+  <li>Open the alarm's card, then choose to arm (its modes), Disarm or Cancel.</li>
+  <li>The code is entered with the ring: the digits sit round it. Turn to each and press; hold to rub one out.</li>
+  <li>When the entry delay starts, the thermostat lights straight into the code pad, the ring counting down. Going off, it shows red until disarmed.</li>
+  <li>Three wrong codes lock the pad for 30 seconds, longer each time. The code is never stored.</li>
+</ul>
+
+<h2 id="setting-up">Setting it up</h2>
+<p>Add the alarm panel as a card in the <a href="panel.html">Fledge panel</a>, then:</p>
+<ul>
+  <li>Name each arm mode as it should appear on the Nest (or copy the names from an Alarmo card).</li>
+  <li>Say how long the code is, so the last digit sends it.</li>
+  <li>Turn off <strong>Take over the screen</strong> if you'd rather the countdown waited on the alarm's card than lit the thermostat.</li>
+</ul>
+
+<h2 id="alarmo">With Alarmo</h2>
+<p>With <a href="https://github.com/nielsfaber/alarmo">Alarmo</a>, the countdown is in seconds, the screen names the sensor that set it off, and a door left open can be armed past.</p>
+
+<p class="muted">Alarm cards need the thermostat on Fledge v0.7.0 or later.</p>

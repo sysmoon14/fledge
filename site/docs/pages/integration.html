@@ -1,0 +1,33 @@
+<!-- title: Add it to Home Assistant -->
+<!-- description: Install the Fledge integration from the Marketplace (HACS), pick the devices for the thermostat's screen, and choose what it wakes to. -->
+<h1>Add it to Home Assistant</h1>
+<p class="lede">The Fledge integration picks which of your devices appear on the thermostat, in what order, and what it wakes to.</p>
+
+<p>You need the thermostat running Fledge with MQTT, showing in Home Assistant as a <strong>Nest Thermostat</strong> device (<a href="install.html">Install on the thermostat</a>), and Home Assistant 2026.3 or later.</p>
+
+<h2 id="download">1. Download it</h2>
+<p>Open the repository in Home Assistant's Marketplace (HACS) with this link, download <strong>Fledge</strong>, and restart Home Assistant:</p>
+<p><a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=sysmoon14&amp;repository=fledge-homeassistant&amp;category=integration">Open Fledge in the Marketplace</a></p>
+<p>Or add <code>https://github.com/sysmoon14/fledge-homeassistant</code> there by hand, as a custom repository of type <em>Integration</em>.</p>
+
+<h2 id="set-up">2. Set it up</h2>
+<p>After the restart, Home Assistant offers the thermostat under Settings → Devices &amp; services. Or start it with this link:</p>
+<p><a href="https://my.home-assistant.io/redirect/config_flow_start/?domain=fledge">Add the Fledge integration</a></p>
+<p>Pick your devices, in the order you want them round the ring, and what the thermostat wakes to. Cards can be lights (a light group makes a whole room one card), switches and fans, other thermostats, speakers, selects, covers, scenes, scripts and buttons, cameras and alarm panels. See <a href="cards.html">Cards and the ring</a> for what each one does.</p>
+
+<h2 id="panel">3. Arrange it in the panel</h2>
+<p>From then on, use <strong>Fledge</strong> in the sidebar (admins only) to change the cards: drag them into order, rename them for the Nest, and see each one drawn as the thermostat will draw it. See <a href="panel.html">The Fledge panel</a>. The integration's <strong>Configure</strong> button still works too.</p>
+
+<h2 id="adds">What it adds</h2>
+<ul>
+  <li>A <strong>Nest Thermostat cards</strong> device, connected to the thermostat's own, with <em>Wake to</em>, <em>Keep screen on</em>, <em>Wake screen</em>, <em>Glance layout</em> and <em>Night glance</em>. See <a href="automations.html">Wake and automations</a>.</li>
+  <li>The actions <code>fledge.notify</code>, <code>fledge.dismiss</code> and <code>fledge.set_schedule</code>. See <a href="reference.html#actions">Actions</a>.</li>
+  <li>Two dashboard cards for the Nest's heating and hot water schedules. See <a href="schedules.html">Schedules</a>.</li>
+  <li><strong>Heating today</strong> and <strong>Hot water today</strong> sensors, and the weather feed for the Nest's own weather screen. See <a href="weather.html">Weather and room temperature</a>.</li>
+</ul>
+
+<h2 id="versions">Matching versions</h2>
+<p>The integration and the thermostat's software are released apart. The thermostat says which version of the cards it understands; if the integration needs something newer, a repair under Settings → Repairs asks you to update the thermostat. See <a href="updates.html">Updates</a>.</p>
+
+<h2 id="remove">Removing it</h2>
+<p>Removing the integration puts the thermostat's screen back as it was. The thermostat stays in Home Assistant through MQTT.</p>

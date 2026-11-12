@@ -1,0 +1,65 @@
+<!-- title: Wake and automations -->
+<!-- description: Control what the Nest wakes to, keep its screen on and wake it from Home Assistant automations. -->
+<h1>Wake and automations</h1>
+<p class="lede">The integration's <strong>Nest Thermostat cards</strong> device lets automations decide what the thermostat shows.</p>
+
+<h2 id="entities">The cards device</h2>
+<div class="table"><table>
+  <tr><th>Entity</th><th>What it does</th></tr>
+  <tr><td><code>select</code> <strong>Wake to</strong></td><td>What the thermostat shows as it wakes. See below.</td></tr>
+  <tr><td><code>switch</code> <strong>Keep screen on</strong></td><td>Keeps the thermostat's display lit.</td></tr>
+  <tr><td><code>button</code> <strong>Wake screen</strong></td><td>Lights the display onto what it wakes to.</td></tr>
+  <tr><td><code>select</code> <strong>Glance layout</strong></td><td>Clock, Temperature, Weather, Analog, Big number or Up next. See <a href="glance.html">The glance</a>.</td></tr>
+  <tr><td><code>binary_sensor</code> <strong>Night glance</strong></td><td>On while the glance's night layout shows.</td></tr>
+</table></div>
+
+<h2 id="wake-to">Wake to</h2>
+<ul>
+  <li><strong>Device chooser</strong>: all the cards, zoomed out.</li>
+  <li><strong>Automatic</strong>: the speaker that's playing; else, after sunset, a light that's on; else the chooser.</li>
+  <li><strong>The thermostat</strong>, as the Nest always did.</li>
+  <li><strong>Any of your cards</strong>, by name.</li>
+</ul>
+
+<h2 id="examples">Examples</h2>
+<h3 id="music">Show the music while it plays</h3>
+<pre><code>automation:
+  - alias: Nest shows the music while it plays
+    triggers:
+      - trigger: state
+        entity_id: media_player.kitchen_speaker
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.nest_thermostat_cards_wake_to
+        data:
+          option: "{{ 'Kitchen speaker' if is_state('media_player.kitchen_speaker', 'playing') else 'Device chooser' }}"</code></pre>
+
+<h3 id="cooking">Keep the screen on while you cook</h3>
+<pre><code>automation:
+  - alias: Nest stays on while the oven is on
+    triggers:
+      - trigger: state
+        entity_id: switch.oven
+    actions:
+      - action: "switch.turn_{{ trigger.to_state.state }}"
+        target:
+          entity_id: switch.nest_thermostat_cards_keep_screen_on</code></pre>
+
+<h3 id="sunset">Wake to the lights at sunset</h3>
+<pre><code>automation:
+  - alias: Nest wakes to the lights after dark
+    triggers:
+      - trigger: sun
+        event: sunset
+      - trigger: sun
+        event: sunrise
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.nest_thermostat_cards_wake_to
+        data:
+          option: "{{ 'Living room lights' if trigger.event == 'sunset' else 'Device chooser' }}"</code></pre>
+<p class="muted">Entity IDs and card names here are examples; use your own. A card's option in Wake to is the name it has on the Nest.</p>
+
+<p>For messages on the screen, see <a href="notifications.html">Notifications</a>.</p>

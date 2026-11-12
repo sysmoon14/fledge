@@ -1,0 +1,35 @@
+<!-- title: Security -->
+<!-- description: What the Nest is allowed to do in Home Assistant, securing the MQTT broker with passwords, TLS and ACLs, and SSH access. -->
+<h1>Security</h1>
+<p class="lede">The thermostat and Home Assistant talk over your MQTT broker. Whoever can publish to it can do what the thermostat can.</p>
+
+<h2 id="allowed">What the thermostat may do</h2>
+<p>Only to the devices you chose in the integration, and only:</p>
+<ul>
+  <li>switch a light, switch or fan on or off;</li>
+  <li>set a light's brightness, warmth or colour;</li>
+  <li>set a thermostat's temperature;</li>
+  <li>set a speaker's volume, and play or pause it;</li>
+  <li>run a scene, script or button;</li>
+  <li>take a camera's picture;</li>
+  <li>arm or disarm an alarm panel, with its code.</li>
+</ul>
+<p>Anything else it asks for is refused and logged. A notification's answer only fires an event, for your automations. Think before adding a card that opens something, a garage door for instance: anyone at the thermostat, or anyone who can publish to your broker, can use it.</p>
+
+<h2 id="broker">The broker</h2>
+<ul>
+  <li>Give the broker passwords, and TLS if you can (the app takes a CA certificate).</li>
+  <li>If it supports ACLs, let only Home Assistant publish to <code>nestlocal/+/set/#</code>, and only the thermostat's user publish to <code>nestlocal/+/ui/#</code>.</li>
+</ul>
+
+<h2 id="cloud">Google's cloud</h2>
+<p><strong>Block cloud</strong> in Set up (<code>--block-cloud</code>) points Nest's and Google's servers at nowhere on the thermostat. It needs no internet access, only your Wi-Fi.</p>
+
+<h2 id="ssh">SSH</h2>
+<p>SSH is off unless you turn it on. Set up can create a key for you, and keeps password login off unless you allow it (<code>--ssh-key-only</code> on the command line).</p>
+
+<h2 id="updates">Updates</h2>
+<p>The thermostat installs only releases signed with Fledge's release key, and checks each download's digest. See <a href="updates.html">Updates</a>.</p>
+
+<h2 id="matter">Matter</h2>
+<p>Matter uses the test vendor ID (0xFFF1) and test attestation, so controllers treat the thermostat as uncertified.</p>

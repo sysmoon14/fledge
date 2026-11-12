@@ -1,0 +1,40 @@
+<!-- title: Cards and the ring -->
+<!-- description: How to use Fledge's cards on the Nest: turn to browse, press to open, press for options, hold for the main action. -->
+<h1>Cards and the ring</h1>
+<p class="lede">Walk up and your devices show zoomed out around the thermostat. Turn to browse, press to open, and the ring becomes that device's control.</p>
+
+<h2 id="gestures">Turn, press, hold</h2>
+<div class="table"><table>
+  <tr><th>Where you are</th><th>Turn</th><th>Press</th><th>Hold</th></tr>
+  <tr><td><strong>The chooser</strong> (all the cards, zoomed out)</td><td>from card to card</td><td>opens the card</td><td>puts the screen away</td></tr>
+  <tr><td><strong>An open card</strong></td><td>its value: brightness, temperature, volume…</td><td>its options menu</td><td>its main action: on/off, play/pause, run</td></tr>
+  <tr><td><strong>An options menu</strong></td><td>through the options</td><td>chooses one</td><td></td></tr>
+</table></div>
+<p>Nothing is switched or run from the chooser. A press there only ever opens a card, so you can't turn on a light by browsing past it. Once a card is open, a press shows its options and a hold does its main thing.</p>
+<p>What you open stays open until you go back with <strong>Back</strong> in its options. Left alone, the screen times out (after 20 seconds by default, a camera after at least a minute), and the next wake starts again from the top.</p>
+
+<h2 id="kinds">Card by card</h2>
+<div class="table"><table>
+  <tr><th>Card</th><th>Open, turn</th><th>Hold</th><th>Its options</th></tr>
+  <tr><td><strong>Light</strong></td><td>brightness</td><td>on / off</td><td>on / off; <strong>warmth</strong> and <strong>colour</strong> dials where the light has them; a group's <strong>each light</strong></td></tr>
+  <tr><td><strong>Switch, fan</strong></td><td></td><td>on / off</td><td></td></tr>
+  <tr><td><strong>Other thermostat</strong></td><td>the temperature, as the Nest sets its own</td><td></td><td>its presets: eco, away…</td></tr>
+  <tr><td><strong>Speaker</strong></td><td>the volume</td><td>play / pause</td><td>play / pause, previous, next. Album art and progress show on the card.</td></tr>
+  <tr><td><strong>Option (select)</strong></td><td>through its options</td><td></td><td>for example the Nest's hot water boost</td></tr>
+  <tr><td><strong>Blind, cover</strong></td><td>the position</td><td>open / close</td><td>open, close</td></tr>
+  <tr><td><strong>Scene, script, button</strong></td><td></td><td>runs it</td><td>Run</td></tr>
+  <tr><td><strong>Camera</strong></td><td></td><td></td><td>opening it takes a fresh picture; the latest still fills the round screen</td></tr>
+  <tr><td><strong>Alarm</strong></td><td>the option, or each digit of the code</td><td></td><td>arm (its modes), Disarm or Cancel. See <a href="alarm.html">Alarm panels</a>.</td></tr>
+  <tr><td><strong>The thermostat</strong></td><td>the target temperature</td><td></td><td>Eco, heating on or off, hot water boost. See <a href="thermostat.html">The thermostat and Settings</a>.</td></tr>
+  <tr><td><strong>Settings</strong></td><td colspan="3">always last. The thermostat's everyday Settings, and Nest's own menus one press further.</td></tr>
+</table></div>
+
+<h2 id="looks">Two looks</h2>
+<p>Everything is drawn in Fledge's own look by default. The Nest's original look is one setting away: <strong>Settings → Theme</strong> on the thermostat. The Fledge panel in Home Assistant can preview either.</p>
+<figure>
+  <img src="../cards.png" alt="Five screens in the Nest's own look: the device chooser on a reading lamp's card, the lamp's warmth dial, another heating zone that is heating, a speaker's album art and progress, and the lamp's colour dial.">
+  <figcaption>The Nest's own look: the chooser, a lamp's warmth dial, a heating zone, a speaker, and a colour dial.</figcaption>
+</figure>
+
+<h2 id="what-it-may-do">What the thermostat is allowed to do</h2>
+<p>Only to the devices you chose, and only: switch a light, switch or fan on or off; set a light's brightness, warmth or colour; set a thermostat's temperature; set a speaker's volume and play or pause it; run a scene, script or button; take a camera's picture; arm or disarm an alarm. Anything else it asks for is refused and logged. See <a href="security.html">Security</a>.</p>

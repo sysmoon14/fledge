@@ -1,0 +1,72 @@
+<!-- title: Notifications -->
+<!-- description: Put a message or a camera's picture on the Nest with fledge.notify, and act on the press that answers it. -->
+<h1>Notifications</h1>
+<p class="lede"><code>fledge.notify</code> puts a message on the thermostat's screen, waking it with a chime: an icon, a title and a message, or a camera's picture, taken there and then, filling the round screen.</p>
+
+<h2 id="answering">Answering one</h2>
+<ul>
+  <li><strong>Press</strong> to answer it, <strong>hold</strong> to dismiss it. Either fires a <code>fledge_notification</code> event with its tag and <code>action</code> (<code>pressed</code> for a press), so an automation can act on the answer.</li>
+  <li>It dismisses itself after <code>timeout</code> seconds (30 by default), and <code>fledge.dismiss</code> takes it back.</li>
+  <li>A notification's answer is only taken while that notification is showing.</li>
+</ul>
+
+<h2 id="fields">Fields</h2>
+<div class="table"><table>
+  <tr><th>Field</th><th></th><th>What it is</th></tr>
+  <tr><td><code>message</code></td><td>required</td><td>The text.</td></tr>
+  <tr><td><code>title</code></td><td></td><td>A title above it.</td></tr>
+  <tr><td><code>icon</code></td><td></td><td>An <code>mdi:</code> icon.</td></tr>
+  <tr><td><code>camera</code></td><td></td><td>A camera entity: its picture, taken now, fills the screen.</td></tr>
+  <tr><td><code>timeout</code></td><td></td><td>Seconds before it dismisses itself, 3 to 3600. Default 30.</td></tr>
+  <tr><td><code>tag</code></td><td></td><td>Names it, for <code>fledge.dismiss</code> and the answer's event.</td></tr>
+  <tr><td><code>thermostat</code></td><td></td><td>With more than one Nest, which ones show it (device IDs). All of them when left out.</td></tr>
+</table></div>
+<p>The panel's <strong>Notifications</strong> tab writes one for you, sends it to the Nest to try, and copies it as an action.</p>
+
+<h2 id="doorbell">The doorbell</h2>
+<p>Someone rings, and the thermostat shows who's there.</p>
+<pre><code>automation:
+  - alias: Doorbell on the Nest
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.front_door_ding
+        to: "on"
+    actions:
+      - action: fledge.notify
+        data:
+          title: Someone's at the front door
+          message: Front door
+          camera: camera.front_door
+          tag: doorbell
+          timeout: 60</code></pre>
+
+<h2 id="answer">Acting on the answer</h2>
+<p>A press on the Nest locks the back door.</p>
+<pre><code>automation:
+  - alias: Back door left open
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.back_door
+        to: "on"
+        for: "00:10:00"
+    actions:
+      - action: fledge.notify
+        data:
+          title: Back door open
+          message: Press to lock it when it's shut.
+          icon: mdi:door-open
+          tag: back_door
+      - wait_for_trigger:
+          - trigger: event
+            event_type: fledge_notification
+            event_data: { tag: back_door, action: pressed }
+        timeout: "00:02:00"
+        continue_on_timeout: false
+      - action: lock.lock
+        target:
+          entity_id: lock.back_door</code></pre>
+
+<h2 id="dismiss">Taking one back</h2>
+<pre><code>action: fledge.dismiss
+data:
+  tag: doorbell</code></pre>

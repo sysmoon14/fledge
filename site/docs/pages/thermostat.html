@@ -1,0 +1,27 @@
+<!-- title: The thermostat and Settings -->
+<!-- description: Fledge's thermostat card and Settings on the Nest, Nest's own dial and menus, and using the Nest as a panel only. -->
+<h1>The thermostat and Settings</h1>
+<p class="lede">The thermostat is a card like the others, drawn in the same style, and its everyday Settings come with it.</p>
+
+<h2 id="card">The thermostat card</h2>
+<p>Open it and turn to set the target temperature. Its options hold <strong>Eco</strong>, <strong>heating on or off</strong> and a <strong>hot water boost</strong> (where the Nest drives hot water). The card shows when it's heating and how long until it reaches the temperature.</p>
+<p>The card can sit anywhere in the ring: drag it in the <a href="panel.html">Fledge panel</a>. Rename the thermostat's device in Home Assistant and the card takes the new name.</p>
+<p>Fledge sets the thermostat through the same settings Home Assistant uses, and Nest's own software still runs the heating, the schedule, the learning and the safety limits.</p>
+
+<h2 id="settings">Settings</h2>
+<p>The <strong>Settings</strong> card is always last. It holds the everyday settings, in the same style:</p>
+<ul>
+  <li>Eco temperature</li>
+  <li>Home/Away Assist, Auto-Schedule, Early-On, Sunblock</li>
+  <li>Units</li>
+  <li>Theme: Fledge's look or the Nest's</li>
+  <li>Nest's own dial, instead of Fledge's thermostat card</li>
+  <li>Fledge updates</li>
+</ul>
+<p>Everything else is in Nest's own menus, a press away from Settings. Back in Nest's menu returns to the cards.</p>
+
+<h2 id="nest-dial">Nest's own dial</h2>
+<p>Prefer the Nest's original thermostat screen? Turn on Nest's own dial in Settings. The thermostat card then opens the Nest exactly as it always was.</p>
+
+<h2 id="panel-only">As a panel only</h2>
+<p>Turn off the thermostat's <strong>Act as a thermostat</strong> switch in Home Assistant and it stops controlling heating: the screen shows only your cards. Turning it back on brings back its heating entities, which Home Assistant may re-create under new entity IDs; check any automations that use them.</p>

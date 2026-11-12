@@ -1,0 +1,41 @@
+<!-- title: Schedules -->
+<!-- description: Dashboard cards for the Nest's heating and hot water schedules, and the fledge.set_schedule action. -->
+<h1>Schedules</h1>
+<p class="lede">Two dashboard cards show and edit the Nest's own weekly schedules, heating and hot water. They load with the integration; there's nothing to add under Resources.</p>
+
+<figure>
+  <img src="../ha/schedules.webp" width="2560" height="1110" alt="Three dashboard cards: the week's heating schedule as orange bars by temperature, Monday's heating times being edited, and the hot water schedule's two-hour slots.">
+</figure>
+
+<h2 id="cards">The cards</h2>
+<pre><code>type: custom:fledge-heating-schedule
+entity: climate.nest_thermostat</code></pre>
+<pre><code>type: custom:fledge-hot-water-schedule
+entity: climate.nest_thermostat</code></pre>
+<p>Each shows the week, with today and the time now marked. Tap a day or <strong>Edit schedule</strong> to change it: a day at a time, with every changed day saved together in one write.</p>
+<ul>
+  <li><strong>Copy to…</strong> gives the day you're on to others: Weekdays, Weekend, Every day, or picked one by one. <strong>Undo</strong> stays for a few seconds after.</li>
+  <li>On the hot water card, the pill pauses and resumes the schedule. On the heating card, it opens the thermostat.</li>
+  <li>Times are 24-hour.</li>
+</ul>
+
+<h3 id="own-popup">In your own popup</h3>
+<p>The editor opens in the card's own dialog. To use your own popup instead (a Bubble Card popup, for example), give the card <code>edit: '#your_popup'</code> and put the editor card, with the same entity, in that popup:</p>
+<pre><code>type: custom:fledge-heating-schedule
+entity: climate.nest_thermostat
+edit: '#heating_schedule'</code></pre>
+<pre><code>type: custom:fledge-heating-schedule-editor
+entity: climate.nest_thermostat</code></pre>
+<p>For hot water, use <code>fledge-hot-water-schedule-editor</code>.</p>
+
+<h2 id="set-schedule">From automations</h2>
+<p>The cards write with <code>fledge.set_schedule</code>, which automations can use too. It replaces the days it names and keeps the rest. Days are <code>mon</code> to <code>sun</code>; an empty list clears a day.</p>
+<pre><code>action: fledge.set_schedule
+data:
+  entity_id: climate.nest_thermostat
+  heating:
+    sat: [{ time: "08:00", temp: 21 }, { time: "22:30", temp: 16 }]
+    sun: [{ time: "08:00", temp: 21 }, { time: "22:30", temp: 16 }]
+  hot_water:
+    sat: [{ on: "07:00", off: "08:00" }]</code></pre>
+<div class="note"><p>Writing the heating schedule turns the Nest's Auto-Schedule off, as any edit of its schedule does, and sets the temperature that applies now unless the Nest is in Eco.</p></div>

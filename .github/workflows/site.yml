@@ -11,6 +11,7 @@ on:
       - assets/screens/**
       - assets/icon/fledge.svg
       - utils/build-site.sh
+      - utils/build-docs.py
       - .github/workflows/site.yml
   workflow_dispatch:
 

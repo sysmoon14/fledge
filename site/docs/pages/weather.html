@@ -1,0 +1,28 @@
+<!-- title: Weather and room temperature -->
+<!-- description: Feed Home Assistant's weather to the Nest, regulate from a room thermometer, and track heating and hot water hours. -->
+<h1>Weather and room temperature</h1>
+<p class="lede">Home Assistant can give the Nest its weather, a better thermometer, and keep count of how long the heating ran.</p>
+
+<h2 id="weather">The Nest's weather</h2>
+<p>The weather entity you pick (in the panel's <strong>Thermostat</strong> tab, or the integration's options) feeds the Nest's own weather screen too: the outside temperature and humidity, and the forecast, every 15 minutes and whenever it changes. Pick an outside thermometer as well to use its temperature instead of the forecast's. This replaces the old Nest weather blueprint.</p>
+
+<h2 id="room-thermometer">Room thermometer</h2>
+<p>The Nest can regulate from a Home Assistant temperature sensor instead of its own, in °C or °F. If the readings stop for 30 minutes, it goes back to its own.</p>
+<div class="warn"><p><strong>This turns off the Nest's Bluetooth</strong>, so real Nest Temperature Sensors stop working. Turning it on or off reboots the Nest, so its heating pauses for about a minute.</p></div>
+<p>The Nest needs Fledge's external temperature option for this. Turn it on in any of these ways:</p>
+<ul>
+  <li>the Nest's <strong>External temperature</strong> switch in Home Assistant;</li>
+  <li>the toggle in the panel's <strong>Weather and temperature</strong>;</li>
+  <li>the repair Home Assistant shows when you choose a room thermometer without it.</li>
+</ul>
+<p>The Nest's <strong>Temperature source</strong> sensor says which thermometer it's using.</p>
+
+<h2 id="hours">Heating and hot water hours</h2>
+<p><strong>Heating today</strong> and <strong>Hot water today</strong> count the hours the Nest has called for each since midnight. They're kept as long-term statistics, so a statistics graph card shows them by day, week or month.</p>
+<pre><code>type: statistics-graph
+entities:
+  - sensor.nest_thermostat_cards_heating_today
+stat_types: [change]
+period: day
+chart_type: bar</code></pre>
+<p class="muted">Check the sensor's entity ID on the Nest Thermostat cards device; yours may differ.</p>

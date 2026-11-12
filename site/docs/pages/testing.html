@@ -1,0 +1,33 @@
+<!-- title: In testing: v0.10 -->
+<!-- description: Face cards, ring limits and the battery face, in Fledge's v0.10 test releases. -->
+<h1>In testing: v0.10</h1>
+<p class="lede">These are in test releases (thermostat v0.10.0-rc, integration 0.19.0-rc), not yet released for everyone. They may change before they are.</p>
+
+<div class="test"><p><strong>To try them</strong>, install both test releases together: see <a href="updates.html#test-releases">Test releases</a>. An older thermostat build shows the "thermostat outdated" repair once you use one of these, and draws a battery face as a clock.</p></div>
+
+<h2 id="face-cards">Face cards</h2>
+<p>A card can be a glance face of its own, designed like the glance: add one to the cards in the Fledge panel. Each starts as a copy of the glance, and is its own from then on.</p>
+<ul>
+  <li>Its ring holds actions you choose, up to four after <strong>Back</strong>: scenes, scripts and buttons run; lights and switches turn on or off.</li>
+  <li>A hold can do one of those actions.</li>
+</ul>
+
+<h2 id="limits">Ring limits</h2>
+<p>Each card with a ring can have a <strong>Lowest</strong> and <strong>Highest</strong>: a thermostat's temperature, a speaker's volume, a cover's position, a light's brightness and warmth. Blank goes as far as the device does. Set them in the panel.</p>
+<ul>
+  <li>The ring's ends are the limits: a full ring is your highest, an empty ring your lowest. The card says <em>At your limit</em> when you reach one.</li>
+  <li>The Nest's commands stay within them. Home Assistant and automations can still set anything.</li>
+  <li>A light group's limits hold for its lights too, unless a light has its own.</li>
+  <li><strong>Can be pushed past</strong>, for each end: keep turning, three arrows light one a click, and the next click goes through. Past the limit, the ring stays full (or empty) and the arrows, number and words turn amber. A limit that isn't set to give way holds.</li>
+  <li>Opened while the value is already past a firm limit, the card waits at that end: the number shows grey, and it says how to turn back. The first turn back sets the limit.</li>
+</ul>
+
+<h2 id="battery">The battery face</h2>
+<p>A glance layout for anything with a battery: a car, a home battery, a mower. Use it as the glance or as a face card.</p>
+<ul>
+  <li>The ring is the level: green while charging, amber and then red as it runs low, with a white notch at the charge limit. In the Nest look, charging fills the face green.</li>
+  <li>Choose its level entity, and optionally its charging, plugged-in, power and charge-limit entities. The line under the number is worked out from them (Charging · 7.2 kW, Plugged in), with one more line of your choice.</li>
+  <li>Give it an icon, or an image: a <code>/local/</code> file, an image uploaded to Home Assistant, or a web address.</li>
+</ul>
+
+<p>Found something wrong? <a href="https://github.com/sysmoon14/fledge/issues/new">Open an issue</a> and say which test release you're on.</p>

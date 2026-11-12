@@ -1,0 +1,47 @@
+<!-- title: Overview -->
+<!-- description: How Fledge works, what it needs, and where to start: Home Assistant on a Nest Learning Thermostat's own screen. -->
+<h1>Fledge documentation</h1>
+<p class="lede">Fledge roots a Nest Learning Thermostat (3rd generation) over USB, runs it on your own network without Google's cloud, and puts Home Assistant on its screen.</p>
+
+<figure>
+  <img src="../fledge.png" alt="Five screens in Fledge's look: the thermostat heating with 22 minutes to go, a lamp at 60%, a speaker's album art, the glance with the time and weather, and the thermostat's Settings.">
+  <figcaption>The thermostat, a lamp, a speaker, the glance and Settings, in Fledge's look.</figcaption>
+</figure>
+
+<div class="warn">
+  <p><strong>Read this first.</strong> Fledge has been tested on exactly one thermostat: a 3rd generation Nest Learning Thermostat on Nest firmware 6.4-8, a European model with a Heat Link driving heating and hot water, set up with MQTT and Home Assistant. On anything else, you are the first.</p>
+  <p>It rewrites the flash of the device that runs your heating. A failed run can leave the thermostat unbootable. Take the backup the app offers, and have another way to heat the house while you try it. Fledge comes without any warranty.</p>
+</div>
+
+<h2 id="two-parts">Two parts</h2>
+<p>Fledge comes in two pieces, released separately, that talk to each other only over your MQTT broker:</p>
+<div class="table"><table>
+  <tr><th></th><th>Where it runs</th><th>What it does</th><th>Updates from</th></tr>
+  <tr><td><strong>Fledge</strong> (<a href="https://github.com/sysmoon14/fledge">sysmoon14/fledge</a>)</td><td>The thermostat, put there by the Fledge app on your computer</td><td>Stands in for Google's cloud; speaks MQTT, Matter and Zigbee; draws the cards on the screen</td><td>Its own update entity in Home Assistant</td></tr>
+  <tr><td><strong>Fledge for Home Assistant</strong> (<a href="https://github.com/sysmoon14/fledge-homeassistant">sysmoon14/fledge-homeassistant</a>)</td><td>Home Assistant</td><td>Chooses the cards and sends them to the thermostat; the panel, glance, notifications, schedule cards</td><td>The Marketplace (HACS)</td></tr>
+</table></div>
+<p>The first part alone gives you a local, cloud-free thermostat in Home Assistant. The second puts your home on its screen.</p>
+
+<h2 id="how-it-works">How it works</h2>
+<p>Nest's own app, nlclient, keeps running the thermostat: the heating, the schedule, the learning and the safety limits. Fledge adds <strong>nestlocal</strong> beside it. nestlocal stands in for Google's cloud on the thermostat itself and relays everything to MQTT, Matter or Zigbee on your network instead. Google's servers can be blocked outright.</p>
+<p>When you walk up, nlclient hands its display and ring to nestlocal, which draws your Home Assistant devices as cards at 60 frames a second, with the Nest's own clicks. The thermostat's own card and its everyday Settings are drawn the same way; nestlocal sets the thermostat through the same settings Home Assistant uses. Nest's own screens come back for its dial (if you choose it) and its full menus.</p>
+
+<h2 id="you-need">What you need</h2>
+<ul>
+  <li>A <strong>Nest Learning Thermostat, 3rd generation</strong>. The 1st and 2nd generation and the Nest Thermostat E aren't supported; for those, use <a href="https://github.com/unfr0zen/unfr0zen">unfr0zen</a>.</li>
+  <li>A <strong>micro-USB cable that carries data</strong>, and a Mac, Windows or Linux computer.</li>
+  <li><strong>Home Assistant 2026.3 or later</strong> with an <strong>MQTT broker</strong> (the Mosquitto add-on is fine) that the thermostat can reach over Wi-Fi. The network doesn't need internet access.</li>
+</ul>
+
+<h2 id="start">Where to start</h2>
+<div class="grid">
+  <a href="install.html"><strong>Install on the thermostat</strong><span>The Fledge app, a backup, and the patch.</span></a>
+  <a href="integration.html"><strong>Add it to Home Assistant</strong><span>The integration, your cards and what it wakes to.</span></a>
+  <a href="cards.html"><strong>Use the ring</strong><span>Turn, press and hold, card by card.</span></a>
+  <a href="glance.html"><strong>Design the glance</strong><span>What the Nest shows from across the room.</span></a>
+  <a href="notifications.html"><strong>Send notifications</strong><span>A doorbell's picture on the thermostat.</span></a>
+  <a href="troubleshooting.html"><strong>Troubleshooting</strong><span>When the app or the thermostat misbehaves.</span></a>
+</div>
+
+<h2 id="credit">Credit</h2>
+<p>Fledge is a fork of <a href="https://github.com/unfr0zen/unfr0zen">unfr0zen</a>, which worked out how to get into the thermostat, back it up, patch it safely and run it locally over MQTT, Matter and Zigbee. Fledge adds Home Assistant on its screen and its releases on top of that.</p>

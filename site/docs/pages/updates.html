@@ -1,0 +1,29 @@
+<!-- title: Updates -->
+<!-- description: How the thermostat, the Home Assistant integration and the app update, signed releases with rollback, and test releases. -->
+<h1>Updates</h1>
+<p class="lede">The thermostat, the integration and the app each update on their own. None of them needs the USB cable again.</p>
+
+<h2 id="thermostat">The thermostat</h2>
+<p>A thermostat patched with updates on (the app's default with Home Assistant) shows an update entity, <strong>Fledge software</strong>, under Settings → Updates in Home Assistant. Press Install there.</p>
+<ul>
+  <li>Releases are <strong>signed</strong>. The thermostat checks the download's digest and signature before it installs.</li>
+  <li>If the new build doesn't come up, it <strong>rolls itself back</strong> to the one before, after three failed starts.</li>
+  <li>It checks once a day, whenever the Fledge integration updates, and when you press <strong>Check for Fledge update</strong>.</li>
+</ul>
+<p>With updates off, it never checks, shows no update entity, and only a new patch from the app brings it a newer build.</p>
+<p class="muted">Releases are signed with Ed25519 public key <code>7eIg9OAPKjpPeuXdvCXlOy+VAZfnSHDGOJY4HUIdgy8=</code>.</p>
+
+<h2 id="integration">The integration</h2>
+<p>Updates from the Marketplace (HACS) like any other. When it updates, it has the thermostat look for its own update straight away, since the two often come out together.</p>
+<p>If they don't match, the thermostat says which version of the cards it understands, and a repair under Settings → Repairs asks you to update it.</p>
+
+<h2 id="app">The app</h2>
+<p>Release builds check for a newer release when they start and offer to install it. Builds you make yourself never update.</p>
+
+<h2 id="test-releases">Test releases</h2>
+<p>New features go out as test releases (marked <em>Pre-release</em> on GitHub, versions like <code>v0.10.0-rc.1</code>) before they're released for everyone. To try them:</p>
+<ul>
+  <li><strong>The thermostat:</strong> turn on its <strong>Fledgeling pre-releases</strong> switch in Home Assistant. Its update entity then offers test releases too.</li>
+  <li><strong>The integration:</strong> in the Marketplace, open Fledge, choose Redownload from its menu, and pick the test version. Restart Home Assistant afterwards.</li>
+</ul>
+<p>Use the two together: each test release's notes say which version of the other it needs. See <a href="testing.html">In testing: v0.10</a> for what's in the current ones.</p>

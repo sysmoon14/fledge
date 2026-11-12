@@ -1,0 +1,43 @@
+<!-- title: The glance -->
+<!-- description: Fledge's glance: what the Nest shows when it sees someone across the room, its layouts, lines, clock and night mode. -->
+<h1>The glance</h1>
+<p class="lede">When the Nest sees you come into the room, it can show the glance: the time, the weather and what's on. Walk up close, and it switches to your cards.</p>
+
+<h2 id="turn-on">Turning it on</h2>
+<p>In the integration's <strong>Configure</strong>, or the panel's <strong>Wake &amp; presence</strong> tab, choose what <strong>Across the room</strong> and <strong>Close up</strong> show. With a glance across the room, the Nest shows it when it lights up because someone walked in; a touch, or coming close, shows what it wakes to.</p>
+<div class="note"><p>The Nest only sees someone across the room while its own <strong>Farsight</strong> is on (any of its choices) in Nest's settings. With Farsight off, it wakes only on a touch.</p></div>
+
+<h2 id="designer">Designing it</h2>
+<p>The panel's <strong>Glance</strong> tab chooses what the glance shows, with a preview of the Nest's screen. <strong>Try on the Nest</strong> shows it for real for 20 seconds before you save.</p>
+
+<h3 id="layouts">Layouts</h3>
+<div class="table"><table>
+  <tr><th>Layout</th><th>The big element</th></tr>
+  <tr><td>Clock</td><td>the time, large</td></tr>
+  <tr><td>Temperature</td><td>the room's temperature, orange or blue while heating or cooling</td></tr>
+  <tr><td>Weather</td><td>the weather outside, from a weather entity you pick</td></tr>
+  <tr><td>Analog</td><td>a clock face</td></tr>
+  <tr><td>Big number</td><td>one sensor's value</td></tr>
+  <tr><td>Up next</td><td>your next calendar event</td></tr>
+</table></div>
+<p>Each layout keeps the lines you chose for it. The <strong>Glance layout</strong> select on the <em>Nest Thermostat cards</em> device switches layout from an automation.</p>
+
+<h3 id="lines">Lines</h3>
+<p>Up to three lines under the big element. The Nest works out some itself: the date, the time, its temperature and humidity, its heating and time to temperature, the weather and what's on. Home Assistant sends the rest: today's high and low, when rain arrives, sunrise or sunset, what a speaker you choose is playing, your next event, who's home (first names), any entity's value (a door says Open, a timestamp reads as a time), or a template.</p>
+<ul>
+  <li>A line with nothing to say takes no room: the lines below move up. Or give it a fallback, such as now playing, else what's on.</li>
+  <li>An entity's line can show only while it matters: while it's on or off, in (or not in) a state, or above or below a number.</li>
+  <li>A long line scrolls.</li>
+  <li>A sensor that changes every second reaches the Nest at most every 15 seconds.</li>
+</ul>
+
+<h3 id="clock">Clock and date</h3>
+<p>12 or 24 hours, or Automatic from where Home Assistant is, with or without AM/PM. The date can put the day or the month first, and uses Home Assistant's language for its words where that's written in the Latin alphabet.</p>
+
+<h3 id="calendars">Calendars</h3>
+<p>Up next and the next event's line look through the calendars you choose for the next event that isn't over, and can leave out all-day ones.</p>
+
+<h2 id="night">At night</h2>
+<p>A different layout and lines from sunset to sunrise (shifted by up to three hours), between set times, or while a sensor such as a bedtime switch is on (or off). It can be drawn dimmer and warmer, as dim as you choose. This dims what Fledge draws; the Nest keeps its own backlight level, which follows the room's light. The <strong>Night glance</strong> binary sensor is on while the night layout shows.</p>
+
+<p class="muted">The glance's layouts need the thermostat on Fledge v0.9.0 or later; an older build shows the clock.</p>

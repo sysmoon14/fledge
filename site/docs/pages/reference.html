@@ -1,0 +1,77 @@
+<!-- title: Entities, actions, CLI -->
+<!-- description: Reference for Fledge's Home Assistant entities, its actions and event, and the fledge command line. -->
+<h1>Entities, actions, CLI</h1>
+
+<h2 id="entities">Entities</h2>
+<h3 id="thermostat-device">The Nest Thermostat device</h3>
+<p>Published by the thermostat itself through MQTT discovery. Which ones appear depends on the thermostat's wiring and options.</p>
+<div class="table"><table>
+  <tr><th>Entity</th><th>What it is</th></tr>
+  <tr><td><code>climate</code> (the device's own name)</td><td>The thermostat: mode, target, current temperature, presets.</td></tr>
+  <tr><td><code>sensor</code> Time to temperature, HVAC action, Temperature source</td><td>How long until it reaches the target, what it's doing now, and which thermometer it's using.</td></tr>
+  <tr><td><code>sensor</code> Heating times, Hot water times</td><td>The schedules, read by the <a href="schedules.html">schedule cards</a>.</td></tr>
+  <tr><td><code>select</code> Hot water boost</td><td>Boost the hot water for a while.</td></tr>
+  <tr><td><code>switch</code> Hot water schedule</td><td>Pause or resume the hot water schedule.</td></tr>
+  <tr><td><code>select</code> Temperature scale</td><td>°C or °F on the Nest.</td></tr>
+  <tr><td><code>select</code> Fan timer duration, Fan schedule run time</td><td>Where the Nest drives a fan.</td></tr>
+  <tr><td><code>button</code> Clear Nest schedule, Reset filter</td><td></td></tr>
+  <tr><td><code>switch</code> Act as a thermostat</td><td>Off: the Nest stops controlling heating and shows only your cards. See <a href="thermostat.html#panel-only">As a panel only</a>.</td></tr>
+  <tr><td><code>switch</code> External temperature</td><td>Regulate from a room thermometer; turns off Bluetooth; reboots. See <a href="weather.html#room-thermometer">Room thermometer</a>.</td></tr>
+  <tr><td><code>switch</code> Works With Nest boiler</td><td>For a Heat Link model wired to its base; reboots.</td></tr>
+  <tr><td><code>update</code> Fledge software, <code>button</code> Check for Fledge update, <code>switch</code> Fledgeling pre-releases</td><td>See <a href="updates.html">Updates</a>.</td></tr>
+  <tr><td><code>sensor</code> IP address, Backplate input voltage</td><td>Diagnostics.</td></tr>
+</table></div>
+
+<h3 id="cards-device">The Nest Thermostat cards device</h3>
+<p>Added by the integration.</p>
+<div class="table"><table>
+  <tr><th>Entity</th><th>What it is</th></tr>
+  <tr><td><code>select</code> Wake to</td><td>What the thermostat wakes to. See <a href="automations.html#wake-to">Wake to</a>.</td></tr>
+  <tr><td><code>switch</code> Keep screen on</td><td>Keeps the display lit.</td></tr>
+  <tr><td><code>button</code> Wake screen</td><td>Lights the display.</td></tr>
+  <tr><td><code>select</code> Glance layout</td><td>The glance's layout.</td></tr>
+  <tr><td><code>binary_sensor</code> Night glance</td><td>On while the night layout shows.</td></tr>
+  <tr><td><code>sensor</code> Heating today, Hot water today</td><td>Hours called for since midnight.</td></tr>
+</table></div>
+
+<h2 id="actions">Actions</h2>
+<div class="table"><table>
+  <tr><th>Action</th><th>Fields</th><th></th></tr>
+  <tr><td><code>fledge.notify</code></td><td><code>message</code>, <code>title</code>, <code>icon</code>, <code>camera</code>, <code>timeout</code>, <code>tag</code>, <code>thermostat</code></td><td><a href="notifications.html">Notifications</a></td></tr>
+  <tr><td><code>fledge.dismiss</code></td><td><code>tag</code>, <code>thermostat</code></td><td><a href="notifications.html#dismiss">Taking one back</a></td></tr>
+  <tr><td><code>fledge.set_schedule</code></td><td><code>entity_id</code>, <code>heating</code>, <code>hot_water</code></td><td><a href="schedules.html#set-schedule">From automations</a></td></tr>
+</table></div>
+
+<h3 id="event">Event</h3>
+<p><code>fledge_notification</code> fires when a notification is answered on the Nest, with its <code>tag</code> and the <code>action</code> (<code>pressed</code> for a press).</p>
+
+<h2 id="cli">Command line</h2>
+<p>The app's executable also works from a terminal, over SSH or headless, on Linux and macOS (Windows has the app only). On macOS it is <code>Fledge.app/Contents/MacOS/fledge</code>. It has a few things the app doesn't: <code>--nand-image</code>, <code>verify</code>, <code>uboot</code> and <code>nlclient</code>.</p>
+<pre><code>fledge [OPTIONS] [COMMAND]
+
+Commands:
+  backup    Back up the whole NAND to a file, checked with a second read
+  verify    Compare a NAND backup with the NAND
+  restore   Write a verified NAND backup back to the NAND
+  boot      Boot the application firmware (3rd generation)
+  uboot     Load recovery U-Boot over USB and leave it at its prompt (3rd generation)
+  nlclient  Patch a local stock nlclient, or restore it from its undo journal
+
+Common options:
+  --device &lt;GEN&gt;          the generation, instead of the USB identity
+  --backup                Save the original root volume before patching
+  --dry-run               List the changes, write nothing
+  --mqtt &lt;URL&gt;            Relay to this MQTT broker
+  --updates               Install Fledge's signed releases from Home Assistant (needs --mqtt)
+  --matter                Serve the unit over Matter (default code 0347-100-5534)
+  --matter-thread         Serve Matter over Thread too (replaces Heat Link; excludes --zigbee)
+  --zigbee                Join a Zigbee network as a router (replaces Heat Link)
+  --external-temperature  Regulate from temperatures sent to it; turns off Bluetooth (3rd generation)
+  --doom                  Install Doom, launched from the Fledge page in the Nest's settings
+  --ssh                   Run an SSH server on the unit
+  --ssh-key-only          SSH takes the --ssh-public-key only, refusing root's password
+  --block-cloud           Cut the unit off from Nest's and Google's servers</code></pre>
+<p>Run it with <code>--help</code> for every option.</p>
+
+<h2 id="mqtt">MQTT topics</h2>
+<p>Everything lives under <code>nestlocal/&lt;serial&gt;/</code>: Home Assistant publishes commands under <code>set/</code>, and the thermostat publishes its card commands under <code>ui/</code>. Discovery goes to <code>homeassistant/</code> as usual.</p>

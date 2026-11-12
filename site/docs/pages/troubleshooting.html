@@ -1,0 +1,46 @@
+<!-- title: Troubleshooting -->
+<!-- description: Fixes for the Fledge app not finding the thermostat, Windows driver errors, macOS refusing the app, and the thermostat showing offline. -->
+<h1>Troubleshooting</h1>
+
+<h2 id="not-found">The app doesn't see the thermostat</h2>
+<ul>
+  <li>Use a USB cable that carries data. Charge-only cables are the usual cause.</li>
+  <li>Plug into the USB port on the back of the detached display, not the power-only port on a European stand or Heat Link base.</li>
+  <li>On Linux, add the <a href="install.html#linux">udev rule</a> and reconnect the thermostat.</li>
+</ul>
+
+<h2 id="windows-driver">Windows: <code>ACM interface for 18d1:4ee0 did not appear</code></h2>
+<p>An Android driver installed earlier has claimed the recovery device, so its console gets no COM port. While the thermostat is in recovery:</p>
+<ol>
+  <li>Open Device Manager and find <strong>Android Bootloader Interface</strong>.</li>
+  <li>Update driver → Browse my computer → Let me pick → Universal Serial Bus devices → <strong>USB Composite Device</strong>.</li>
+  <li>Run the app again. The choice persists.</li>
+</ol>
+
+<h2 id="macos">macOS won't open the app</h2>
+<p>It is signed ad hoc, not notarized. Run <code>xattr -dr com.apple.quarantine Fledge.app</code>, or allow it under System Settings → Privacy &amp; Security.</p>
+
+<h2 id="offline">Home Assistant shows the thermostat offline</h2>
+<p>It shows online only while the thermostat's app calls in to nestlocal and nestlocal is connected to the broker. Check that the thermostat is on Wi-Fi (Settings → Network on the Nest) and reaches the broker address you gave it, with the right user and password.</p>
+
+<h2 id="h71">The Nest shows error H71 or H74</h2>
+<p>On a Heat Link model with no Heat Link (or with Zigbee or Thread on), the Nest has to be told it's wired to its base. Turn on the Nest's <strong>Works With Nest boiler</strong> switch in Home Assistant (the thermostat reboots into it), or patch again answering <em>Wired to the Nest's base, or no Heat Link</em> under Your heating.</p>
+
+<h2 id="no-cards">No cards on the screen</h2>
+<ul>
+  <li>Is the <a href="integration.html">Fledge integration</a> set up, with some devices picked?</li>
+  <li>Is <strong>Wake to</strong> set to the thermostat? Then it wakes as the Nest always did. Set it to the Device chooser.</li>
+  <li>Is there a repair under Settings → Repairs asking you to update the thermostat? See <a href="updates.html">Updates</a>.</li>
+</ul>
+
+<h2 id="no-glance">The glance never shows</h2>
+<p>The Nest only sees someone across the room while its own Farsight is on (any of its choices) in Nest's settings. See <a href="glance.html#turn-on">The glance</a>.</p>
+
+<h2 id="issue">Still stuck?</h2>
+<p><a href="https://github.com/sysmoon14/fledge/issues/new">Open an issue</a> with:</p>
+<ul>
+  <li>how you ran it (app or command line, with the options used) and your computer's OS;</li>
+  <li>the full log of the run (the app's <strong>Logs</strong> page keeps every run's);</li>
+  <li>what the thermostat's screen showed.</li>
+</ul>
+<p>Issues about the integration go to <a href="https://github.com/sysmoon14/fledge-homeassistant/issues/new">fledge-homeassistant</a>.</p>
