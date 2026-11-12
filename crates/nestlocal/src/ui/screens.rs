@@ -1518,6 +1518,7 @@ const LARGE_SLOTS: [Slot; 2] = [slot(352.0, Style::Main, 330.0), slot(402.0, Sty
 const ANALOG_SLOTS: [Slot; 1] = [slot(350.0, Style::Quiet, 320.0)];
 const NUMBER_SLOTS: [Slot; 2] = [slot(370.0, Style::Quiet, 320.0), slot(418.0, Style::Pill, 230.0)];
 const AGENDA_SLOTS: [Slot; 1] = [slot(370.0, Style::Main, 320.0)];
+const BATTERY_SLOTS: [Slot; 1] = [slot(398.0, Style::Quiet, 280.0)];
 
 /// Where each layout puts its lines, top to bottom.
 fn slots(layout: Layout) -> &'static [Slot] {
@@ -1527,6 +1528,7 @@ fn slots(layout: Layout) -> &'static [Slot] {
         Layout::Analog => &ANALOG_SLOTS,
         Layout::Number => &NUMBER_SLOTS,
         Layout::Agenda => &AGENDA_SLOTS,
+        Layout::Battery => &BATTERY_SLOTS,
     }
 }
 
@@ -1697,6 +1699,10 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
             "cooling" => COOL,
             _ => BLACK,
         },
+        // Charging fills the Nest's face, as heating does.
+        (Layout::Battery, _) if !paint::fledge() && glance.battery.as_ref().is_some_and(|b| b.mood() == model::Mood::Charging) => {
+            BATTERY_CHARGING
+        }
         _ => BLACK,
     };
     let coloured = background != BLACK;
@@ -1742,6 +1748,7 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
             let unit = paint::fit(fonts.regular(), 28.0, &big.unit, 0.0, 280.0);
             paint::text(&mut p, fonts.regular(), 28.0, HALF, 316.0, &unit, 0.0, FLEDGE_ON);
         }
+        Layout::Battery => battery_face(&mut p, fonts, glance.battery.as_ref(), coloured),
         Layout::Agenda => {
             let time = glance.clock.time(at.minutes(), true);
             paint::text(&mut p, fonts.clock(), 56.0, HALF, 122.0, &time, -1.0, WHITE);
@@ -1777,6 +1784,72 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
         paint::warm_dim(&mut p, glance.dim_level.unwrap_or(paint::DIM_LEVEL));
     }
     p
+}
+
+/// The Nest's face while a battery charges, and a battery's colours:
+/// charging, very low, low.
+const BATTERY_CHARGING: [u8; 3] = [14, 140, 69];
+const BATTERY_RING: [[u8; 3]; 3] = [[72, 214, 130], [255, 59, 59], [246, 136, 0]];
+const BATTERY_WORDS: [[u8; 3]; 3] = [[123, 227, 164], [255, 122, 122], [255, 176, 82]];
+
+/// The battery face without its line: the level round the ring in the
+/// colour of how it's doing (green charging; amber, then red, as it runs
+/// low), a notch where it stops charging, its picture and name, the level
+/// large, and under it what it's doing. `filled`: on the Nest's charging
+/// green, where everything is white.
+fn battery_face(p: &mut Canvas, fonts: &Fonts, battery: Option<&model::Battery>, filled: bool) {
+    let Some(battery) = battery else {
+        glance_label(p, fonts, 150.0, "Battery");
+        paint::text(p, fonts.digits(), 170.0, HALF, NUMBER_BASELINE, "–", 0.0, WHITE);
+        paint::text(p, fonts.regular(), 26.0, HALF, 352.0, "No battery chosen", 0.0, GLANCE_QUIET);
+        return;
+    };
+    let mood = battery.mood();
+    let tone = match mood {
+        model::Mood::Charging => Some(0),
+        model::Mood::Critical => Some(1),
+        model::Mood::Low => Some(2),
+        model::Mood::Calm => None,
+    };
+    let calm = if paint::fledge() { GLANCE_QUIET } else { WHITE };
+    let ring = if filled { WHITE } else { tone.map_or(calm, |i| BATTERY_RING[i]) };
+    let words = if filled { WHITE } else { tone.map_or(WHITE, |i| BATTERY_WORDS[i]) };
+    if paint::fledge() {
+        match mood {
+            model::Mood::Charging => paint::glow(p, BATTERY_RING[0], HALF, 298.0, 280.0, 0.42),
+            model::Mood::Critical => paint::glow(p, BATTERY_RING[1], HALF, 298.0, 280.0, 0.26),
+            _ => {}
+        }
+    }
+    let level = battery.level.map(|l| l.clamp(0.0, 100.0));
+    let top = level.filter(|l| *l > 0.0).map(|l| paint::tick_at(l / 100.0));
+    let limit = battery.limit.filter(|l| *l > 0.0 && *l < 100.0).map(|l| paint::tick_at(l / 100.0));
+    let unlit = if filled { alpha(WHITE, 0.38) } else { colour(DIM) };
+    // The Nest's look marks the limit with a long tick; Fledge's with a notch across its arc.
+    let marks: Vec<usize> = limit.filter(|_| !paint::fledge()).into_iter().collect();
+    ring_on(p, None, |i| if top.is_some_and(|t| i <= t) { colour(ring) } else { unlit }, &marks);
+    if let Some(tick) = limit.filter(|_| paint::fledge()) {
+        let a = paint::tick_angle(tick, paint::TICKS).to_radians();
+        let at = |r: f32| (HALF + r * a.sin(), HALF - r * a.cos());
+        let (inner, outer) = (at(199.0), at(225.0));
+        paint::line(p, inner.0, inner.1, outer.0, outer.1, 3.0, alpha(WHITE, 0.85));
+    }
+    let picture = if battery.icon.is_empty() { "mdi:battery" } else { &battery.icon };
+    icon(p, picture, "", HALF, 96.0, 52.0, if filled || tone.is_none() { WHITE } else { ring });
+    glance_label(p, fonts, 156.0, &battery.label);
+    match level {
+        Some(level) => big_number_on(p, None, fonts, level.round() as f64, false, "%", WHITE),
+        None => paint::text(p, fonts.digits(), 170.0, HALF, NUMBER_BASELINE, "–", 0.0, WHITE),
+    }
+    let doing = match battery.status.as_str() {
+        "charging" => "mdi:flash",
+        "plugged" => "mdi:power-plug",
+        "discharging" => "mdi:lightning-bolt",
+        _ => "mdi:battery",
+    };
+    if let Some(said) = said(battery.text.clone(), Some(doing), Some(words)) {
+        glance_line(p, fonts, slot(350.0, Style::Main, 300.0), &said, filled);
+    }
 }
 
 /// A small label over something large: the Nest's capitals, or as written

@@ -97,6 +97,9 @@ pub struct Glance {
     /// The big number's (Layout::Number).
     #[serde(default)]
     pub big: Option<Big>,
+    /// The battery's (Layout::Battery).
+    #[serde(default)]
+    pub battery: Option<Battery>,
     /// The next event (Layout::Agenda).
     #[serde(default)]
     pub event: Option<Event>,
@@ -160,6 +163,8 @@ pub enum Layout {
     Number,
     /// The next event from a calendar.
     Agenda,
+    /// Something's battery: its level round the ring (protocol 14).
+    Battery,
     /// A layout this build doesn't know: the clock.
     #[serde(other)]
     Unknown,
@@ -170,6 +175,7 @@ impl Layout {
     pub fn slots(self) -> usize {
         match self {
             Layout::Clock | Layout::Unknown => 3,
+            Layout::Battery => 1,
             Layout::Temp | Layout::Weather | Layout::Number => 2,
             Layout::Analog | Layout::Agenda => 1,
         }
@@ -251,6 +257,54 @@ pub struct Big {
     pub value: String,
     #[serde(default)]
     pub unit: String,
+}
+
+/// A battery, for its face: whose it is, how full, what it's doing in a
+/// word (charging, plugged, discharging, idle) and as Home Assistant says
+/// it, where it stops charging, and under what it's low and very low.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Battery {
+    #[serde(default)]
+    pub label: String,
+    /// Percent; None while Home Assistant doesn't know.
+    #[serde(default)]
+    pub level: Option<f32>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub limit: Option<f32>,
+    #[serde(default)]
+    pub low: Option<f32>,
+    #[serde(default)]
+    pub critical: Option<f32>,
+    #[serde(default)]
+    pub icon: String,
+}
+
+/// How a battery is doing, for its colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mood {
+    Charging,
+    Critical,
+    Low,
+    Calm,
+}
+
+impl Battery {
+    pub fn mood(&self) -> Mood {
+        let level = self.level.unwrap_or(100.0);
+        if self.status == "charging" {
+            Mood::Charging
+        } else if level <= self.critical.unwrap_or(10.0) {
+            Mood::Critical
+        } else if level <= self.low.unwrap_or(20.0) {
+            Mood::Low
+        } else {
+            Mood::Calm
+        }
+    }
 }
 
 /// A calendar's next event.
