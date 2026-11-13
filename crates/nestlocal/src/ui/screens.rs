@@ -271,16 +271,21 @@ pub struct Edge {
     pub pushes: bool,
     /// The clicks pushing on it so far.
     pub pressed: u8,
+    /// A turn has just stopped at it: the next one pushes.
+    pub stopped: bool,
 }
 
 pub type Parked = Option<Edge>;
 
 /// The push on a limit under way (Machine::pushing), for the screens drawn
-/// next: the arrows past that end light one a click.
+/// next: the arrows past that end light as it goes. STOPPED: the side
+/// where a turn has just stopped at a limit that gives way (Machine::stopped).
 static PUSHING: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
+static STOPPED: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
 
-pub fn set_pushing(pushing: i8) {
+pub fn set_pushing(pushing: i8, stopped: i8) {
     PUSHING.store(pushing, std::sync::atomic::Ordering::Relaxed);
+    STOPPED.store(stopped, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn edge_of(value: i32, ring: model::Ring, words: impl Fn(i32) -> String) -> Parked {
@@ -289,7 +294,8 @@ fn edge_of(value: i32, ring: model::Ring, words: impl Fn(i32) -> String) -> Park
     let past = ring.past(value) != 0;
     let pushing = PUSHING.load(std::sync::atomic::Ordering::Relaxed);
     let pressed = if !past && pushing.signum() == side { pushing.unsigned_abs() } else { 0 };
-    Some(Edge { side, limit: words(limit), past, pushes: ring.pushes(side), pressed })
+    let stopped = !past && STOPPED.load(std::sync::atomic::Ordering::Relaxed) == side;
+    Some(Edge { side, limit: words(limit), past, pushes: ring.pushes(side), pressed, stopped })
 }
 
 /// Whether a value screen's value is at or past one of its ring's limits.
@@ -371,6 +377,10 @@ fn parked_words(p: &mut Canvas, fonts: &Fonts, edge: &Edge, y: f32, soft: [u8; 3
             line(p, fonts, y, "At your limit", soft);
             if pushes {
                 past_arrows(p, edge.side, edge.pressed, WHITE, true);
+            }
+            if edge.stopped && pushes {
+                line(p, fonts, y + 28.0, "Turn again to go past", WHITE);
+                return true;
             }
             if edge.pressed == 0 {
                 return false;

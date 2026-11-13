@@ -1673,6 +1673,15 @@ impl Machine {
         }
     }
 
+    /// The side of a limit that gives way where a turn has just stopped
+    /// (one more turn pushes on it), 0 for none.
+    pub fn stopped(&self) -> i8 {
+        match self.push {
+            Some((side, 0, at)) if at.elapsed() < PUSH_FADE => side,
+            _ => 0,
+        }
+    }
+
     /// The thermostat's ring turned (self.turn, counts since the last
     /// click): it clicks twice a step, its mark following the hand between
     /// (dial_offset, in steps); its target moves a whole step once the hand
@@ -3133,12 +3142,14 @@ mod tests {
         }
         assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 50 }, "however long it goes on");
         assert_eq!(rig.machine.pushing(), 0, "pushing nothing");
+        assert_eq!(rig.machine.stopped(), 1, "stopped at its highest: it says turn again");
         rig.wait(PUSH_REST);
         for _ in 0..PUSH_CLICKS {
             rig.turn(VALUE_STEP);
             assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 50 });
         }
         assert_ne!(rig.machine.pushing(), 0, "a fresh turn pushes");
+        assert_eq!(rig.machine.stopped(), 0);
         rig.turn(VALUE_STEP);
         assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 51 }, "and goes through");
 

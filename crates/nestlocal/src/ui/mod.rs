@@ -1876,7 +1876,7 @@ impl Runtime {
 
     /// A device's own screen for `mode`.
     fn screen<'a>(machine: &'a Machine, mode: &Mode) -> Option<Screen<'a>> {
-        screens::set_pushing(machine.pushing());
+        screens::set_pushing(machine.pushing(), machine.stopped());
         let card = |slot: usize| machine.cards.cards.get(slot);
         Some(match mode {
             Mode::LightList { slot, selected } => match card(*slot)? {
@@ -3018,13 +3018,15 @@ mod shots {
         for (name, pushing, screen) in [
             ("l6-volume-at-limit", 0, Screen::Volume { card: den, value: 50 }),
             ("l7-volume-pushing", 2, Screen::Volume { card: den, value: 50 }),
+            ("l7a-volume-stopped", -9, Screen::Volume { card: den, value: 50 }),
             ("l8-volume-pushed-over", 0, Screen::Volume { card: den, value: 65 }),
             ("l9-climate-pushed-over", 0, Screen::NestSet { nest: Cow::Owned(Nest::of_card(den_heat)), target: 26.5, pulse: None, setting: false, shown: None }),
         ] {
-            screens::set_pushing(pushing);
+            // -9: a turn stopped at its highest, not yet pushing.
+            if pushing == -9 { screens::set_pushing(0, 1) } else { screens::set_pushing(pushing, 0) }
             save(&screens::draw(&fonts, &screen, None), &format!("{out}/{name}.png"));
         }
-        screens::set_pushing(0);
+        screens::set_pushing(0, 0);
         for (name, screen) in [
             ("l1-volume-over", Screen::Volume { card: speaker, value: 80 }),
             ("l2-volume-back", Screen::Volume { card: speaker, value: 50 }),
