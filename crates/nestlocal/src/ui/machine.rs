@@ -72,9 +72,14 @@ pub fn stepped(value: i32, steps: i32, ring: &Ring) -> Step {
 }
 
 /// Clicks on at a limit that gives way before it does, and how long the
-/// push lasts if the ring rests.
-pub const PUSH_CLICKS: u8 = 3;
+/// push lasts if the ring rests. A turn that runs into the limit stops
+/// there: the push starts only with a fresh turn, the ring having rested
+/// PUSH_REST, so a quick spin can't carry on through.
+pub const PUSH_CLICKS: u8 = 5;
 pub const PUSH_FADE: Duration = Duration::from_millis(1500);
+pub const PUSH_REST: Duration = Duration::from_millis(400);
+/// The arrows past a limit, lit as the push goes on.
+pub const PUSH_ARROWS: u8 = 3;
 pub const CLIMATE_STEP: i32 = 90;
 /// The thermostat's ring clicks this often: twice a step, its target
 /// following the hand between, as the Nest's ring does.
@@ -1625,7 +1630,9 @@ impl Machine {
     fn ring_turn(&mut self, value: i32, steps: i32, ring: Ring) -> Option<i32> {
         match stepped(value, steps, &ring) {
             Step::To(next) => {
-                self.push = None;
+                let side = steps.signum() as i8;
+                let end = ring.ends[if side > 0 { 1 } else { 0 }];
+                self.stopped_at_limit(ring.past(value) == 0 && next == end && ring.pushes(side), side);
                 Some(next)
             }
             Step::Stop => None,
@@ -1634,10 +1641,19 @@ impl Machine {
         }
     }
 
+    /// A turn moved the value: if `onto` it's now at a limit that gives
+    /// way (on `side`), that turn stops there and pushes nothing yet.
+    fn stopped_at_limit(&mut self, onto: bool, side: i8) {
+        self.push = onto.then_some((side, 0, self.last_input));
+    }
+
     /// A click on at a limit that gives way: whether that's it through.
+    /// Clicks of the turn that ran into it count for nothing, however
+    /// many, until the ring rests.
     fn pushed_through(&mut self, side: i8) -> bool {
         let now = self.last_input;
         let count = match self.push {
+            Some((s, 0, at)) if s == side && now.duration_since(at) < PUSH_REST => 0,
             Some((s, n, at)) if s == side && now.duration_since(at) < PUSH_FADE => n + 1,
             _ => 1,
         };
@@ -1646,11 +1662,13 @@ impl Machine {
         count > PUSH_CLICKS
     }
 
-    /// The push on a limit under way: its end's side times the clicks so
-    /// far (-2: two at the lowest), 0 for none.
+    /// The push on a limit under way: its end's side times the arrows lit
+    /// so far (-2: two at the lowest), 0 for none.
     pub fn pushing(&self) -> i8 {
         match self.push {
-            Some((side, count, at)) if at.elapsed() < PUSH_FADE => side * count as i8,
+            Some((side, count, at)) if at.elapsed() < PUSH_FADE => {
+                side * (count * PUSH_ARROWS).div_ceil(PUSH_CLICKS) as i8
+            }
             _ => 0,
         }
     }
@@ -1691,7 +1709,6 @@ impl Machine {
             }
             return;
         }
-        self.push = None;
         let mut offset = self.dial_offset + clicks as f64 * CLIMATE_CLICK as f64 / CLIMATE_STEP as f64;
         let mut next = target;
         while offset >= 1.0 - 1e-9 {
@@ -1708,6 +1725,8 @@ impl Machine {
         if next == target && offset == self.dial_offset {
             return;
         }
+        let at_limit = if side > 0 { next >= max } else { next <= min };
+        self.stopped_at_limit(over == 0 && at_limit && ring.pushes(side), side);
         out.push(Effect::Click);
         self.dial_offset = offset;
         self.mode = Mode::Dial { of, target: next };
@@ -3070,7 +3089,7 @@ mod tests {
         for n in 1..=PUSH_CLICKS as i8 {
             assert!(rig.input_with_clicks(Input::Turn(VALUE_STEP)).contains(&Effect::Click), "a push clicks");
             assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 50 }, "and holds");
-            assert_eq!(rig.machine.pushing(), n);
+            assert_eq!(rig.machine.pushing(), (n * 3 + 4) / 5, "the arrows light as it goes");
         }
         rig.turn(VALUE_STEP);
         assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 51 }, "one more: through");
@@ -3096,6 +3115,46 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 26.0 });
         rig.turn(-CLIMATE_STEP * 4);
         assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 25.0 }, "and back to it");
+    }
+
+    #[test]
+    fn a_turn_that_runs_into_a_limit_stops_there_until_the_ring_rests() {
+        let mut rig = deck_of(br#"{"cards":[
+            {"kind":"media","id":"media_player.speaker","name":"Speaker","state":"playing","volume":45,
+             "volume_limits":[10,50],"volume_push":[false,true]},
+            {"kind":"climate","id":"climate.kitchen","name":"Kitchen","mode":"heat","target":24,"min":18,"max":25,"step":0.5,
+             "temperature_whole":[7,35],"temperature_push":[false,true]}],"dim_off":false}"#);
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.turn(VALUE_STEP * 20);
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 50 }, "a spin stops at the limit");
+        for _ in 0..30 {
+            rig.turn(VALUE_STEP);
+        }
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 50 }, "however long it goes on");
+        assert_eq!(rig.machine.pushing(), 0, "pushing nothing");
+        rig.wait(PUSH_REST);
+        for _ in 0..PUSH_CLICKS {
+            rig.turn(VALUE_STEP);
+            assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 50 });
+        }
+        assert_ne!(rig.machine.pushing(), 0, "a fresh turn pushes");
+        rig.turn(VALUE_STEP);
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 51 }, "and goes through");
+
+        rig.machine.go(Mode::Chooser(2), &mut vec![]);
+        rig.press();
+        for _ in 0..40 {
+            rig.turn(CLIMATE_CLICK);
+        }
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 25.0 }, "the thermostat's ring too");
+        rig.wait(PUSH_REST);
+        for _ in 0..PUSH_CLICKS {
+            rig.turn(CLIMATE_CLICK);
+        }
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 25.0 });
+        rig.turn(CLIMATE_CLICK);
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Card(1), target: 25.5 }, "through after a rest");
     }
 
     #[test]
