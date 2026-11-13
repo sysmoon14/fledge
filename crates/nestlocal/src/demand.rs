@@ -19,14 +19,18 @@
 //! while it is off) and cycle limits still apply.
 //!
 //! When the lease runs out (Home Assistant, the broker or the network gone)
-//! the schedule and learning go back and the Nest runs on its own until heat
-//! is asked for again: the safety net is the schedule it already had. With
-//! no schedule to go back to, it holds FALLBACK.
+//! the schedule and learning go back, with the target at the schedule's
+//! setpoint for now (not HEAT, left over from an ask), and the Nest runs on
+//! its own until heat is asked for again: the safety net is the schedule it
+//! already had. With no schedule to go back to, it holds FALLBACK.
 //!
 //! The dial stays the owner's: turned while an ask holds (or the target or
 //! mode set from the climate entity), the Nest heats to it itself until the moved
 //! aside schedule's next change, or OVERRIDE with none, then follows Home
-//! Assistant again. A schedule written while the schedule is aside
+//! Assistant again. Setting the target to the aside schedule's setpoint for
+//! now is not a turn: it is what a schedule write applies (Fledge's
+//! fledge.set_schedule did, whenever Hearth restarted), and taking it as one
+//! shut Home Assistant out for hours. A schedule written while the schedule is aside
 //! (set/heating_times, clear_schedule) changes the one aside.
 
 use std::path::PathBuf;
@@ -220,6 +224,22 @@ fn next_setpoint(days: &Value, at: Local) -> Option<i64> {
     best.map(|b| b as i64)
 }
 
+/// The schedule's setpoint at `at`: the day's last entry at or before it,
+/// else the last entry of the days before, however far back.
+fn setpoint_now(days: &Value, at: Local) -> Option<f64> {
+    let entries = |day: usize| -> Vec<(f64, f64)> {
+        let mut out: Vec<(f64, f64)> = days.get(day.to_string()).and_then(Value::as_object)
+            .map(|e| e.values().filter_map(|e| Some((number(e.get("time"))?, number(e.get("temp"))?))).collect())
+            .unwrap_or_default();
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out
+    };
+    if let Some(t) = entries(at.day).iter().rev().find(|(time, _)| *time <= at.seconds) {
+        return Some(t.1);
+    }
+    (1..=7).find_map(|back| entries((at.day + 7 - back) % 7).last().map(|t| t.1))
+}
+
 impl HeatControl {
     /// Kept at `file`, as found there.
     pub fn at(file: PathBuf) -> HeatControl {
@@ -274,11 +294,11 @@ impl HeatControl {
     }
 
     /// Turns heating control on or off; off puts the schedule back.
-    pub fn set_enabled(&self, on: bool) -> Vec<Change> {
+    pub fn set_enabled(&self, on: bool, at: Local) -> Vec<Change> {
         let mut i = self.inner.lock().unwrap();
         let mut changes = Vec::new();
         if !on {
-            changes = release(&mut i);
+            changes = release(&mut i, at);
         }
         i.kept.enabled = on;
         let kept = i.kept.clone();
@@ -299,7 +319,7 @@ impl HeatControl {
         let mut changes = Vec::new();
         if i.kept.aside.is_none() {
             let days = schedule.and_then(|s| s.get("days")).cloned().unwrap_or_else(empty_week);
-            let mode = Some(sprint(shared.get("target_temperature_type"))).filter(|m| !m.is_empty() && m != "off")
+            let mode = Some(sprint(shared.get("target_temperature_type"))).filter(|m| matches!(m.as_str(), "heat" | "cool" | "range"))
                 .unwrap_or_else(heat_mode);
             i.kept.aside = Some(Aside { days, learning: truthy(device.get("learning_mode")), mode });
             changes.push(("schedule".into(), fields!{"days" => empty_week()}));
@@ -315,14 +335,14 @@ impl HeatControl {
 
     /// Runs every few seconds: lets a lease or a turn of the dial run out,
     /// and keeps the target where Home Assistant asked.
-    pub fn tick(&self, now: i64, shared: &Fields) -> Vec<Change> {
+    pub fn tick(&self, now: i64, at: Local, shared: &Fields) -> Vec<Change> {
         let mut i = self.inner.lock().unwrap();
         if i.kept.aside.is_none() {
             return vec![];
         }
         if i.lease_until.is_none_or(|u| now >= u) {
             crate::logf!("heat control: no ask from Home Assistant in time; the Nest's own schedule is back");
-            let changes = release(&mut i);
+            let changes = release(&mut i, at);
             let kept = i.kept.clone();
             drop(i);
             self.save(&kept);
@@ -350,6 +370,14 @@ impl HeatControl {
             drop(i);
             self.dial(now, at);
         }
+    }
+
+    /// Whether `target` (°C) is the aside schedule's setpoint at `at`: what a
+    /// schedule write applies, not someone choosing a temperature.
+    pub fn schedule_setpoint(&self, target: f64, at: Local) -> bool {
+        let i = self.inner.lock().unwrap();
+        i.kept.aside.as_ref().and_then(|a| setpoint_now(&a.days, at))
+            .is_some_and(|t| (t - target).abs() <= TOLERANCE)
     }
 
     /// A turn of the dial, or a target or mode set from the climate entity:
@@ -435,18 +463,20 @@ fn steer(i: &mut Inner, now: i64, shared: &Fields) -> Vec<Change> {
     }
 }
 
-/// The schedule and learning back as they were; with no schedule, FALLBACK.
-fn release(i: &mut Inner) -> Vec<Change> {
+/// The schedule and learning back as they were, the target at the
+/// schedule's setpoint for now; with no schedule, FALLBACK.
+fn release(i: &mut Inner, at: Local) -> Vec<Change> {
     i.lease_until = None;
     i.override_until = None;
     i.written = None;
     i.heat = false;
     i.rooms.clear();
     let Some(aside) = i.kept.aside.take() else { return vec![] };
-    let mut shared = fields!{"target_temperature_type" => aside.mode.clone(), "target_change_pending" => true};
-    if !has_setpoints(&aside.days) {
-        shared.insert("target_temperature".into(), FALLBACK.into());
-    }
+    // The target as an ask left it (HEAT, say) would hold until the
+    // schedule's next change: the setpoint for now instead.
+    let target = if has_setpoints(&aside.days) { setpoint_now(&aside.days, at).unwrap_or(FALLBACK) } else { FALLBACK };
+    let shared = fields!{"target_temperature_type" => aside.mode.clone(), "target_temperature" => target,
+                         "target_change_pending" => true};
     vec![
         ("schedule".into(), fields!{"days" => aside.days.clone()}),
         ("device".into(), fields!{"learning_mode" => aside.learning}),
@@ -469,6 +499,9 @@ pub mod tests {
     fn obj(v: Value) -> Fields {
         v.as_object().unwrap().clone()
     }
+
+    /// Monday, midnight.
+    const MON: Local = Local { day: 0, seconds: 0.0 };
 
     fn week() -> Fields {
         obj(json!({"days": {"0": {"0": {"entry_type": "continuation", "time": 0, "temp": 17},
@@ -503,7 +536,7 @@ pub mod tests {
     fn an_ask_moves_the_schedule_aside_and_a_lapse_puts_it_back() {
         let file = temp_file();
         let c = HeatControl::at(file.clone());
-        c.set_enabled(true);
+        c.set_enabled(true, MON);
         assert_eq!(c.phase(0), Phase::OnItsOwn);
         let dev = obj(json!({"learning_mode": true}));
         let sh = obj(json!({"target_temperature": 20.0, "target_temperature_type": "heat"}));
@@ -516,7 +549,7 @@ pub mod tests {
 
         // Renewed: nothing more to change while it heats at HEAT.
         let sh = obj(json!({"target_temperature": HEAT, "target_temperature_type": "heat"}));
-        assert!(c.tick(1500, &sh).is_empty());
+        assert!(c.tick(1500, MON, &sh).is_empty());
         // No heat wanted: off.
         let changes = c.ask(Ask::parse("OFF").unwrap(), 1500, None, &dev, &sh).unwrap();
         assert_eq!(changes, vec![("shared".into(), fields!{"target_temperature_type" => "off", "target_change_pending" => true})]);
@@ -525,12 +558,12 @@ pub mod tests {
         assert_eq!(c.phase(1500), Phase::Idle, "off as written: not the dial");
 
         // No ask for the lease: the schedule, learning and heat come back.
-        let changes = c.tick(1500 + LEASE, &off);
+        let changes = c.tick(1500 + LEASE, MON, &off);
         assert_eq!(changed(&changes, "schedule").unwrap()["days"], week()["days"]);
         assert_eq!(changed(&changes, "device").unwrap()["learning_mode"], json!(true));
         let shared = changed(&changes, "shared").unwrap();
         assert_eq!(shared["target_temperature_type"], json!("heat"));
-        assert!(shared.get("target_temperature").is_none(), "it has a schedule to run");
+        assert_eq!(shared["target_temperature"], json!(17.0), "the schedule's for now, not HEAT");
         assert_eq!(c.phase(1500 + LEASE), Phase::OnItsOwn);
         assert!(!HeatControl::at(file).holding());
     }
@@ -538,9 +571,9 @@ pub mod tests {
     #[test]
     fn with_no_schedule_to_go_back_to_it_holds_the_fallback() {
         let c = HeatControl::at(temp_file());
-        c.set_enabled(true);
+        c.set_enabled(true, MON);
         c.ask(Ask::parse("ON").unwrap(), 0, None, &Fields::new(), &Fields::new()).unwrap();
-        let changes = c.tick(LEASE, &Fields::new());
+        let changes = c.tick(LEASE, MON, &Fields::new());
         assert_eq!(changed(&changes, "shared").unwrap()["target_temperature"], json!(FALLBACK));
     }
 
@@ -548,19 +581,19 @@ pub mod tests {
     fn a_restart_while_holding_gives_the_schedule_back() {
         let file = temp_file();
         let c = HeatControl::at(file.clone());
-        c.set_enabled(true);
+        c.set_enabled(true, MON);
         c.ask(Ask::parse("ON").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
         let after = HeatControl::at(file);
-        let changes = after.tick(1, &Fields::new());
+        let changes = after.tick(1, MON, &Fields::new());
         assert_eq!(changed(&changes, "schedule").unwrap()["days"], week()["days"]);
     }
 
     #[test]
     fn turning_it_off_gives_the_schedule_back() {
         let c = HeatControl::at(temp_file());
-        c.set_enabled(true);
+        c.set_enabled(true, MON);
         c.ask(Ask::parse("ON").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
-        let changes = c.set_enabled(false);
+        let changes = c.set_enabled(false, MON);
         assert_eq!(changed(&changes, "schedule").unwrap()["days"], week()["days"]);
         assert_eq!(c.phase(0), Phase::Nest);
     }
@@ -568,7 +601,7 @@ pub mod tests {
     #[test]
     fn the_dial_holds_until_the_schedules_next_change() {
         let c = HeatControl::at(temp_file());
-        c.set_enabled(true);
+        c.set_enabled(true, MON);
         c.ask(Ask::parse("OFF").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
         // What was written: not the dial.
         c.saw_target(10, Local { day: 0, seconds: 3600.0 }, &obj(json!({"target_temperature_type": "off"})));
@@ -578,22 +611,22 @@ pub mod tests {
                      &obj(json!({"target_temperature": 21.0, "target_temperature_type": "heat"})));
         assert_eq!(c.phase(10), Phase::Dial);
         assert_eq!(c.dial_until(10), Some(10 + 23400 - 3600));
-        assert!(c.tick(20, &obj(json!({"target_temperature": 21.0}))).is_empty(), "left alone");
+        assert!(c.tick(20, MON, &obj(json!({"target_temperature": 21.0}))).is_empty(), "left alone");
         c.ask(Ask::parse("OFF").unwrap(), 30, None, &Fields::new(), &Fields::new()).unwrap();
         let after = 10 + 23400 - 3600;
-        let changes = c.tick(after, &obj(json!({"target_temperature": 21.0})));
+        let changes = c.tick(after, MON, &obj(json!({"target_temperature": 21.0})));
         assert_eq!(changed(&changes, "schedule").unwrap()["days"], week()["days"], "the lease ran out first");
     }
 
     #[test]
     fn the_dial_gives_way_after_a_while_with_no_schedule() {
         let c = HeatControl::at(temp_file());
-        c.set_enabled(true);
+        c.set_enabled(true, MON);
         c.ask(Ask { heat: false, lease: 3600, rooms: vec![] }, 0, None, &Fields::new(), &Fields::new()).unwrap();
         assert!(c.dial(0, Local { day: 2, seconds: 0.0 }));
         assert_eq!(c.dial_until(0), Some(OVERRIDE));
         c.ask(Ask { heat: false, lease: 3600, rooms: vec![] }, OVERRIDE - 60, None, &Fields::new(), &Fields::new()).unwrap();
-        let changes = c.tick(OVERRIDE, &obj(json!({"target_temperature": 22.0, "target_temperature_type": "heat"})));
+        let changes = c.tick(OVERRIDE, MON, &obj(json!({"target_temperature": 22.0, "target_temperature_type": "heat"})));
         assert_eq!(changed(&changes, "shared").unwrap()["target_temperature_type"], json!("off"));
         assert_eq!(c.phase(OVERRIDE), Phase::Idle);
     }
@@ -601,13 +634,13 @@ pub mod tests {
     #[test]
     fn a_schedule_written_while_aside_changes_the_one_aside() {
         let c = HeatControl::at(temp_file());
-        c.set_enabled(true);
+        c.set_enabled(true, MON);
         assert!(!c.edit_aside(&fields!{"days" => empty_week()}), "nothing aside");
         c.ask(Ask::parse("ON").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
         let new = obj(json!({"days": {"0": {"1": {"entry_type": "setpoint", "time": 3600, "temp": 19}}}}));
         assert!(c.edit_aside(&new));
         assert_eq!(c.aside_schedule(None).unwrap()["days"], new["days"]);
-        let changes = c.set_enabled(false);
+        let changes = c.set_enabled(false, MON);
         assert_eq!(changed(&changes, "schedule").unwrap()["days"], new["days"]);
     }
 
@@ -617,5 +650,39 @@ pub mod tests {
         assert_eq!(next_setpoint(&w["days"], Local { day: 0, seconds: 0.0 }), Some(23400));
         assert_eq!(next_setpoint(&w["days"], Local { day: 0, seconds: 30000.0 }), Some(7 * 86400 - 30000 + 23400));
         assert_eq!(next_setpoint(&empty_week(), Local { day: 3, seconds: 0.0 }), None);
+    }
+
+    #[test]
+    fn the_setpoint_now_carries_on_from_before() {
+        let w = week();
+        assert_eq!(setpoint_now(&w["days"], Local { day: 0, seconds: 100.0 }), Some(17.0));
+        assert_eq!(setpoint_now(&w["days"], Local { day: 0, seconds: 23400.0 }), Some(20.0));
+        assert_eq!(setpoint_now(&w["days"], Local { day: 4, seconds: 0.0 }), Some(20.0), "Monday's last");
+        assert_eq!(setpoint_now(&empty_week(), MON), None);
+    }
+
+    #[test]
+    fn the_schedule_s_own_setpoint_is_not_a_turn_of_the_dial() {
+        let c = HeatControl::at(temp_file());
+        c.set_enabled(true, MON);
+        assert!(!c.schedule_setpoint(20.0, Local { day: 0, seconds: 30000.0 }), "nothing aside");
+        c.ask(Ask::parse("ON").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
+        // 20 from 06:30 Monday, 17 before.
+        assert!(c.schedule_setpoint(20.0, Local { day: 0, seconds: 30000.0 }));
+        assert!(c.schedule_setpoint(17.0, Local { day: 0, seconds: 3600.0 }));
+        assert!(!c.schedule_setpoint(21.0, Local { day: 0, seconds: 30000.0 }));
+        assert_eq!(c.phase(0), Phase::Heating);
+    }
+
+    #[test]
+    fn a_lapse_mid_heat_does_not_leave_the_nest_at_heat() {
+        let c = HeatControl::at(temp_file());
+        c.set_enabled(true, MON);
+        c.ask(Ask::parse("ON").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
+        let at = Local { day: 0, seconds: 30000.0 };
+        let changes = c.tick(LEASE, at, &obj(json!({"target_temperature": HEAT, "target_temperature_type": "heat"})));
+        let shared = changed(&changes, "shared").unwrap();
+        assert_eq!(shared["target_temperature"], json!(20.0));
+        assert_eq!(shared["target_temperature_type"], json!("heat"));
     }
 }

@@ -271,7 +271,7 @@ impl Bridge {
         if on == self.heat_control.enabled() {
             return logf!("heat control: already {}", if on { "Home Assistant's" } else { "the Nest's" });
         }
-        let changes = self.heat_control.set_enabled(on);
+        let changes = self.heat_control.set_enabled(on, crate::demand::Local::now());
         logf!("heat control: {}", if on { "Home Assistant decides when to heat" } else { "the Nest decides again" });
         self.merge_changes("heat control", changes);
         self.publish_state();
@@ -306,7 +306,7 @@ impl Bridge {
             every.tick().await;
             let now = chrono::Utc::now().timestamp();
             let shared = self.buckets().remove("shared").unwrap_or_default();
-            let changes = self.heat_control.tick(now, &shared);
+            let changes = self.heat_control.tick(now, crate::demand::Local::now(), &shared);
             self.merge_changes("heat control", changes);
             let p = Some(self.heat_control.phase(now));
             if p != phase {
@@ -335,9 +335,21 @@ impl Bridge {
             logf!("{from}: {name} {arg:?}: not a thermostat (Act as a thermostat is off)");
             return Err("not acting as a thermostat".into());
         }
+        // The aside schedule's own setpoint for now, set while Home Assistant
+        // decides, is a schedule write applying itself (an older Fledge's
+        // fledge.set_schedule), not a turn of the dial: left alone, or it
+        // would shut Home Assistant out until the schedule's next change.
+        let now = chrono::Utc::now().timestamp();
+        if name == "target" && self.heat_control.deciding(now) {
+            if let Ok(t) = temperature(arg, SETPOINT) {
+                if self.heat_control.schedule_setpoint(t, crate::demand::Local::now()) {
+                    logf!("{from}: target {arg}: the schedule's own setpoint while Home Assistant decides: left alone");
+                    return Ok(());
+                }
+            }
+        }
         // Setting the target or mode while Home Assistant decides when to heat
         // is the owner's turn of the dial (demand.rs): the Nest heats to it.
-        let now = chrono::Utc::now().timestamp();
         let dialled = matches!(name, "target" | "mode") && self.heat_control.deciding(now)
             && self.heat_control.dial(now, crate::demand::Local::now());
         let (bucket, mut fields) = match self.fields(name, arg) {

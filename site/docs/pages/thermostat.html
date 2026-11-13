@@ -34,7 +34,7 @@
 <p>Its card becomes a simple one: whether it's heating and why ("Office wants heat", "2 rooms want heat", "No rooms want heat"), and whether the hot water is on and until when. There's no temperature to set on it, as the rooms are set in Home Assistant. Press it for a hot water boost, or for Nest's own dial.</p>
 <ul>
 <li><strong>Nest's own dial</strong> is still there for anyone who wants it: a temperature set there holds until the Nest's schedule's next change (two hours if it has none), then Home Assistant decides again.</li>
-<li><strong>If Home Assistant stops</strong> (a restart, the broker or Wi-Fi down), the asks stop. After ten minutes the Nest's own schedule comes back and it runs as a normal Nest until Home Assistant asks again. With no schedule it holds 17°. A schedule you write meanwhile, from Home Assistant or the schedule card, is the one it comes back to.</li>
+<li><strong>If Home Assistant stops</strong> (a restart, the broker or Wi-Fi down), the asks stop. After ten minutes the Nest's own schedule comes back, at the temperature it sets for that time, and it runs as a normal Nest until Home Assistant asks again. With no schedule it holds 17°. A schedule you write meanwhile, from Home Assistant or the schedule card, is the one it comes back to; writing it doesn't count as turning the dial.</li>
 <li><strong>Turning the switch off</strong> gives the Nest its schedule back straight away.</li>
 </ul>
 <p>Heating only, for now: cooling and heat pumps carry on as before.</p>
