@@ -18,20 +18,18 @@
 //! to heat, or off not to; the unit's own safety temperature (which holds
 //! while it is off) and cycle limits still apply.
 //!
+//! The ask is the only say while it holds: whatever else changes the target
+//! or mode (Nest's own dial, the climate entity, the unit itself) is put back
+//! to the ask within a tick, and commands that would change them are refused
+//! (commands.rs). To set the Nest by hand, turn heating control off.
+//!
 //! When the lease runs out (Home Assistant, the broker or the network gone)
 //! the schedule and learning go back, with the target at the schedule's
 //! setpoint for now (not HEAT, left over from an ask), and the Nest runs on
 //! its own until heat is asked for again: the safety net is the schedule it
-//! already had. With no schedule to go back to, it holds FALLBACK.
-//!
-//! The dial stays the owner's: turned while an ask holds (or the target or
-//! mode set from the climate entity), the Nest heats to it itself until the moved
-//! aside schedule's next change, or OVERRIDE with none, then follows Home
-//! Assistant again. Setting the target to the aside schedule's setpoint for
-//! now is not a turn: it is what a schedule write applies (Fledge's
-//! fledge.set_schedule did, whenever Hearth restarted), and taking it as one
-//! shut Home Assistant out for hours. A schedule written while the schedule is aside
-//! (set/heating_times, clear_schedule) changes the one aside.
+//! already had. With no schedule to go back to, it holds FALLBACK. A
+//! schedule written while the schedule is aside (set/heating_times,
+//! clear_schedule) changes the one aside.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -51,10 +49,7 @@ pub const FALLBACK: f64 = 17.0;
 /// A lease, seconds: the default and the range an ask may name.
 pub const LEASE: i64 = 600;
 const LEASE_RANGE: (i64, i64) = (60, 3600);
-/// How long a turn of the dial holds with no schedule change ahead.
-const OVERRIDE: i64 = 2 * 3600;
-/// How far the target may drift from what was written before it is a turn
-/// of the dial, °C.
+/// How far the target may sit from HEAT and still be as asked, °C.
 const TOLERANCE: f64 = 0.25;
 
 /// A bucket change: its type ("schedule", "device", "shared") and fields.
@@ -89,10 +84,6 @@ struct Inner {
     lease_until: Option<i64>,
     heat: bool,
     rooms: Vec<String>,
-    /// A turn of the dial holds until then.
-    override_until: Option<i64>,
-    /// What was last written: heat at HEAT, or off.
-    written: Option<bool>,
 }
 
 /// Where heating control stands, as Home Assistant and the screen show it.
@@ -106,8 +97,6 @@ pub enum Phase {
     Heating,
     /// Home Assistant asks for none.
     Idle,
-    /// The dial was turned: the Nest heats to it for now.
-    Dial,
 }
 
 impl Phase {
@@ -117,7 +106,6 @@ impl Phase {
             Phase::OnItsOwn => "on_its_own",
             Phase::Heating => "heating",
             Phase::Idle => "idle",
-            Phase::Dial => "dial",
         }
     }
 }
@@ -159,8 +147,8 @@ impl Ask {
     }
 }
 
-/// The local time a turn of the dial is measured from: the day (0 Monday)
-/// and seconds after midnight.
+/// The local time the schedule's setpoint for now is read at: the day (0
+/// Monday) and seconds after midnight.
 #[derive(Clone, Copy, Debug)]
 pub struct Local {
     pub day: usize,
@@ -199,29 +187,6 @@ fn has_setpoints(days: &Value) -> bool {
     days.as_object().is_some_and(|d| d.values().any(|day| {
         day.as_object().is_some_and(|e| e.values().any(|e| sprint(e.get("entry_type")) != "continuation"))
     }))
-}
-
-/// Seconds from `at` until the schedule's next setpoint, in the week ahead.
-fn next_setpoint(days: &Value, at: Local) -> Option<i64> {
-    let mut best: Option<f64> = None;
-    for ahead in 0..8 {
-        let day = (at.day + ahead) % 7;
-        let Some(entries) = days.get(day.to_string()).and_then(Value::as_object) else { continue };
-        for e in entries.values() {
-            if sprint(e.get("entry_type")) == "continuation" {
-                continue;
-            }
-            let Some(time) = number(e.get("time")) else { continue };
-            let wait = ahead as f64 * 86400.0 + time - at.seconds;
-            if wait > 0.0 && best.is_none_or(|b| wait < b) {
-                best = Some(wait);
-            }
-        }
-        if best.is_some() {
-            break;
-        }
-    }
-    best.map(|b| b as i64)
 }
 
 /// The schedule's setpoint at `at`: the day's last entry at or before it,
@@ -273,24 +238,17 @@ impl HeatControl {
         self.inner.lock().unwrap().kept.aside.is_some()
     }
 
-    pub fn phase(&self, now: i64) -> Phase {
+    pub fn phase(&self) -> Phase {
         let i = self.inner.lock().unwrap();
         if !i.kept.enabled {
             Phase::Nest
         } else if i.kept.aside.is_none() {
             Phase::OnItsOwn
-        } else if i.override_until.is_some_and(|u| now < u) {
-            Phase::Dial
         } else if i.heat {
             Phase::Heating
         } else {
             Phase::Idle
         }
-    }
-
-    /// When a turn of the dial gives way to Home Assistant again.
-    pub fn dial_until(&self, now: i64) -> Option<i64> {
-        self.inner.lock().unwrap().override_until.filter(|u| now < *u)
     }
 
     /// Turns heating control on or off; off puts the schedule back.
@@ -329,12 +287,12 @@ impl HeatControl {
             self.save(&kept);
             i = self.inner.lock().unwrap();
         }
-        changes.extend(steer(&mut i, now, shared));
+        changes.extend(steer(&i, shared));
         Ok(changes)
     }
 
-    /// Runs every few seconds: lets a lease or a turn of the dial run out,
-    /// and keeps the target where Home Assistant asked.
+    /// Runs every few seconds: lets a lease run out, and otherwise puts the
+    /// target and mode back where Home Assistant asked, whatever moved them.
     pub fn tick(&self, now: i64, at: Local, shared: &Fields) -> Vec<Change> {
         let mut i = self.inner.lock().unwrap();
         if i.kept.aside.is_none() {
@@ -348,54 +306,12 @@ impl HeatControl {
             self.save(&kept);
             return changes;
         }
-        steer(&mut i, now, shared)
+        steer(&i, shared)
     }
 
-    /// The unit changed itself: a turn of the dial (or its mode), unless it
-    /// is what was written.
-    pub fn saw_target(&self, now: i64, at: Local, shared: &Fields) {
-        let i = self.inner.lock().unwrap();
-        let (Some(_), Some(heating)) = (i.kept.aside.as_ref(), i.written) else { return };
-        if i.override_until.is_some_and(|u| now < u) {
-            return;
-        }
-        let mode = sprint(shared.get("target_temperature_type"));
-        let target = number(shared.get("target_temperature"));
-        let as_written = if heating {
-            mode == "heat" && target.is_some_and(|t| (t - HEAT).abs() <= TOLERANCE)
-        } else {
-            mode == "off"
-        };
-        if !as_written {
-            drop(i);
-            self.dial(now, at);
-        }
-    }
-
-    /// Whether `target` (°C) is the aside schedule's setpoint at `at`: what a
-    /// schedule write applies, not someone choosing a temperature.
-    pub fn schedule_setpoint(&self, target: f64, at: Local) -> bool {
-        let i = self.inner.lock().unwrap();
-        i.kept.aside.as_ref().and_then(|a| setpoint_now(&a.days, at))
-            .is_some_and(|t| (t - target).abs() <= TOLERANCE)
-    }
-
-    /// A turn of the dial, or a target or mode set from the climate entity:
-    /// the owner's until the schedule's next change. Whether it took.
-    pub fn dial(&self, now: i64, at: Local) -> bool {
-        let mut i = self.inner.lock().unwrap();
-        let Some(aside) = i.kept.aside.as_ref() else { return false };
-        let hold = next_setpoint(&aside.days, at).unwrap_or(OVERRIDE);
-        if !i.override_until.is_some_and(|u| now < u) {
-            crate::logf!("heat control: the dial; Home Assistant waits {} min", hold / 60);
-        }
-        i.override_until = Some(now + hold);
-        true
-    }
-
-    /// Whether Home Assistant decides right now (not the dial).
-    pub fn deciding(&self, now: i64) -> bool {
-        matches!(self.phase(now), Phase::Heating | Phase::Idle)
+    /// Whether Home Assistant decides right now: an ask holds.
+    pub fn deciding(&self) -> bool {
+        matches!(self.phase(), Phase::Heating | Phase::Idle)
     }
 
     /// The schedule while it is aside, as its bucket would hold it.
@@ -423,8 +339,8 @@ impl HeatControl {
     }
 
     /// For Home Assistant's state.
-    pub fn shown(&self, now: i64) -> Fields {
-        let phase = self.phase(now);
+    pub fn shown(&self) -> Fields {
+        let phase = self.phase();
         let i = self.inner.lock().unwrap();
         let rfc = |t: i64| chrono::DateTime::from_timestamp(t, 0).map_or(Value::Null, |d| d.to_rfc3339().into());
         fields!{
@@ -432,21 +348,13 @@ impl HeatControl {
             "heat_control_phase" => phase.key(),
             "heat_control_rooms" => i.rooms.clone(),
             "heat_control_lease_until" => i.lease_until.filter(|_| i.kept.aside.is_some()).map_or(Value::Null, rfc),
-            "heat_control_dial_until" => i.override_until.filter(|u| now < *u).map_or(Value::Null, rfc),
         }
     }
 }
 
 /// What Home Assistant's ask means: heat at HEAT, or off. Written if the
-/// unit has something else.
-fn steer(i: &mut Inner, now: i64, shared: &Fields) -> Vec<Change> {
-    if i.override_until.is_some_and(|u| now < u) {
-        return vec![];
-    }
-    if i.override_until.take().is_some() {
-        crate::logf!("heat control: back to Home Assistant after the dial");
-    }
-    i.written = Some(i.heat);
+/// unit has anything else, whoever put it there.
+fn steer(i: &Inner, shared: &Fields) -> Vec<Change> {
     let mode = sprint(shared.get("target_temperature_type"));
     let target = number(shared.get("target_temperature"));
     if i.heat {
@@ -467,8 +375,6 @@ fn steer(i: &mut Inner, now: i64, shared: &Fields) -> Vec<Change> {
 /// schedule's setpoint for now; with no schedule, FALLBACK.
 fn release(i: &mut Inner, at: Local) -> Vec<Change> {
     i.lease_until = None;
-    i.override_until = None;
-    i.written = None;
     i.heat = false;
     i.rooms.clear();
     let Some(aside) = i.kept.aside.take() else { return vec![] };
@@ -527,7 +433,7 @@ pub mod tests {
     #[test]
     fn off_it_ignores_asks() {
         let c = HeatControl::at(temp_file());
-        assert_eq!(c.phase(0), Phase::Nest);
+        assert_eq!(c.phase(), Phase::Nest);
         assert!(c.ask(Ask::parse("ON").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).is_err());
         assert!(!c.holding());
     }
@@ -537,14 +443,14 @@ pub mod tests {
         let file = temp_file();
         let c = HeatControl::at(file.clone());
         c.set_enabled(true, MON);
-        assert_eq!(c.phase(0), Phase::OnItsOwn);
+        assert_eq!(c.phase(), Phase::OnItsOwn);
         let dev = obj(json!({"learning_mode": true}));
         let sh = obj(json!({"target_temperature": 20.0, "target_temperature_type": "heat"}));
         let changes = c.ask(Ask::parse("ON").unwrap(), 1000, Some(&week()), &dev, &sh).unwrap();
         assert_eq!(changed(&changes, "schedule").unwrap()["days"], empty_week());
         assert_eq!(changed(&changes, "device").unwrap()["learning_mode"], json!(false));
         assert_eq!(changed(&changes, "shared").unwrap()["target_temperature"], json!(HEAT));
-        assert_eq!(c.phase(1000), Phase::Heating);
+        assert_eq!(c.phase(), Phase::Heating);
         assert!(HeatControl::at(file.clone()).holding(), "kept across a restart");
 
         // Renewed: nothing more to change while it heats at HEAT.
@@ -554,8 +460,8 @@ pub mod tests {
         let changes = c.ask(Ask::parse("OFF").unwrap(), 1500, None, &dev, &sh).unwrap();
         assert_eq!(changes, vec![("shared".into(), fields!{"target_temperature_type" => "off", "target_change_pending" => true})]);
         let off = obj(json!({"target_temperature": HEAT, "target_temperature_type": "off"}));
-        c.saw_target(1500, Local { day: 0, seconds: 0.0 }, &off);
-        assert_eq!(c.phase(1500), Phase::Idle, "off as written: not the dial");
+        assert!(c.tick(1510, MON, &off).is_empty(), "off as asked");
+        assert_eq!(c.phase(), Phase::Idle);
 
         // No ask for the lease: the schedule, learning and heat come back.
         let changes = c.tick(1500 + LEASE, MON, &off);
@@ -564,7 +470,7 @@ pub mod tests {
         let shared = changed(&changes, "shared").unwrap();
         assert_eq!(shared["target_temperature_type"], json!("heat"));
         assert_eq!(shared["target_temperature"], json!(17.0), "the schedule's for now, not HEAT");
-        assert_eq!(c.phase(1500 + LEASE), Phase::OnItsOwn);
+        assert_eq!(c.phase(), Phase::OnItsOwn);
         assert!(!HeatControl::at(file).holding());
     }
 
@@ -595,40 +501,27 @@ pub mod tests {
         c.ask(Ask::parse("ON").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
         let changes = c.set_enabled(false, MON);
         assert_eq!(changed(&changes, "schedule").unwrap()["days"], week()["days"]);
-        assert_eq!(c.phase(0), Phase::Nest);
+        assert_eq!(c.phase(), Phase::Nest);
     }
 
     #[test]
-    fn the_dial_holds_until_the_schedules_next_change() {
+    fn whatever_moves_the_target_while_an_ask_holds_is_put_back() {
         let c = HeatControl::at(temp_file());
         c.set_enabled(true, MON);
         c.ask(Ask::parse("OFF").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
-        // What was written: not the dial.
-        c.saw_target(10, Local { day: 0, seconds: 3600.0 }, &obj(json!({"target_temperature_type": "off"})));
-        assert_eq!(c.phase(10), Phase::Idle);
-        // Turned to 21 at 01:00 Monday: holds to the 06:30 setpoint.
-        c.saw_target(10, Local { day: 0, seconds: 3600.0 },
-                     &obj(json!({"target_temperature": 21.0, "target_temperature_type": "heat"})));
-        assert_eq!(c.phase(10), Phase::Dial);
-        assert_eq!(c.dial_until(10), Some(10 + 23400 - 3600));
-        assert!(c.tick(20, MON, &obj(json!({"target_temperature": 21.0}))).is_empty(), "left alone");
-        c.ask(Ask::parse("OFF").unwrap(), 30, None, &Fields::new(), &Fields::new()).unwrap();
-        let after = 10 + 23400 - 3600;
-        let changes = c.tick(after, MON, &obj(json!({"target_temperature": 21.0})));
-        assert_eq!(changed(&changes, "schedule").unwrap()["days"], week()["days"], "the lease ran out first");
-    }
-
-    #[test]
-    fn the_dial_gives_way_after_a_while_with_no_schedule() {
-        let c = HeatControl::at(temp_file());
-        c.set_enabled(true, MON);
-        c.ask(Ask { heat: false, lease: 3600, rooms: vec![] }, 0, None, &Fields::new(), &Fields::new()).unwrap();
-        assert!(c.dial(0, Local { day: 2, seconds: 0.0 }));
-        assert_eq!(c.dial_until(0), Some(OVERRIDE));
-        c.ask(Ask { heat: false, lease: 3600, rooms: vec![] }, OVERRIDE - 60, None, &Fields::new(), &Fields::new()).unwrap();
-        let changes = c.tick(OVERRIDE, MON, &obj(json!({"target_temperature": 22.0, "target_temperature_type": "heat"})));
+        // Nest's own dial (or anything else) to 21, heating: off again.
+        let dialled = obj(json!({"target_temperature": 21.0, "target_temperature_type": "heat"}));
+        let changes = c.tick(10, MON, &dialled);
         assert_eq!(changed(&changes, "shared").unwrap()["target_temperature_type"], json!("off"));
-        assert_eq!(c.phase(OVERRIDE), Phase::Idle);
+        assert_eq!(c.phase(), Phase::Idle);
+        // Asked to heat, turned down to 18: HEAT again.
+        c.ask(Ask::parse("ON").unwrap(), 20, None, &Fields::new(), &dialled).unwrap();
+        let changes = c.tick(30, MON, &obj(json!({"target_temperature": 18.0, "target_temperature_type": "heat"})));
+        assert_eq!(changed(&changes, "shared").unwrap()["target_temperature"], json!(HEAT));
+        // Put in eco's range or cool: heat at HEAT.
+        let changes = c.tick(40, MON, &obj(json!({"target_temperature": HEAT, "target_temperature_type": "cool"})));
+        assert_eq!(changed(&changes, "shared").unwrap()["target_temperature_type"], json!("heat"));
+        assert_eq!(c.phase(), Phase::Heating);
     }
 
     #[test]
@@ -645,33 +538,12 @@ pub mod tests {
     }
 
     #[test]
-    fn next_setpoints_wrap_the_week() {
-        let w = week();
-        assert_eq!(next_setpoint(&w["days"], Local { day: 0, seconds: 0.0 }), Some(23400));
-        assert_eq!(next_setpoint(&w["days"], Local { day: 0, seconds: 30000.0 }), Some(7 * 86400 - 30000 + 23400));
-        assert_eq!(next_setpoint(&empty_week(), Local { day: 3, seconds: 0.0 }), None);
-    }
-
-    #[test]
     fn the_setpoint_now_carries_on_from_before() {
         let w = week();
         assert_eq!(setpoint_now(&w["days"], Local { day: 0, seconds: 100.0 }), Some(17.0));
         assert_eq!(setpoint_now(&w["days"], Local { day: 0, seconds: 23400.0 }), Some(20.0));
         assert_eq!(setpoint_now(&w["days"], Local { day: 4, seconds: 0.0 }), Some(20.0), "Monday's last");
         assert_eq!(setpoint_now(&empty_week(), MON), None);
-    }
-
-    #[test]
-    fn the_schedule_s_own_setpoint_is_not_a_turn_of_the_dial() {
-        let c = HeatControl::at(temp_file());
-        c.set_enabled(true, MON);
-        assert!(!c.schedule_setpoint(20.0, Local { day: 0, seconds: 30000.0 }), "nothing aside");
-        c.ask(Ask::parse("ON").unwrap(), 0, Some(&week()), &Fields::new(), &Fields::new()).unwrap();
-        // 20 from 06:30 Monday, 17 before.
-        assert!(c.schedule_setpoint(20.0, Local { day: 0, seconds: 30000.0 }));
-        assert!(c.schedule_setpoint(17.0, Local { day: 0, seconds: 3600.0 }));
-        assert!(!c.schedule_setpoint(21.0, Local { day: 0, seconds: 30000.0 }));
-        assert_eq!(c.phase(0), Phase::Heating);
     }
 
     #[test]

@@ -2985,7 +2985,7 @@ mod shots {
                 "mode": if phase == "idle" { "off" } else { "heat" }, "action": action, "target": 30.0,
                 "current_temperature": 19.3, "preset": "none", "temperature_scale": "C", "can_heat": true,
                 "has_hot_water_control": true, "hot_water_schedule": true, "heat_control_phase": phase,
-                "heat_control_rooms": rooms, "heat_control_until": "17:00"});
+                "heat_control_rooms": rooms});
             state.as_object_mut().unwrap().extend(water.as_object().unwrap().clone());
             Nest::from_state(state.as_object().unwrap())
         };

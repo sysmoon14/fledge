@@ -1118,12 +1118,10 @@ pub struct Nest {
 /// Home Assistant's heating control, as the thermostat's card says it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Asked {
-    /// heating, idle, dial or on_its_own (demand::Phase).
+    /// heating, idle or on_its_own (demand::Phase).
     pub phase: String,
     /// The rooms asking for heat.
     pub rooms: Vec<String>,
-    /// When a change made on the Nest gives way again ("HH:MM", its own clock).
-    pub until: Option<String>,
 }
 
 impl Asked {
@@ -1136,10 +1134,6 @@ impl Asked {
                 more => format!("{} rooms want heat", more.len()),
             },
             "idle" => "No rooms want heat".into(),
-            "dial" => match &self.until {
-                Some(until) => format!("Set on the Nest until {until}"),
-                None => "Set on the Nest".into(),
-            },
             _ => "On its own schedule".into(),
         }
     }
@@ -1182,11 +1176,10 @@ impl Nest {
         let mut card = card;
         card.settle_action();
         let asked = match text("heat_control_phase").as_str() {
-            phase @ ("heating" | "idle" | "dial" | "on_its_own") => Some(Asked {
+            phase @ ("heating" | "idle" | "on_its_own") => Some(Asked {
                 phase: phase.to_owned(),
                 rooms: s.get("heat_control_rooms").and_then(Value::as_array)
                     .map_or(Vec::new(), |l| l.iter().filter_map(Value::as_str).map(str::to_owned).collect()),
-                until: s.get("heat_control_until").and_then(Value::as_str).map(str::to_owned),
             }),
             _ => None,
         };

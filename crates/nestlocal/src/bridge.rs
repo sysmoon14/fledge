@@ -471,9 +471,6 @@ impl Bridge {
     }
 
     fn changed(&self, o: &Object) {
-        if o.key == format!("shared.{}", self.serial) {
-            self.heat_control.saw_target(chrono::Utc::now().timestamp(), crate::demand::Local::now(), &o.value);
-        }
         self.publish_raw(o);
         self.publish_state();
         if o.key == format!("device.{}", self.serial) {
@@ -534,7 +531,7 @@ impl Bridge {
         let mut shown = state(dev, sh);
         shown.insert("occupancy".into(), self.occupancy.occupied().into());
         shown.insert("act_as_thermostat".into(), self.role.acting().into());
-        shown.extend(self.heat_control.shown(chrono::Utc::now().timestamp()));
+        shown.extend(self.heat_control.shown());
         // What it runs with, or what Home Assistant chose for the next start.
         let path = |p| std::path::Path::new(p);
         let wwn = crate::heatlink::chosen(path(crate::heatlink::CHOICE), path(crate::heatlink::RCS)).unwrap_or(self.wwn_boiler);
@@ -936,9 +933,9 @@ impl Bridge {
         add("sensor", "heat_control_phase", "Heating control", fields!{
             "value_template" => tmpl("heat_control_phase"),
             "device_class" => "enum",
-            "options" => vec!["nest", "on_its_own", "heating", "idle", "dial"],
+            "options" => vec!["nest", "on_its_own", "heating", "idle"],
             "json_attributes_topic" => format!("{}/state", self.base),
-            "json_attributes_template" => "{{ {'rooms': value_json.heat_control_rooms, 'lease_until': value_json.heat_control_lease_until, 'dial_until': value_json.heat_control_dial_until} | tojson }}",
+            "json_attributes_template" => "{{ {'rooms': value_json.heat_control_rooms, 'lease_until': value_json.heat_control_lease_until} | tojson }}",
             "icon" => "mdi:radiator",
         });
         // Off, the Nest is a panel on the wall: its heating off, and none of
@@ -1231,11 +1228,7 @@ impl crate::ui::Sender for Bridge {
             s.insert("hot_water_next".into(), next.map_or(Value::Null, Value::from));
         }
         // Home Assistant's heating control, for the thermostat's card.
-        let now = chrono::Utc::now().timestamp();
-        s.extend(self.heat_control.shown(now));
-        let until = self.heat_control.dial_until(now).and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-            .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string());
-        s.insert("heat_control_until".into(), until.map_or(Value::Null, Value::from));
+        s.extend(self.heat_control.shown());
         Some(s)
     }
 

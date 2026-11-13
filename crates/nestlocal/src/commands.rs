@@ -46,6 +46,16 @@ fn heats(name: &str, arg: &str) -> bool {
     }
 }
 
+/// Whether a command would move the target or mode away from what Home
+/// Assistant's Call for heat asked (demand.rs).
+fn steers(name: &str, arg: &str) -> bool {
+    match name {
+        "mode" | "target" | "target_low" | "target_high" => true,
+        "preset" => !arg.eq_ignore_ascii_case("none"),
+        _ => false,
+    }
+}
+
 fn float(arg: &str) -> Option<f64> {
     arg.parse::<f64>().ok().filter(|f| f.is_finite())
 }
@@ -308,7 +318,7 @@ impl Bridge {
             let shared = self.buckets().remove("shared").unwrap_or_default();
             let changes = self.heat_control.tick(now, crate::demand::Local::now(), &shared);
             self.merge_changes("heat control", changes);
-            let p = Some(self.heat_control.phase(now));
+            let p = Some(self.heat_control.phase());
             if p != phase {
                 phase = p;
                 self.publish_state();
@@ -335,24 +345,14 @@ impl Bridge {
             logf!("{from}: {name} {arg:?}: not a thermostat (Act as a thermostat is off)");
             return Err("not acting as a thermostat".into());
         }
-        // The aside schedule's own setpoint for now, set while Home Assistant
-        // decides, is a schedule write applying itself (an older Fledge's
-        // fledge.set_schedule), not a turn of the dial: left alone, or it
-        // would shut Home Assistant out until the schedule's next change.
-        let now = chrono::Utc::now().timestamp();
-        if name == "target" && self.heat_control.deciding(now) {
-            if let Ok(t) = temperature(arg, SETPOINT) {
-                if self.heat_control.schedule_setpoint(t, crate::demand::Local::now()) {
-                    logf!("{from}: target {arg}: the schedule's own setpoint while Home Assistant decides: left alone");
-                    return Ok(());
-                }
-            }
+        // While Home Assistant decides when to heat, its Call for heat is the
+        // only say: the target, mode and presets aren't anyone else's to set
+        // (demand.rs). Clearing eco stays allowed: an ask does it itself.
+        if steers(name, arg) && self.heat_control.deciding() {
+            logf!("{from}: {name} {arg:?}: Home Assistant decides when to heat (heating control is on)");
+            return Err("Home Assistant decides when to heat: turn heating control off to set it".into());
         }
-        // Setting the target or mode while Home Assistant decides when to heat
-        // is the owner's turn of the dial (demand.rs): the Nest heats to it.
-        let dialled = matches!(name, "target" | "mode") && self.heat_control.deciding(now)
-            && self.heat_control.dial(now, crate::demand::Local::now());
-        let (bucket, mut fields) = match self.fields(name, arg) {
+        let (bucket, fields) = match self.fields(name, arg) {
             Err(e) => {
                 logf!("{from}: {name} {arg:?}: {e}");
                 return Err(e);
@@ -360,10 +360,6 @@ impl Bridge {
             Ok(None) => return Ok(()),
             Ok(Some(change)) => change,
         };
-        if dialled && name == "target" {
-            // It may be off, as Home Assistant left it: heat, to the dial.
-            fields.insert("target_temperature_type".into(), "heat".into());
-        }
         // While Home Assistant decides when to heat, the Nest's schedule is
         // aside: a schedule written now changes that one (demand.rs).
         if bucket == "schedule" && self.heat_control.edit_aside(&fields) {
@@ -1065,13 +1061,16 @@ mod tests {
         assert_eq!(value("schedule.S", "days")["0"], json!({}));
         assert_eq!(value("device.S", "learning_mode"), json!(false));
 
-        // No heat wanted: off. The dial (here the climate entity) heats to it.
+        // No heat wanted: off. The climate entity can't change that, nor eco;
+        // clearing eco can.
         b.command("nestlocal/S/set/call_for_heat", b"OFF");
         assert_eq!(value("shared.S", "target_temperature_type"), json!("off"));
-        b.apply("mqtt", "target", "21").unwrap();
-        assert_eq!(value("shared.S", "target_temperature_type"), json!("heat"));
-        assert_eq!(value("shared.S", "target_temperature").as_f64(), Some(21.0));
-        assert_eq!(b.heat_control.phase(chrono::Utc::now().timestamp()), crate::demand::Phase::Dial);
+        assert!(b.apply("mqtt", "target", "21").is_err());
+        assert!(b.apply("mqtt", "mode", "heat").is_err());
+        assert!(b.apply("mqtt", "preset", "eco").is_err());
+        assert!(b.apply("mqtt", "preset", "none").is_ok());
+        assert_eq!(value("shared.S", "target_temperature_type"), json!("off"));
+        assert_eq!(b.heat_control.phase(), crate::demand::Phase::Idle);
 
         // A schedule from Home Assistant now changes the one aside.
         b.apply("mqtt", "heating_times", r#"{"tue": [{"time": "07:00", "temp": 19}]}"#).unwrap();
