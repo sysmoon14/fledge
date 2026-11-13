@@ -100,7 +100,7 @@ screens come back for Nest's dial and More Nest settings.
 | | Stock | With Fledge |
 |-|-|-|
 | Control from | the Nest/Google Home app, through Google's cloud | Home Assistant or any MQTT client, Matter controller or Zigbee coordinator, on your network |
-| On its screen | the thermostat | the thermostat, plus your lights, other heating zones and speakers (MQTT with Home Assistant); or only your cards, as a panel (turn off **Act as a thermostat**) |
+| On its screen | the thermostat | the thermostat, plus your lights, other heating zones and speakers (MQTT with Home Assistant); or only your cards, as a panel (turn off **Act as a thermostat**); or Home Assistant decides when to heat, from your radiator valves, with the Nest's own schedule as the fallback (**Heating control by Home Assistant**) |
 | Internet access | required | not needed: the unit only has to join your Wi-Fi |
 | Nest and Google servers | always contacted | blocked with Block cloud (`--block-cloud`) |
 | Integrations | none | MQTT, Matter over Wi-Fi or Thread, Zigbee router |

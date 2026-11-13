@@ -24,5 +24,20 @@
 <h2 id="nest-dial">Nest's own dial</h2>
 <p>Prefer the Nest's original thermostat screen? Turn on Nest's own dial in Settings. The thermostat card then opens the Nest exactly as it always was.</p>
 
+<h2 id="call-for-heat">Home Assistant calls for heat</h2>
+<p>For homes where something else decides which rooms need heat (smart radiator valves, a zoning integration, an automation), the Nest can leave that decision to Home Assistant and only fire the boiler. It's off unless you turn it on, and changes nothing until you do.</p>
+<ol>
+<li>Turn on the thermostat's <strong>Heating control by Home Assistant</strong> switch.</li>
+<li>Its <strong>Call for heat</strong> switch (from the Fledge integration) becomes available. On asks the Nest to heat, off asks it not to. An automation can flip it, for example on while any radiator valve is heating, or use the <code>fledge.call_for_heat</code> action, which can also name the rooms asking.</li>
+</ol>
+<p>While Home Assistant decides, the Nest's own schedule and Auto-Schedule wait aside. Asked for heat, it heats; asked for none, it's off. Its own safety temperature (which holds while it's off) and boiler cycle limits still apply.</p>
+<p>Its card becomes a simple one: whether it's heating and why ("Office wants heat", "2 rooms want heat", "No rooms want heat"), and whether the hot water is on and until when. There's no temperature to set on it, as the rooms are set in Home Assistant. Press it for a hot water boost, or for Nest's own dial.</p>
+<ul>
+<li><strong>Nest's own dial</strong> is still there for anyone who wants it: a temperature set there holds until the Nest's schedule's next change (two hours if it has none), then Home Assistant decides again.</li>
+<li><strong>If Home Assistant stops</strong> (a restart, the broker or Wi-Fi down), the asks stop. After ten minutes the Nest's own schedule comes back and it runs as a normal Nest until Home Assistant asks again. With no schedule it holds 17°. A schedule you write meanwhile, from Home Assistant or the schedule card, is the one it comes back to.</li>
+<li><strong>Turning the switch off</strong> gives the Nest its schedule back straight away.</li>
+</ul>
+<p>Heating only, for now: cooling and heat pumps carry on as before.</p>
+
 <h2 id="panel-only">As a panel only</h2>
 <p>Turn off the thermostat's <strong>Act as a thermostat</strong> switch in Home Assistant and it stops controlling heating: the screen shows only your cards. Turning it back on brings back its heating entities, which Home Assistant may re-create under new entity IDs; check any automations that use them.</p>
