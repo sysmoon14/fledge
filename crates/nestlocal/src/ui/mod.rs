@@ -2581,13 +2581,16 @@ mod tests {
     }
 
     #[test]
-    fn a_camera_s_jpeg_is_cropped_square_from_its_middle() {
-        // 64x48: red on the left half, blue on the right.
+    fn a_camera_s_jpeg_is_cropped_square_from_its_middle_and_fills_the_display() {
+        // 64x48: red on the left half, blue on the right. Cropped to its
+        // middle 48x48, then scaled up: a small still mustn't show as a
+        // small square in the middle of the display.
         let art = Art::decode(include_bytes!("testdata/still.jpg")).unwrap();
-        assert_eq!(art.size, 48, "square, as tall as it is");
-        let at = |x: usize, y: usize| &art.rgb[(y * 48 + x) * 3..(y * 48 + x) * 3 + 3];
-        assert!(at(4, 24)[0] > 150 && at(4, 24)[2] < 90, "red at the left: {:?}", at(4, 24));
-        assert!(at(44, 24)[2] > 150 && at(44, 24)[0] < 90, "blue at the right: {:?}", at(44, 24));
+        assert_eq!(art.size, model::ART_MAX, "square, the display's size");
+        let side = art.size as usize;
+        let at = |x: usize, y: usize| &art.rgb[(y * side + x) * 3..(y * side + x) * 3 + 3];
+        assert!(at(40, 240)[0] > 150 && at(40, 240)[2] < 90, "red at the left: {:?}", at(40, 240));
+        assert!(at(440, 240)[2] > 150 && at(440, 240)[0] < 90, "blue at the right: {:?}", at(440, 240));
     }
 
     #[test]

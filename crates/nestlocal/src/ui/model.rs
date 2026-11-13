@@ -1333,8 +1333,9 @@ impl Art {
         }
     }
 
-    /// A JPEG, cropped square from its middle and scaled down to fit the
-    /// display if it's larger.
+    /// A JPEG, cropped square from its middle and scaled to fill the
+    /// display: down if it's larger, up (smoothly) if it's smaller, so a
+    /// small still never shows as a small square in the middle.
     fn decode_jpeg(data: &[u8]) -> Result<Art, String> {
         use zune_core::colorspace::ColorSpace;
         use zune_core::options::DecoderOptions;
@@ -1353,14 +1354,40 @@ impl Art {
             return Err("art: short".into());
         }
         let side = width.min(height);
+        if side == 0 {
+            return Err("art: empty".into());
+        }
         let (left, top) = ((width - side) / 2, (height - side) / 2);
-        let size = side.min(ART_MAX as usize);
+        let size = ART_MAX as usize;
         let mut rgb = Vec::with_capacity(size * size * 3);
-        for y in 0..size {
-            let row = top + y * side / size;
-            for x in 0..size {
-                let at = (row * width + left + x * side / size) * 3;
-                rgb.extend_from_slice(&pixels[at..at + 3]);
+        if side >= size {
+            for y in 0..size {
+                let row = top + y * side / size;
+                for x in 0..size {
+                    let at = (row * width + left + x * side / size) * 3;
+                    rgb.extend_from_slice(&pixels[at..at + 3]);
+                }
+            }
+        } else {
+            // Up: each pixel blended from the four it falls between.
+            let scale = side as f32 / size as f32;
+            let last = (side - 1) as f32;
+            for y in 0..size {
+                let fy = ((y as f32 + 0.5) * scale - 0.5).clamp(0.0, last);
+                let (y0, wy) = (fy as usize, fy.fract());
+                let y1 = (y0 + 1).min(side - 1);
+                for x in 0..size {
+                    let fx = ((x as f32 + 0.5) * scale - 0.5).clamp(0.0, last);
+                    let (x0, wx) = (fx as usize, fx.fract());
+                    let x1 = (x0 + 1).min(side - 1);
+                    let px = |r: usize, c: usize| ((top + r) * width + left + c) * 3;
+                    let (a, b, c, d) = (px(y0, x0), px(y0, x1), px(y1, x0), px(y1, x1));
+                    for ch in 0..3 {
+                        let upper = pixels[a + ch] as f32 * (1.0 - wx) + pixels[b + ch] as f32 * wx;
+                        let lower = pixels[c + ch] as f32 * (1.0 - wx) + pixels[d + ch] as f32 * wx;
+                        rgb.push((upper * (1.0 - wy) + lower * wy).round() as u8);
+                    }
+                }
             }
         }
         Ok(Art { size: size as u32, rgb, alpha: None })
