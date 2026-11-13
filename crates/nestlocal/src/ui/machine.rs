@@ -81,8 +81,8 @@ pub const PUSH_REST: Duration = Duration::from_millis(400);
 /// The arrows past a limit, lit as the push goes on.
 pub const PUSH_ARROWS: u8 = 3;
 pub const CLIMATE_STEP: i32 = 90;
-/// The thermostat's ring clicks this often: twice a step, its target
-/// following the hand between, as the Nest's ring does.
+/// The thermostat's target mark moves this often: twice a step, following
+/// the hand between, as the Nest's ring does. It clicks once a step.
 pub const CLIMATE_CLICK: i32 = CLIMATE_STEP / 2;
 
 /// `t` to the nearest `step` (a thermostat's half degree).
@@ -1736,12 +1736,14 @@ impl Machine {
         }
         let at_limit = if side > 0 { next >= max } else { next <= min };
         self.stopped_at_limit(over == 0 && at_limit && ring.pushes(side), side);
-        out.push(Effect::Click);
         self.dial_offset = offset;
         self.mode = Mode::Dial { of, target: next };
         if next == target {
+            // The mark follows the hand between steps, silently.
             return;
         }
+        // A click a step: a half degree, as the Nest's ring.
+        out.push(Effect::Click);
         if of != Dial::Nest {
             // A climate's: Home Assistant's set_temperature, as the ring rests.
             self.pending = Some(Command::Temperature(id, next));
@@ -4001,17 +4003,17 @@ mod tests {
     }
 
     #[test]
-    fn the_thermostat_s_ring_clicks_between_its_steps_and_its_mark_follows_the_hand() {
+    fn the_thermostat_s_ring_clicks_once_a_step_and_its_mark_follows_the_hand() {
         let mut rig = nest_rig();
         rig.press();
         let effects = rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
-        assert_eq!(effects, vec![Effect::Click], "a click, nothing sent");
+        assert!(effects.is_empty(), "between steps: no click, nothing sent: {effects:?}");
         assert_eq!((&rig.machine.mode, rig.machine.dial_offset), (&Mode::Dial { of: Dial::Nest, target: 20.0 }, 0.5),
                    "still 20, the mark half way to the next step");
         assert!(sent(&rig.wait(SETTLE * 2)).is_empty(), "nothing sent");
         assert_eq!(rig.machine.dial_offset, 0.5, "at rest, the mark stays where the hand left it");
-        rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
-        rig.input_with_clicks(Input::Turn(CLIMATE_CLICK));
+        assert_eq!(rig.input_with_clicks(Input::Turn(CLIMATE_CLICK)), vec![Effect::Click], "a whole step: a click");
+        assert!(rig.input_with_clicks(Input::Turn(CLIMATE_CLICK)).is_empty(), "half way again: none");
         assert_eq!(sent(&rig.wait(SETTLE * 2)), vec![("target".into(), "20.5".into())], "a whole step: sent");
     }
 
