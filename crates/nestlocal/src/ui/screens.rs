@@ -150,6 +150,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::AlarmModes { card, selected } => alarm_modes(fonts, card, *selected),
         Screen::Glance { at } => glance_screen(fonts, at),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
+        Screen::NestCard { nest, .. } if nest.asked.is_some() => nest_status(fonts, nest),
         Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
         Screen::ThemePick { fledge } => theme_pick(fonts, *fledge),
         Screen::Settings { rows, nest, nest_dial, selected } => settings_list(fonts, rows, *nest, *nest_dial, *selected, Layer::Whole),
@@ -1056,6 +1057,42 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
         }
     }
     p
+}
+
+/// Heating's (and hot water's) orange, while on.
+const ON_ORANGE: [u8; 3] = [255, 154, 92];
+
+/// The thermostat's card while Home Assistant decides when to heat
+/// (demand.rs): whether it's heating and whether the hot water is on, and
+/// why, in a household's words. No setpoint: the rooms are set elsewhere.
+/// Pressing offers a hot water boost and Nest's own dial (machine.rs).
+fn nest_status(fonts: &Fonts, nest: &Nest) -> Canvas {
+    let mut p = paint::face(BLACK);
+    let heating = nest.card.action == "heating";
+    let why = nest.asked.as_ref().map(|a| a.reason()).unwrap_or_default();
+    let y = if nest.hot_water { 168.0 } else { 252.0 };
+    status_row(&mut p, fonts, y, if heating { "mdi:fire" } else { "mdi:radiator-off" },
+               if heating { "Heating" } else { "Not heating" }, &why, heating);
+    if nest.hot_water {
+        let on = nest.hot_water_on || nest.hot_water_boost.is_some();
+        let why = match (nest.hot_water_boost, &nest.hot_water_next) {
+            (Some(_), _) => "Boost".to_owned(),
+            (None, _) if !nest.hot_water_schedule => "Schedule off".to_owned(),
+            (None, Some(at)) if on => format!("Until {at}"),
+            (None, Some(at)) => format!("Next at {at}"),
+            (None, None) => String::new(),
+        };
+        status_row(&mut p, fonts, 330.0, if on { "mdi:water-boiler" } else { "mdi:water-boiler-off" },
+                   if on { "Hot water on" } else { "Hot water off" }, &why, on);
+    }
+    p
+}
+
+/// One of the status card's rows: its icon, what it's doing, why.
+fn status_row(p: &mut Canvas, fonts: &Fonts, y: f32, icon_name: &str, doing: &str, why: &str, on: bool) {
+    icon(p, icon_name, "", HALF, y - 58.0, 44.0, if on { ON_ORANGE } else { GREY });
+    paint::text(p, fonts.medium(), 34.0, HALF, y, doing, 0.0, WHITE);
+    line(p, fonts, y + 36.0, why, GREY);
 }
 
 /// The thermostat's card: as its dial shows it, or Eco and its leaf.

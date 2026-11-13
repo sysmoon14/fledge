@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::bridge::Bridge;
 use crate::fields;
-use crate::json::{num, unmarshal_object, Fields};
+use crate::json::{num, sprint, unmarshal_object, Fields};
 use crate::weather::HAWeather;
 use crate::logf;
 
@@ -192,6 +192,21 @@ impl Bridge {
             self.ui.wake();
             return;
         }
+        if name == "heat_control" {
+            let arg = String::from_utf8_lossy(payload);
+            match on_off(arg.trim()) {
+                Ok(on) => self.set_heat_control(on),
+                Err(e) => logf!("mqtt: heat_control {:?}: {e}", arg.trim()),
+            }
+            return;
+        }
+        if name == "call_for_heat" {
+            let arg = String::from_utf8_lossy(payload);
+            if let Err(e) = self.call_for_heat(&arg) {
+                logf!("mqtt: call_for_heat {:?}: {e}", arg.trim());
+            }
+            return;
+        }
         if let Some(entity) = name.strip_prefix("art/") {
             if let Err(e) = self.ui.set_art(entity, payload) {
                 logf!("mqtt: {name}: {e}");
@@ -251,13 +266,81 @@ impl Bridge {
         self.publish_state();
     }
 
+    /// Turns heating control by Home Assistant on or off (demand.rs).
+    pub fn set_heat_control(&self, on: bool) {
+        if on == self.heat_control.enabled() {
+            return logf!("heat control: already {}", if on { "Home Assistant's" } else { "the Nest's" });
+        }
+        let changes = self.heat_control.set_enabled(on);
+        logf!("heat control: {}", if on { "Home Assistant decides when to heat" } else { "the Nest decides again" });
+        self.merge_changes("heat control", changes);
+        self.publish_state();
+    }
+
+    /// Home Assistant's ask for heat, or for none (demand.rs).
+    pub fn call_for_heat(&self, arg: &str) -> Result<(), String> {
+        if !self.role.acting() {
+            return Err("not acting as a thermostat".into());
+        }
+        let ask = crate::demand::Ask::parse(arg)?;
+        let buckets = self.buckets();
+        let (Some(dev), Some(sh)) = (buckets.get("device"), buckets.get("shared")) else {
+            return Err("the unit hasn't reported yet".into());
+        };
+        let changes = self.heat_control.ask(ask, chrono::Utc::now().timestamp(), buckets.get("schedule"), dev, sh)?;
+        // Eco would hold the boiler off whatever Home Assistant asks.
+        let eco = sprint(dev.get("eco").and_then(|e| e.get("mode")));
+        if eco == "manual-eco" || eco == "auto-eco" {
+            let _ = self.apply("heat control", "preset", "none");
+        }
+        self.merge_changes("heat control", changes);
+        self.publish_state();
+        Ok(())
+    }
+
+    /// Every few seconds: a lease or a turn of the dial running out.
+    pub async fn keep_heat_control(self: std::sync::Arc<Self>) {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut phase = None;
+        loop {
+            every.tick().await;
+            let now = chrono::Utc::now().timestamp();
+            let shared = self.buckets().remove("shared").unwrap_or_default();
+            let changes = self.heat_control.tick(now, &shared);
+            self.merge_changes("heat control", changes);
+            let p = Some(self.heat_control.phase(now));
+            if p != phase {
+                phase = p;
+                self.publish_state();
+            }
+        }
+    }
+
+    /// Bucket changes heat control asks for, merged into this unit's buckets.
+    fn merge_changes(&self, from: &str, changes: Vec<crate::demand::Change>) {
+        for (bucket, fields) in changes {
+            let key = format!("{bucket}.{}", self.serial);
+            if self.store.get(&key).is_none() {
+                logf!("{from}: no {key} bucket yet");
+                continue;
+            }
+            logf!("{from}: -> {key} {}", Value::Object(fields.clone()));
+            self.store.merge(&key, &fields, 0, 0, false);
+        }
+    }
+
     /// Applies one command, from MQTT, Matter or Zigbee (`from`, for the log).
     pub fn apply(&self, from: &str, name: &str, arg: &str) -> Result<(), String> {
         if !self.role.acting() && heats(name, arg) {
             logf!("{from}: {name} {arg:?}: not a thermostat (Act as a thermostat is off)");
             return Err("not acting as a thermostat".into());
         }
-        let (bucket, fields) = match self.fields(name, arg) {
+        // Setting the target or mode while Home Assistant decides when to heat
+        // is the owner's turn of the dial (demand.rs): the Nest heats to it.
+        let now = chrono::Utc::now().timestamp();
+        let dialled = matches!(name, "target" | "mode") && self.heat_control.deciding(now)
+            && self.heat_control.dial(now, crate::demand::Local::now());
+        let (bucket, mut fields) = match self.fields(name, arg) {
             Err(e) => {
                 logf!("{from}: {name} {arg:?}: {e}");
                 return Err(e);
@@ -265,6 +348,17 @@ impl Bridge {
             Ok(None) => return Ok(()),
             Ok(Some(change)) => change,
         };
+        if dialled && name == "target" {
+            // It may be off, as Home Assistant left it: heat, to the dial.
+            fields.insert("target_temperature_type".into(), "heat".into());
+        }
+        // While Home Assistant decides when to heat, the Nest's schedule is
+        // aside: a schedule written now changes that one (demand.rs).
+        if bucket == "schedule" && self.heat_control.edit_aside(&fields) {
+            logf!("{from}: {name}: the Nest's schedule, kept aside while Home Assistant decides");
+            self.publish_state();
+            return Ok(());
+        }
         // A bucket named whole (custom_schedule.<id>) is not the serial's.
         let key = if bucket.contains('.') { bucket } else { format!("{bucket}.{}", self.serial) };
         let mut changes = vec![(key, fields)];
@@ -539,6 +633,9 @@ impl Bridge {
                 // off, or the unit would rewrite them.
                 let key = format!("schedule.{}", self.serial);
                 let bucket = self.store.get(&key).map(|o| o.value).unwrap_or_default();
+                // The days it doesn't name keep theirs: the ones aside, while
+                // Home Assistant decides when to heat (demand.rs).
+                let bucket = self.heat_control.aside_schedule(Some(&bucket)).unwrap_or(bucket);
                 let fields = crate::schedule::write(&bucket, arg, now)?;
                 Ok(Some(("schedule".into(), fields)))
             }
@@ -938,5 +1035,43 @@ mod tests {
         let b = test_bridge();
         b.act_as_thermostat(false);
         assert!(b.role.acting(), "nothing to keep, so nothing changed");
+    }
+
+    #[test]
+    fn home_assistant_decides_when_to_heat_and_the_schedule_waits_aside() {
+        let b = test_bridge();
+        let week = json!({"0": {"0": {"entry_type": "setpoint", "time": 23400, "temp": 20}}, "1": {}, "2": {}, "3": {}, "4": {}, "5": {}, "6": {}});
+        b.store.merge("device.S", &fields!{"learning_mode" => true}, 0, 0, true);
+        b.store.merge("shared.S", &fields!{"target_temperature" => 20.0, "target_temperature_type" => "heat"}, 0, 0, true);
+        b.store.merge("schedule.S", &fields!{"days" => week.clone()}, 0, 0, true);
+        assert!(b.call_for_heat("ON").is_err(), "off until turned on");
+
+        b.command("nestlocal/S/set/heat_control", b"ON");
+        b.command("nestlocal/S/set/call_for_heat", br#"{"heat": true, "rooms": ["Office"]}"#);
+        let value = |key: &str, field: &str| b.store.get(key).unwrap().value[field].clone();
+        assert_eq!(value("shared.S", "target_temperature").as_f64(), Some(crate::demand::HEAT));
+        assert_eq!(value("schedule.S", "days")["0"], json!({}));
+        assert_eq!(value("device.S", "learning_mode"), json!(false));
+
+        // No heat wanted: off. The dial (here the climate entity) heats to it.
+        b.command("nestlocal/S/set/call_for_heat", b"OFF");
+        assert_eq!(value("shared.S", "target_temperature_type"), json!("off"));
+        b.apply("mqtt", "target", "21").unwrap();
+        assert_eq!(value("shared.S", "target_temperature_type"), json!("heat"));
+        assert_eq!(value("shared.S", "target_temperature").as_f64(), Some(21.0));
+        assert_eq!(b.heat_control.phase(chrono::Utc::now().timestamp()), crate::demand::Phase::Dial);
+
+        // A schedule from Home Assistant now changes the one aside.
+        b.apply("mqtt", "heating_times", r#"{"tue": [{"time": "07:00", "temp": 19}]}"#).unwrap();
+        assert_eq!(value("schedule.S", "days")["1"], json!({}), "not run while Home Assistant decides");
+        let aside = b.heat_control.aside_schedule(None).unwrap();
+        let monday = aside["days"]["0"].as_object().unwrap();
+        assert!(monday.values().any(|e| e["time"] == json!(23400) && e["temp"] == json!(20)), "days it didn't name keep theirs");
+        assert_ne!(aside["days"]["1"], json!({}));
+
+        b.command("nestlocal/S/set/heat_control", b"OFF");
+        assert_eq!(value("schedule.S", "days")["0"], aside["days"]["0"]);
+        assert_ne!(value("schedule.S", "days")["1"], json!({}));
+        assert_eq!(value("device.S", "learning_mode"), json!(false), "a written schedule keeps learning off");
     }
 }

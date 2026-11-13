@@ -1107,6 +1107,42 @@ pub struct Nest {
     /// Whether it acts as a thermostat; not, its heating is off and it has
     /// no card or settings of its own (role.rs).
     pub acting: bool,
+    /// While heating control is Home Assistant's (demand.rs): what it asks.
+    /// Its card is then only what it's doing and why (screens::nest_status).
+    pub asked: Option<Asked>,
+    /// Whether its hot water is on now, and when that next changes ("HH:MM").
+    pub hot_water_on: bool,
+    pub hot_water_next: Option<String>,
+}
+
+/// Home Assistant's heating control, as the thermostat's card says it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Asked {
+    /// heating, idle, dial or on_its_own (demand::Phase).
+    pub phase: String,
+    /// The rooms asking for heat.
+    pub rooms: Vec<String>,
+    /// When a change made on the Nest gives way again ("HH:MM", its own clock).
+    pub until: Option<String>,
+}
+
+impl Asked {
+    /// Why it's heating or not, in a household's words.
+    pub fn reason(&self) -> String {
+        match self.phase.as_str() {
+            "heating" => match self.rooms.as_slice() {
+                [] => "Heat wanted".into(),
+                [one] => format!("{one} wants heat"),
+                more => format!("{} rooms want heat", more.len()),
+            },
+            "idle" => "No rooms want heat".into(),
+            "dial" => match &self.until {
+                Some(until) => format!("Set on the Nest until {until}"),
+                None => "Set on the Nest".into(),
+            },
+            _ => "On its own schedule".into(),
+        }
+    }
 }
 
 impl Nest {
@@ -1145,6 +1181,16 @@ impl Nest {
         };
         let mut card = card;
         card.settle_action();
+        let asked = match text("heat_control_phase").as_str() {
+            phase @ ("heating" | "idle" | "dial" | "on_its_own") => Some(Asked {
+                phase: phase.to_owned(),
+                rooms: s.get("heat_control_rooms").and_then(Value::as_array)
+                    .map_or(Vec::new(), |l| l.iter().filter_map(Value::as_str).map(str::to_owned).collect()),
+                until: s.get("heat_control_until").and_then(Value::as_str).map(str::to_owned),
+            }),
+            _ => None,
+        };
+
         let boost = s.get("hot_water_boost").and_then(|v| match v {
             Value::String(m) => m.parse().ok(),
             Value::Number(m) => m.as_u64().map(|m| m as u32),
@@ -1171,6 +1217,9 @@ impl Nest {
             update: s.get("update").and_then(Value::as_str).map(str::to_owned),
             next_change: s.get("next_change").and_then(Value::as_str).map(str::to_owned),
             acting: s.get("acting").and_then(Value::as_bool).unwrap_or(true),
+            asked,
+            hot_water_on: on("hot_water_active"),
+            hot_water_next: s.get("hot_water_next").and_then(Value::as_str).map(str::to_owned),
         }
     }
 
@@ -1184,7 +1233,8 @@ impl Nest {
             can_heat: can("heat"), can_cool: can("cool"), fahrenheit: false,
             hot_water: false, hot_water_boost: None, hot_water_schedule: false, eco_low: None, eco_high: None,
             learning: false, home_away: false, early_on: false, sunblock: false,
-            version: String::new(), update: None, next_change: None, acting: true,
+            version: String::new(), update: None, next_change: None, acting: true, asked: None,
+            hot_water_on: false, hot_water_next: None,
         }
     }
 

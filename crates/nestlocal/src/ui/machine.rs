@@ -699,6 +699,11 @@ impl Machine {
         self.cards.cards.get(slot)
     }
 
+    /// Whether Home Assistant decides when to heat (demand.rs).
+    fn asked(&self) -> bool {
+        self.nest.as_ref().is_some_and(|n| n.asked.is_some())
+    }
+
     /// Whether the UI shows on the display: its own screens, and the cards
     /// while a turn from the lit thermostat is under way; at rest too, dark,
     /// when it holds the screen.
@@ -936,6 +941,11 @@ impl Machine {
                 self.movement += value;
                 if matches!(self.mode, Mode::Volume { .. }) {
                     self.volume_at = Some(now);
+                }
+                if matches!(self.mode, Mode::Dial { of: Dial::Nest, .. }) && self.asked() {
+                    // Home Assistant decides when to heat: nothing to set here.
+                    self.turn = 0;
+                    return;
                 }
                 if let Mode::Dial { of, target } = self.mode {
                     if self.climate(of).is_some_and(|c| c.mode == "off") {
@@ -1413,7 +1423,10 @@ impl Machine {
                     out.push(Effect::Send(command));
                 }
                 let mut actions = vec![Action::Back];
-                if let Some(card) = self.climate(of) {
+                // While Home Assistant decides when to heat, the thermostat's
+                // own modes and presets aren't the household's to change.
+                let asked = of == Dial::Nest && self.asked();
+                if let Some(card) = self.climate(of).filter(|_| !asked) {
                     actions.extend(ClimateChoice::ALL.into_iter().filter(|c| card.offers(*c)).map(Action::Choose));
                 }
                 if let (Dial::Nest, Some(nest)) = (of, &self.nest) {
@@ -4088,6 +4101,23 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 20.0 }, "on its dial to set");
         rig.turn(CLIMATE_STEP * 2);
         assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 21.0 }, "on, the ring sets it");
+    }
+
+    #[test]
+    fn while_home_assistant_decides_the_thermostat_only_boosts_hot_water_and_opens_nest_s_dial() {
+        let mut rig = nest_rig();
+        rig.machine.set_nest(nest(serde_json::json!({"heat_control_phase": "idle"})));
+        rig.press();
+        assert!(sent(&rig.turn(CLIMATE_STEP * 4)).is_empty(), "nothing to set");
+        let Mode::Dial { target, .. } = rig.machine.mode else { panic!("{:?}", rig.machine.mode) };
+        assert!(sent(&rig.press()).is_empty(), "no target to send");
+        let Mode::Menu { actions, .. } = &rig.machine.mode else { panic!("{:?}", rig.machine.mode) };
+        assert_eq!(actions, &vec![Action::Back, Action::Choose(ClimateChoice::HotWater), Action::NestDial]);
+        rig.rows(1);
+        rig.press();
+        rig.rows(1);
+        assert_eq!(sent(&rig.press()), vec![("hot_water_boost".into(), "30".into())]);
+        assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target });
     }
 
     #[test]

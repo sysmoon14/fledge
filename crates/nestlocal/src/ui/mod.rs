@@ -1970,6 +1970,10 @@ impl Runtime {
             Mode::Alert { .. } => Screen::Alert { alert: machine.alert.as_ref()? },
             Mode::Glance => Screen::Glance { at: screens::GlanceIn { glance: machine.glance()?, cards: &machine.cards.cards,
                                                                      nest: machine.nest.as_ref(), now: unix_now() as i64 } },
+            // While Home Assistant decides when to heat, only what it's doing.
+            Mode::Dial { of: Dial::Nest, .. } if machine.nest.as_ref().is_some_and(|n| n.asked.is_some()) => {
+                Screen::NestCard { nest: Cow::Borrowed(machine.nest.as_ref()?), now: unix_now() }
+            }
             Mode::Dial { of, target } => Screen::NestSet {
                 target: machine::on_step(*target, machine.climate(*of)?.step),
                 nest: Self::dial_nest(machine, *of)?, pulse: None,
@@ -2974,7 +2978,26 @@ mod shots {
             {"kind":"climate","id":"climate.living","name":"Living room","icon":"","mode":"heat","action":"heating","target":21.5,"current":19.5,"min":7,"max":30,"step":0.5},
             {"kind":"media","id":"media_player.kitchen","name":"Bedroom speaker","icon":"","state":"playing","title":"Sunday Morning Mix","artist":"Various artists","volume":35}]}"#).unwrap();
         let [Card::Lights(lights), Card::Climate(climate), Card::Media(media)] = &cards.cards[..] else { panic!() };
+        // Home Assistant's heating control (demand.rs): the thermostat's
+        // card says only what it's doing and why.
+        let asked = |phase: &str, action: &str, rooms: &[&str], water: serde_json::Value| {
+            let mut state = serde_json::json!({
+                "mode": if phase == "idle" { "off" } else { "heat" }, "action": action, "target": 30.0,
+                "current_temperature": 19.3, "preset": "none", "temperature_scale": "C", "can_heat": true,
+                "has_hot_water_control": true, "hot_water_schedule": true, "heat_control_phase": phase,
+                "heat_control_rooms": rooms, "heat_control_until": "17:00"});
+            state.as_object_mut().unwrap().extend(water.as_object().unwrap().clone());
+            Nest::from_state(state.as_object().unwrap())
+        };
         let shots = [
+            ("2-asked-heating", Screen::NestCard { nest: Cow::Owned(asked("heating", "heating", &["Office"],
+                serde_json::json!({"hot_water_active": true, "hot_water_next": "08:00"}))), now: 0.0 }),
+            ("2-asked-rooms", Screen::NestCard { nest: Cow::Owned(asked("heating", "heating", &["Office", "Snug"],
+                serde_json::json!({"hot_water_active": false, "hot_water_next": "16:00"}))), now: 0.0 }),
+            ("2-asked-idle", Screen::NestCard { nest: Cow::Owned(asked("idle", "idle", &[],
+                serde_json::json!({"hot_water_active": true, "hot_water_boost": 30}))), now: 0.0 }),
+            ("2-asked-own", Screen::NestCard { nest: Cow::Owned(asked("on_its_own", "idle", &[],
+                serde_json::json!({"hot_water_active": false, "hot_water_next": "16:00"}))), now: 0.0 }),
             ("1-lights", Screen::LightsCard { card: lights }),
             ("2-climate", Screen::NestCard { nest: Cow::Owned(Nest::of_card(climate)), now: 0.0 }),
             ("3-media", Screen::MediaCard { card: media, volume: None, progress: Some(0.4) }),

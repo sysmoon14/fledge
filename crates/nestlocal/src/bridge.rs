@@ -32,6 +32,12 @@
 //!                                      ON/OFF: heat through W1 without a
 //!                                      Heat Link, from the next start; the
 //!                                      unit reboots (heatlink.rs)
+//!   <prefix>/<serial>/set/heat_control ON/OFF: Home Assistant decides when
+//!                                      to heat (demand.rs)
+//!   <prefix>/<serial>/set/call_for_heat
+//!                                      Home Assistant's ask: {"heat": true,
+//!                                      "lease": 600, "rooms": [...]}, or
+//!                                      ON/OFF (demand.rs)
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
 
@@ -103,6 +109,8 @@ pub struct Bridge {
     me: std::sync::Weak<Bridge>,
     /// Whether it acts as a thermostat (role.rs).
     pub role: crate::role::Role,
+    /// Whether Home Assistant decides when to heat (demand.rs).
+    pub heat_control: crate::demand::HeatControl,
 }
 
 impl Bridge {
@@ -131,6 +139,7 @@ impl Bridge {
             updates: OnceLock::new(),
             me: me.clone(),
             role: Default::default(),
+            heat_control: Default::default(),
         })
     }
 
@@ -360,6 +369,7 @@ impl Bridge {
             live.on_change(move |alive| bridge.publish_availability(alive));
         }
         tokio::spawn(self.clone().keep_time());
+        tokio::spawn(self.clone().keep_heat_control());
         if let Some(version) = crate::update::pending() {
             tokio::spawn(self.clone().commit_update(version));
         }
@@ -461,6 +471,9 @@ impl Bridge {
     }
 
     fn changed(&self, o: &Object) {
+        if o.key == format!("shared.{}", self.serial) {
+            self.heat_control.saw_target(chrono::Utc::now().timestamp(), crate::demand::Local::now(), &o.value);
+        }
         self.publish_raw(o);
         self.publish_state();
         if o.key == format!("device.{}", self.serial) {
@@ -497,7 +510,10 @@ impl Bridge {
         self.announce(dev, sh);
         let shown = self.shown(dev, sh);
         self.publish(&format!("{}/state", self.base), true, Value::Object(shown).to_string().as_bytes());
-        if let Some(s) = buckets.get("schedule") {
+        // While Home Assistant decides when to heat, the schedule it shows
+        // is the Nest's own, kept aside (demand.rs).
+        let aside = self.heat_control.aside_schedule(buckets.get("schedule"));
+        if let Some(s) = aside.as_ref().or(buckets.get("schedule")) {
             let simple = crate::schedule::simple(s, &sprint(dev.get("temperature_scale")));
             self.publish(&format!("{}/heating_times", self.base), true, simple.to_string().as_bytes());
         }
@@ -518,6 +534,7 @@ impl Bridge {
         let mut shown = state(dev, sh);
         shown.insert("occupancy".into(), self.occupancy.occupied().into());
         shown.insert("act_as_thermostat".into(), self.role.acting().into());
+        shown.extend(self.heat_control.shown(chrono::Utc::now().timestamp()));
         // What it runs with, or what Home Assistant chose for the next start.
         let path = |p| std::path::Path::new(p);
         let wwn = crate::heatlink::chosen(path(crate::heatlink::CHOICE), path(crate::heatlink::RCS)).unwrap_or(self.wwn_boiler);
@@ -908,6 +925,22 @@ impl Bridge {
             "entity_category" => "config",
             "icon" => "mdi:calendar-remove",
         });
+        // On, Home Assistant decides when to heat; the Fledge integration's
+        // Call for heat switch asks (demand.rs).
+        add("switch", "heat_control", "Heating control by Home Assistant", fields!{
+            "value_template" => on_off("heat_control"),
+            "command_topic" => format!("{set}heat_control"),
+            "entity_category" => "config",
+            "icon" => "mdi:home-thermometer",
+        });
+        add("sensor", "heat_control_phase", "Heating control", fields!{
+            "value_template" => tmpl("heat_control_phase"),
+            "device_class" => "enum",
+            "options" => vec!["nest", "on_its_own", "heating", "idle", "dial"],
+            "json_attributes_topic" => format!("{}/state", self.base),
+            "json_attributes_template" => "{{ {'rooms': value_json.heat_control_rooms, 'lease_until': value_json.heat_control_lease_until, 'dial_until': value_json.heat_control_dial_until} | tojson }}",
+            "icon" => "mdi:radiator",
+        });
         // Off, the Nest is a panel on the wall: its heating off, and none of
         // what controls it announced (role.rs).
         add("switch", "act_as_thermostat", "Act as a thermostat", fields!{
@@ -1189,6 +1222,20 @@ impl crate::ui::Sender for Bridge {
                                          now.num_seconds_from_midnight() as f64)
         });
         s.insert("next_change".into(), next.map_or(Value::Null, Value::from));
+        // When the hot water next changes, by the unit's clock.
+        if let Some(hw) = self.hot_water_schedule() {
+            use chrono::{Datelike, Timelike};
+            let now = chrono::Local::now();
+            let (_, next) = crate::hotwater::now_and_next(&hw.value, now.weekday().num_days_from_monday() as usize,
+                                                          now.num_seconds_from_midnight() as i64);
+            s.insert("hot_water_next".into(), next.map_or(Value::Null, Value::from));
+        }
+        // Home Assistant's heating control, for the thermostat's card.
+        let now = chrono::Utc::now().timestamp();
+        s.extend(self.heat_control.shown(now));
+        let until = self.heat_control.dial_until(now).and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+            .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string());
+        s.insert("heat_control_until".into(), until.map_or(Value::Null, Value::from));
         Some(s)
     }
 
@@ -1207,6 +1254,7 @@ pub mod tests {
     pub fn test_bridge() -> Arc<Bridge> {
         let b = Bridge::new("nestlocal", "homeassistant", "S", temp_store(), Arc::new(Outdoor::default()), None, false);
         b.role.move_to(crate::role::tests::temp_file());
+        b.heat_control.move_to(crate::demand::tests::temp_file());
         b
     }
 
@@ -1545,7 +1593,7 @@ pub mod tests {
                 if k.ends_with("command_topic") {
                     let name = v.strip_prefix("nestlocal/S/set/").unwrap_or_else(|| panic!("{topic}: {k} {v}"));
                     // Not a bucket's: commands.rs takes it before fields.
-                    if ["external_temperature_option", "act_as_thermostat", "wwn_boiler_option"].contains(&name) {
+                    if ["external_temperature_option", "act_as_thermostat", "wwn_boiler_option", "heat_control"].contains(&name) {
                         continue;
                     }
                     let arg = match name {

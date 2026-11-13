@@ -8,6 +8,7 @@ mod bridge;
 mod clock;
 mod cloud;
 mod commands;
+mod demand;
 mod device;
 mod doom;
 mod entropy;
