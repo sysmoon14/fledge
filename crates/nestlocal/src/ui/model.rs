@@ -1147,6 +1147,9 @@ impl Nest {
         let on = |k: &str| s.get(k).and_then(Value::as_bool).unwrap_or(false);
         let text = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
         let fahrenheit = text("temperature_scale") == "F";
+        // bridge::state gives °C (what Home Assistant is told); the card is
+        // in the Nest's own scale.
+        let shown = |k: &str| number(k).map(|c| if fahrenheit { (c * 1.8 + 32.0).round() } else { c });
         let (min, max, step) = if fahrenheit { (48.0, 90.0, 1.0) } else { (9.0, 32.0, 0.5) };
         let eco = text("preset") == "eco";
         let (can_heat, can_cool) = (on("can_heat"), on("can_cool"));
@@ -1163,8 +1166,8 @@ impl Nest {
             icon: String::new(),
             mode: text("mode"),
             action: text("action"),
-            target: number("target"),
-            current: number("current_temperature"),
+            target: shown("target"),
+            current: shown("current_temperature"),
             min, max, step,
             preset: Some(if eco { "eco" } else { "none" }.to_owned()),
             preset_modes: vec!["none".into(), "eco".into()],
@@ -1200,8 +1203,8 @@ impl Nest {
             hot_water: on("has_hot_water_control"),
             hot_water_boost: boost,
             hot_water_schedule: on("hot_water_schedule"),
-            eco_low: number("away_temperature_low"),
-            eco_high: number("away_temperature_high"),
+            eco_low: shown("away_temperature_low"),
+            eco_high: shown("away_temperature_high"),
             learning: on("learning_mode"),
             home_away: on("auto_away_enable"),
             early_on: on("preconditioning_enabled"),
@@ -1677,6 +1680,20 @@ mod tests {
         let with = Nest::from_state(state(true).as_object().unwrap());
         assert_eq!(with.card.choices(ClimateChoice::Fan), (&["auto".to_owned(), "on".to_owned()][..], Some("auto")));
         assert_eq!(with.card.choices(ClimateChoice::Preset).0, ["none", "eco"]);
+    }
+
+    #[test]
+    fn a_fahrenheit_nest_s_card_is_in_fahrenheit() {
+        // bridge::state gives °C, rounded to the whole °F the unit shows.
+        let state = serde_json::json!({"mode": "heat", "target": 22.22222, "current_temperature": 20.55556,
+            "away_temperature_low": 10.0, "away_temperature_high": 29.44444, "temperature_scale": "F"});
+        let nest = Nest::from_state(state.as_object().unwrap());
+        assert_eq!((nest.card.target, nest.card.current), (Some(72.0), Some(69.0)));
+        assert_eq!((nest.eco_low, nest.eco_high), (Some(50.0), Some(85.0)));
+        assert_eq!(nest.celsius(72.0), 22.0, "and back to °C for its commands");
+        let celsius = serde_json::json!({"mode": "heat", "target": 21.5, "current_temperature": 20.0, "temperature_scale": "C"});
+        let nest = Nest::from_state(celsius.as_object().unwrap());
+        assert_eq!((nest.card.target, nest.card.current), (Some(21.5), Some(20.0)));
     }
 
     #[test]
