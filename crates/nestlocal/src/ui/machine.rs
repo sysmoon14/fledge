@@ -4176,7 +4176,7 @@ mod tests {
     #[test]
     fn a_fahrenheit_thermostat_turns_by_degrees_and_sends_celsius() {
         let mut rig = nest_rig();
-        rig.machine.set_nest(nest(serde_json::json!({"temperature_scale": "F", "target": 68.0})));
+        rig.machine.set_nest(nest(serde_json::json!({"temperature_scale": "F", "target": 20.0})));
         rig.press();
         rig.turn(CLIMATE_STEP * 2);
         assert_eq!(rig.machine.mode, Mode::Dial { of: Dial::Nest, target: 70.0 });
