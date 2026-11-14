@@ -3,6 +3,7 @@
 
 
 use super::icons;
+use crate::{locale, tr};
 use super::machine::Setting;
 use super::model::{self, ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, ClimateCard, ClimateChoice, CoverCard, Glance,
                    Layout, Light, LightsCard, Line, MediaCard, Nest, OptionsCard, Weather};
@@ -168,8 +169,8 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
 pub fn still(fonts: &Fonts, screen: &Screen) -> Canvas {
     match screen {
         Screen::LightDim { light, on, .. } => light_dim_still(fonts, light, *on, true, parked(screen)),
-        Screen::LightWarmth { light, .. } => light_dial_still(fonts, light, "Warmth", parked(screen)),
-        Screen::LightHue { light, .. } => light_dial_still(fonts, light, "Colour", None),
+        Screen::LightWarmth { light, .. } => light_dial_still(fonts, light, tr!("light.warmth"), parked(screen)),
+        Screen::LightHue { light, .. } => light_dial_still(fonts, light, tr!("light.colour"), None),
         Screen::Volume { card, .. } => volume_still(fonts, card, parked(screen)),
         Screen::CoverSet { card, .. } => cover_still(fonts, card, true, parked(screen)),
         Screen::NestSet { nest, target, setting, .. } => {
@@ -361,25 +362,29 @@ fn parked_words(p: &mut Canvas, fonts: &Fonts, edge: &Edge, y: f32, soft: [u8; 3
     let limit = &edge.limit;
     match (edge.past, edge.pushes) {
         (true, true) => {
-            let over = if edge.side > 0 { "Over" } else { "Under" };
+            let over = if edge.side > 0 { tr!("limit.over", limit = limit) } else { tr!("limit.under", limit = limit) };
             // On a coloured face (heating, cooling), amber wouldn't read.
             let plain = soft == GREY;
-            line(p, fonts, y, &format!("{over} your limit of {limit}"), if plain { OVER } else { WHITE });
+            line(p, fonts, y, &over, if plain { OVER } else { WHITE });
             past_arrows(p, edge.side, 3, if plain { OVER_ARROW } else { WHITE }, false);
         }
         (true, false) => {
-            let (over, way) = if edge.side > 0 { ("Above", "left") } else { ("Below", "right") };
-            line(p, fonts, y, &format!("{over} your limit of {limit}"), soft);
-            line(p, fonts, y + 28.0, &format!("Turn {way} to set {limit}"), WHITE);
+            let (over, turn) = if edge.side > 0 {
+                (tr!("limit.above", limit = limit), tr!("limit.turn_left", limit = limit))
+            } else {
+                (tr!("limit.below", limit = limit), tr!("limit.turn_right", limit = limit))
+            };
+            line(p, fonts, y, &over, soft);
+            line(p, fonts, y + 28.0, &turn, WHITE);
             past_arrows(p, edge.side, 3, WHITE, false);
         }
         (false, pushes) => {
-            line(p, fonts, y, "At your limit", soft);
+            line(p, fonts, y, tr!("limit.at"), soft);
             if pushes {
                 past_arrows(p, edge.side, edge.pressed, WHITE, true);
             }
             if edge.stopped && pushes {
-                line(p, fonts, y + 28.0, "Turn again to go past", WHITE);
+                line(p, fonts, y + 28.0, tr!("limit.again"), WHITE);
                 return true;
             }
             if edge.pressed == 0 {
@@ -387,7 +392,7 @@ fn parked_words(p: &mut Canvas, fonts: &Fonts, edge: &Edge, y: f32, soft: [u8; 3
             }
             // Without the limit, which the number above shows: with it the
             // line ran into the Nest look's ring.
-            line(p, fonts, y + 28.0, "Keep turning to go past", WHITE);
+            line(p, fonts, y + 28.0, tr!("limit.keep_turning"), WHITE);
         }
     }
     true
@@ -489,13 +494,13 @@ fn lights_card(fonts: &Fonts, card: &LightsCard) -> Canvas {
     label(&mut p, fonts, 214.0, &card.name, accent);
     match room {
         None => {
-            paint::text(&mut p, fonts.regular(), 96.0, HALF, 320.0, "Off", 0.0, WHITE);
-            line(&mut p, fonts, 366.0, &format!("{} lights", lights.len()), GREY);
+            paint::text(&mut p, fonts.regular(), 96.0, HALF, 320.0, tr!("state.off"), 0.0, WHITE);
+            line(&mut p, fonts, 366.0, &tr!("lights.count", count = lights.len()), GREY);
         }
         Some((level, _)) => {
             let on = lights.iter().filter(|l| l.on).count();
             paint::text(&mut p, fonts.regular(), 112.0, HALF, 322.0, &on.to_string(), 0.0, WHITE);
-            line(&mut p, fonts, 366.0, &format!("of {} on · {level}%", lights.len()), GREY);
+            line(&mut p, fonts, 366.0, &tr!("lights.of_on", count = lights.len(), level = level), GREY);
         }
     }
     p
@@ -580,9 +585,9 @@ fn now_label(p: &mut Canvas, fonts: &Fonts, card: &ClimateCard, target: Option<f
 /// minutes as a time ("1 hour"), else as climate_label says.
 pub fn choice_label(list: ClimateChoice, option: &str) -> String {
     match (list, option.parse::<u32>()) {
-        (ClimateChoice::HotWater, Ok(60)) => "1 hour".to_owned(),
-        (ClimateChoice::HotWater, Ok(m)) if m % 60 == 0 => format!("{} hours", m / 60),
-        (ClimateChoice::HotWater, Ok(m)) => format!("{m} min"),
+        (ClimateChoice::HotWater, Ok(60)) => tr!("duration.one_hour").to_owned(),
+        (ClimateChoice::HotWater, Ok(m)) if m % 60 == 0 => tr!("duration.hours", hours = m / 60),
+        (ClimateChoice::HotWater, Ok(m)) => tr!("duration.minutes", minutes = m),
         _ => climate_label(option),
     }
 }
@@ -590,10 +595,7 @@ pub fn choice_label(list: ClimateChoice, option: &str) -> String {
 /// A climate mode or fan speed as Home Assistant names it, in words:
 /// heat_cool "Heat/cool", fan_only "Fan only".
 pub fn climate_label(name: &str) -> String {
-    match name {
-        "heat_cool" => "Heat/cool".to_owned(),
-        name => capitalise(&name.replace('_', " ")),
-    }
+    locale::named("climate", name).map_or_else(|| capitalise(&name.replace('_', " ")), str::to_owned)
 }
 
 
@@ -773,7 +775,7 @@ fn action_card(fonts: &Fonts, card: &ActionCard, done: bool, opened: bool) -> Ca
     }
     let name = paint::fit(fonts.regular(), 40.0, &card.name, 0.0, 330.0);
     paint::text(&mut p, fonts.regular(), 40.0, HALF, 288.0, &name, 0.0, WHITE);
-    let hint = if done { "Done" } else if opened { "Hold to run" } else { "" };
+    let hint = if done { tr!("common.done") } else if opened { tr!("action.hold_to_run") } else { "" };
     line(&mut p, fonts, 330.0, hint, if done { ACTION } else { GREY });
     p
 }
@@ -791,7 +793,7 @@ fn camera_card(fonts: &Fonts, card: &CameraCard) -> Canvas {
             icon(&mut p, icon_name, &card.id, HALF, 178.0, 96.0, WHITE);
             let name = paint::fit(fonts.regular(), 36.0, &card.name, 0.0, 330.0);
             paint::text(&mut p, fonts.regular(), 36.0, HALF, 286.0, &name, 0.0, WHITE);
-            line(&mut p, fonts, 328.0, "Press for a picture", GREY);
+            line(&mut p, fonts, 328.0, tr!("camera.press_for_picture"), GREY);
         }
     }
     p
@@ -840,7 +842,7 @@ fn wrap(font: &ab_glyph::FontArc, size: f32, text: &str, width: f32, lines: usiz
 /// hold to put it away.
 fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
     let mut p = paint::face(BLACK);
-    let hint = "Hold to dismiss";
+    let hint = tr!("alert.hold_to_dismiss");
     match &alert.art {
         Some(art) => {
             paint::picture(&mut p, &art.rgb, art.size, HALF, HALF, 0.0);
@@ -878,8 +880,8 @@ fn alert_screen(fonts: &Fonts, alert: &Alert) -> Canvas {
 fn settings_card(fonts: &Fonts) -> Canvas {
     let mut p = paint::face(BLACK);
     icon(&mut p, "mdi:cog", "settings", HALF, 168.0, 96.0, WHITE);
-    paint::text(&mut p, fonts.regular(), 40.0, HALF, 278.0, "Settings", 0.0, WHITE);
-    line(&mut p, fonts, 316.0, "Eco · Home/Away · Fledge", GREY);
+    paint::text(&mut p, fonts.regular(), 40.0, HALF, 278.0, tr!("settings.title"), 0.0, WHITE);
+    line(&mut p, fonts, 316.0, tr!("settings.summary"), GREY);
     p
 }
 
@@ -902,7 +904,7 @@ fn theme_preview(fonts: &Fonts, theme: paint::Theme) -> (Vec<u8>, u32) {
 /// live dial, the chosen one on the highlight; turn to choose, press to keep.
 fn theme_pick(fonts: &Fonts, fledge: bool) -> Canvas {
     let mut p = paint::face(BLACK);
-    label(&mut p, fonts, 128.0, "Theme", GREY);
+    label(&mut p, fonts, 128.0, tr!("settings.theme"), GREY);
     let side = 112.0;
     for (i, (theme, name)) in [(paint::Theme::Nest, "Nest"), (paint::Theme::Fledge, "Fledge")].into_iter().enumerate() {
         let chosen = (i == 1) == fledge;
@@ -916,7 +918,7 @@ fn theme_pick(fonts: &Fonts, fledge: bool) -> Canvas {
         let font = if chosen { fonts.medium() } else { fonts.regular() };
         paint::text(&mut p, font, 22.0, cx, 332.0, name, 0.0, tint);
     }
-    line(&mut p, fonts, 392.0, "Turn to choose · press to keep", GREY);
+    line(&mut p, fonts, 392.0, tr!("settings.theme_hint"), GREY);
     p
 }
 
@@ -934,8 +936,8 @@ fn degrees(t: f64) -> String {
 /// it: when it'll reach its target, else heating or cooling.
 fn nest_doing(nest: &Nest) -> &'static str {
     match nest.card.action.as_str() {
-        "heating" => "Heating",
-        "cooling" => "Cooling",
+        "heating" => tr!("nest.heating"),
+        "cooling" => tr!("nest.cooling"),
         _ => "",
     }
 }
@@ -943,15 +945,20 @@ fn nest_doing(nest: &Nest) -> &'static str {
 /// "In 20 min" while it heats or cools towards its target and knows when
 /// it'll get there.
 fn nest_eta(nest: &Nest, now: f64) -> Option<String> {
+    nest_eta_span(nest, now).map(|time| tr!("nest.eta", time = time))
+}
+
+/// nest_eta's time alone: "20 min".
+fn nest_eta_span(nest: &Nest, now: f64) -> Option<String> {
     let at = nest.time_to_target.filter(|at| *at > now)?;
     if !matches!(nest.card.action.as_str(), "heating" | "cooling") {
         return None;
     }
     let minutes = ((at - now) / 60.0).ceil().max(1.0) as i64;
     Some(match (minutes / 60, minutes % 60) {
-        (0, minutes) => format!("In {minutes} min"),
-        (hours, 0) => format!("In {hours} h"),
-        (hours, minutes) => format!("In {hours} h {minutes} min"),
+        (0, minutes) => tr!("duration.minutes", minutes = minutes),
+        (hours, 0) => tr!("duration.h", hours = hours),
+        (hours, minutes) => tr!("duration.h_min", hours = hours, minutes = minutes),
     })
 }
 
@@ -997,12 +1004,12 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
         // At the foot, in the ring's gap: a hot water boost running, else
         // which thermostat this is.
         match nest.hot_water_boost {
-            Some(minutes) => line(&mut p, fonts, 392.0, &format!("Hot water boost · {minutes} min"), soft),
+            Some(minutes) => line(&mut p, fonts, 392.0, &tr!("nest.hot_water_boost_for", minutes = minutes), soft),
             None => line(&mut p, fonts, 392.0, &card.name, soft),
         }
     }
     if card.mode == "off" {
-        paint::text(&mut p, fonts.digits(), 96.0, HALF, NUMBER_BASELINE - 18.0, "OFF", 0.0, WHITE);
+        paint::text(&mut p, fonts.digits(), 96.0, HALF, NUMBER_BASELINE - 18.0, &tr!("state.off").to_uppercase(), 0.0, WHITE);
         return p;
     }
     if target.is_none() {
@@ -1018,16 +1025,16 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
         // get there, else Heating; short of it, what it's set to. Fledge's
         // pill says both, a flame (snowflake) before them.
         let above = match card.action.as_str() {
-            "heating" | "cooling" if paint::fledge() => Some(match nest_eta(nest, now) {
-                Some(eta) => format!("{} · {}", nest_doing(nest), eta.trim_start_matches("In ")),
+            "heating" | "cooling" if paint::fledge() => Some(match nest_eta_span(nest, now) {
+                Some(eta) => format!("{} · {eta}", nest_doing(nest)),
                 None => nest_doing(nest).to_owned(),
             }),
             "heating" | "cooling" => nest_eta(nest, now).or_else(|| Some(nest_doing(nest).to_owned())),
             _ if target.is_none() => None,
             _ => Some(match card.mode.as_str() {
-                "cool" => "Cool set to",
-                "heat" => "Heat set to",
-                _ => "Set to",
+                "cool" => tr!("nest.cool_set_to"),
+                "heat" => tr!("nest.heat_set_to"),
+                _ => tr!("nest.set_to"),
             }.to_owned()),
         };
         let state_icon = match card.action.as_str() {
@@ -1048,7 +1055,7 @@ fn nest_still(fonts: &Fonts, nest: &Nest, target: Option<f64>, setting: bool, no
         // the schedule keeps it there.
         let under: Vec<String> = [
             card.active_preset().map(climate_label),
-            nest.next_change.as_ref().map(|until| format!("Until {until}")),
+            nest.next_change.as_ref().map(|until| tr!("nest.until", until = until)),
         ].into_iter().flatten().collect();
         if !under.is_empty() && parked.is_none() {
             let icon_name = card.active_preset().map(preset_icon);
@@ -1073,7 +1080,7 @@ fn nest_card(fonts: &Fonts, nest: &Nest, now: f64) -> Canvas {
             (colour(tick_base(card)), paint::Shape::Short)
         });
         now_label(&mut p, fonts, card, target, if now_differs(card, target) { 1.0 } else { 0.0 });
-        paint::text(&mut p, fonts.digits(), 120.0, HALF, NUMBER_BASELINE - 8.0, if paint::fledge() { "Eco" } else { "ECO" }, 0.0, WHITE);
+        paint::text(&mut p, fonts.digits(), 120.0, HALF, NUMBER_BASELINE - 8.0, &if paint::fledge() { tr!("nest.eco").to_owned() } else { tr!("nest.eco").to_uppercase() }, 0.0, WHITE);
         return p;
     }
     climate_moving(&mut p, None, fonts, card, target, None, None, None);
@@ -1087,31 +1094,31 @@ fn unix_now() -> f64 {
 
 /// A row of Settings: its icon, its name, and what it's set to.
 fn setting_row(setting: Setting, nest: Option<&Nest>, nest_dial: bool) -> (&'static str, &'static str, String) {
-    let switch = |on: bool| if on { "On" } else { "Off" }.to_owned();
+    let switch = |on: bool| if on { tr!("state.on") } else { tr!("state.off") }.to_owned();
     let get = |f: fn(&Nest) -> bool| nest.map(f).map(switch).unwrap_or_default();
     let temperature = |t: Option<f64>| t.map(degrees).unwrap_or_default();
     let cooling = nest.is_some_and(|n| n.can_cool);
     match setting {
-        Setting::EcoLow => ("mdi:leaf", if cooling { "Eco, lowest" } else { "Eco temperature" },
+        Setting::EcoLow => ("mdi:leaf", if cooling { tr!("settings.eco_lowest") } else { tr!("settings.eco_temperature") },
                             temperature(nest.and_then(|n| n.eco_low))),
-        Setting::EcoHigh => ("mdi:leaf", "Eco, highest", temperature(nest.and_then(|n| n.eco_high))),
-        Setting::HomeAway => ("mdi:home-account", "Home/Away Assist", get(|n| n.home_away)),
-        Setting::Learning => ("mdi:calendar-clock", "Auto-Schedule", get(|n| n.learning)),
-        Setting::EarlyOn => ("mdi:clock-fast", "Early-On", get(|n| n.early_on)),
-        Setting::Sunblock => ("mdi:white-balance-sunny", "Sunblock", get(|n| n.sunblock)),
-        Setting::HotWaterSchedule => ("mdi:water-boiler", "Hot water schedule", get(|n| n.hot_water_schedule)),
-        Setting::Scale => ("mdi:temperature-celsius", "Units",
+        Setting::EcoHigh => ("mdi:leaf", tr!("settings.eco_highest"), temperature(nest.and_then(|n| n.eco_high))),
+        Setting::HomeAway => ("mdi:home-account", tr!("settings.home_away"), get(|n| n.home_away)),
+        Setting::Learning => ("mdi:calendar-clock", tr!("settings.auto_schedule"), get(|n| n.learning)),
+        Setting::EarlyOn => ("mdi:clock-fast", tr!("settings.early_on"), get(|n| n.early_on)),
+        Setting::Sunblock => ("mdi:white-balance-sunny", tr!("settings.sunblock"), get(|n| n.sunblock)),
+        Setting::HotWaterSchedule => ("mdi:water-boiler", tr!("settings.hot_water_schedule"), get(|n| n.hot_water_schedule)),
+        Setting::Scale => ("mdi:temperature-celsius", tr!("settings.units"),
                            nest.map(|n| if n.fahrenheit { "°F" } else { "°C" }.to_owned()).unwrap_or_default()),
-        Setting::NestDial => ("mdi:thermometer", "Nest's own dial", switch(nest_dial)),
-        Setting::Theme => ("mdi:palette", "Theme", if paint::fledge() { "Fledge" } else { "Nest" }.to_owned()),
+        Setting::NestDial => ("mdi:thermometer", tr!("settings.nest_dial"), switch(nest_dial)),
+        Setting::Theme => ("mdi:palette", tr!("settings.theme"), if paint::fledge() { "Fledge" } else { "Nest" }.to_owned()),
         Setting::Software => ("mdi:update", "Fledge", match nest {
-            Some(Nest { update: Some(tag), .. }) => format!("Install {tag}"),
+            Some(Nest { update: Some(tag), .. }) => tr!("settings.install", version = tag),
             // v0.4.9, not a development build's v0.4.9-1-g42707b2-dirty.
             Some(n) => n.version.split('-').next().unwrap_or_default().to_owned(),
             None => String::new(),
         }),
-        Setting::More => ("mdi:dots-horizontal", "More Nest settings", String::new()),
-        Setting::Done => ("mdi:check", "Done", String::new()),
+        Setting::More => ("mdi:dots-horizontal", tr!("settings.more"), String::new()),
+        Setting::Done => ("mdi:check", tr!("common.done"), String::new()),
     }
 }
 
@@ -1120,14 +1127,14 @@ fn settings_list(fonts: &Fonts, rows: &[Setting], nest: Option<&Nest>, nest_dial
                  layer: Layer) -> Canvas {
     let first = first_row(selected, rows.len());
     let mut p = list_backdrop(layer, selected.checked_sub(first));
-    label(&mut p, fonts, LIST_TITLE, "Settings", GREY);
+    label(&mut p, fonts, LIST_TITLE, tr!("settings.title"), GREY);
     for (slot, row) in (first..rows.len().min(first + ROWS)).enumerate() {
         let y = LIST_TOP + slot as f32 * ROW_PITCH;
         let (x, w, h) = PILL;
         let chosen = layer.chosen(row == selected);
         let (icon_name, name, value) = setting_row(rows[row], nest, nest_dial);
         let update = rows[row] == Setting::Software && nest.is_some_and(|n| n.update.is_some());
-        let value_tint = if chosen { WHITE } else if update || value == "On" { ON } else { GREY };
+        let value_tint = if chosen { WHITE } else if update || value == tr!("state.on") { ON } else { GREY };
         icon(&mut p, icon_name, "setting", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
         let value_width = paint::measure(fonts.regular(), 24.0, &value, 0.0);
         let name = paint::fit(fonts.regular(), 26.0, name, 0.0, w - 90.0 - value_width - 16.0);
@@ -1143,7 +1150,7 @@ fn setting_still(fonts: &Fonts, setting: Setting) -> Canvas {
     icon(&mut p, "mdi:leaf", "eco", HALF, 98.0, 40.0, ECO);
     let (_, name, _) = setting_row(setting, None, false);
     label(&mut p, fonts, 150.0, name, ECO);
-    line(&mut p, fonts, 366.0, "Press when done", GREY);
+    line(&mut p, fonts, 366.0, tr!("hint.press_when_done"), GREY);
     p
 }
 
@@ -1301,14 +1308,14 @@ fn lights_listed(fonts: &Fonts, name: &str, lights: &[Light], selected: usize, l
             Some(light) => {
                 let value = match (light.on, light.brightness) {
                     (true, Some(b)) if light.dimmable => format!("{b}%"),
-                    (true, _) => "On".to_owned(),
-                    (false, _) => "Off".to_owned(),
+                    (true, _) => tr!("state.on").to_owned(),
+                    (false, _) => tr!("state.off").to_owned(),
                 };
                 let tint = if light.on { light.colour() } else { DIM };
                 (light.name.as_str(), value, tint, if light.on { light.colour() } else { GREY },
                  light.icon.as_str(), light.id.as_str())
             }
-            None => ("Back", String::new(), GREY, GREY, "mdi:arrow-left", "back"),
+            None => (tr!("list.back"), String::new(), GREY, GREY, "mdi:arrow-left", "back"),
         };
         let (tint, value_tint, text_tint) = if chosen { (WHITE, WHITE, WHITE) } else { (tint, value_tint, WHITE) };
         icon(&mut p, icon_name, entity, x + 34.0, y + h / 2.0, 28.0, tint);
@@ -1329,14 +1336,14 @@ fn light_dim_still(fonts: &Fonts, light: &Light, on: bool, opened: bool, parked:
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, accent);
     label(&mut p, fonts, 150.0, &light.name, accent);
     if !on || !light.dimmable {
-        let words = if on { "On" } else { "Off" };
+        let words = if on { tr!("state.on") } else { tr!("state.off") };
         paint::text(&mut p, fonts.regular(), 96.0, HALF, NUMBER_BASELINE - 8.0, words, 0.0, WHITE);
     }
     let hint = match (light.dimmable, on) {
-        (true, true) => "Hold to turn off",
-        (true, false) => "Hold to turn on",
-        (false, true) => "Hold to turn off",
-        (false, false) => "Hold to turn on",
+        (true, true) => tr!("hint.hold_turn_off"),
+        (true, false) => tr!("hint.hold_turn_on"),
+        (false, true) => tr!("hint.hold_turn_off"),
+        (false, false) => tr!("hint.hold_turn_on"),
     };
     if !parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, GREY)) && opened {
         line(&mut p, fonts, 366.0, hint, GREY);
@@ -1369,7 +1376,7 @@ fn light_dial_still(fonts: &Fonts, light: &Light, what: &str, parked: Parked) ->
     icon(&mut p, &light.icon, &light.id, HALF, 98.0, 40.0, GREY);
     label(&mut p, fonts, 150.0, &light.name, GREY);
     if !parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, GREY)) {
-        line(&mut p, fonts, 366.0, &format!("{what} · press when done"), GREY);
+        line(&mut p, fonts, 366.0, &tr!("light.dial_hint", what = what), GREY);
     }
     p
 }
@@ -1453,7 +1460,7 @@ fn volume_still(fonts: &Fonts, card: &MediaCard, parked: Parked) -> Canvas {
     let mut p = paint::face(BLACK);
     label(&mut p, fonts, 150.0, &card.name, MEDIA);
     if !parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, GREY)) {
-        let action = if card.state == "playing" { "Hold to pause" } else { "Hold to play" };
+        let action = if card.state == "playing" { tr!("media.hold_pause") } else { tr!("media.hold_play") };
         line(&mut p, fonts, 366.0, action, GREY);
     }
     p
@@ -1576,22 +1583,22 @@ fn line_said(line: &Line, at: &GlanceIn) -> Option<Said> {
             let nest = at.nest?;
             let now = degrees(nest.card.current?);
             let text = match nest.humidity {
-                Some(h) => format!("Inside {now} · {h:.0}%"),
-                None => format!("Inside {now}"),
+                Some(h) => tr!("glance.inside_humidity", temperature = now, humidity = format!("{h:.0}")),
+                None => tr!("glance.inside", temperature = now),
             };
             said(text, Some("mdi:thermometer"), None)
         }
         "heating" => {
             let nest = at.nest?;
             let card = &nest.card;
-            let eta = nest_eta(nest, at.now as f64).map(|eta| eta.trim_start_matches("In ").to_owned());
+            let eta = nest_eta_span(nest, at.now as f64);
             let to = card.target.map(degrees).unwrap_or_default();
             let (text, icon, colour) = match card.action.as_str() {
-                "heating" | "preheating" => (format!("Heating to {to}"), "mdi:fire", Some([255, 154, 92])),
-                "cooling" => (format!("Cooling to {to}"), "mdi:snowflake", Some([130, 178, 255])),
-                _ if card.mode == "off" || !nest.acting => ("Heating off".to_owned(), "mdi:thermostat", None),
-                _ if nest.eco => ("Eco".to_owned(), "mdi:leaf", Some([120, 200, 124])),
-                _ => (format!("Set to {to}"), "mdi:thermostat", None),
+                "heating" | "preheating" => (tr!("glance.heating_to", temperature = to), "mdi:fire", Some([255, 154, 92])),
+                "cooling" => (tr!("glance.cooling_to", temperature = to), "mdi:snowflake", Some([130, 178, 255])),
+                _ if card.mode == "off" || !nest.acting => (tr!("glance.heating_off").to_owned(), "mdi:thermostat", None),
+                _ if nest.eco => (tr!("nest.eco").to_owned(), "mdi:leaf", Some([120, 200, 124])),
+                _ => (tr!("glance.set_to", temperature = to), "mdi:thermostat", None),
             };
             let text = match eta {
                 Some(eta) if icon != "mdi:thermostat" => format!("{text} · {eta}"),
@@ -1727,8 +1734,8 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
             big_time(&mut p, fonts, &glance.clock, at.minutes(), size, 236.0, 430.0);
         }
         Layout::Temp => {
-            let label = if paint::fledge() { "Inside" } else { "INSIDE" };
-            paint::text(&mut p, fonts.medium(), 22.0, HALF, 150.0, label, if paint::fledge() { 1.0 } else { 2.0 },
+            let label = if paint::fledge() { tr!("glance.inside_label").to_owned() } else { tr!("glance.inside_label").to_uppercase() };
+            paint::text(&mut p, fonts.medium(), 22.0, HALF, 150.0, &label, if paint::fledge() { 1.0 } else { 2.0 },
                         if coloured { [255, 232, 218] } else { GLANCE_QUIET });
             match at.nest.and_then(|n| n.card.current.map(|t| (t, n.fahrenheit))) {
                 Some((t, fahrenheit)) => {
@@ -1747,7 +1754,7 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
                 hero(&mut p, fonts, &t, if paint::fledge() { 150.0 } else { 128.0 }, 300.0, 400.0, WHITE);
             }
             None => {
-                paint::text(&mut p, fonts.regular(), 26.0, HALF, 178.0, "No weather chosen", 0.0, GLANCE_QUIET);
+                paint::text(&mut p, fonts.regular(), 26.0, HALF, 178.0, tr!("glance.no_weather"), 0.0, GLANCE_QUIET);
                 hero(&mut p, fonts, "–", if paint::fledge() { 150.0 } else { 128.0 }, 300.0, 400.0, WHITE);
             }
         },
@@ -1764,7 +1771,7 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
         Layout::Agenda => {
             let time = glance.clock.time(at.minutes(), true);
             paint::text(&mut p, fonts.clock(), 56.0, HALF, 122.0, &time, -1.0, WHITE);
-            glance_label(&mut p, fonts, 178.0, "Up next");
+            glance_label(&mut p, fonts, 178.0, tr!("glance.up_next"));
             match glance.event.as_ref().filter(|e| !e.title.trim().is_empty()) {
                 Some(event) => {
                     fitted(&mut p, fonts.medium(), 64.0, 40.0, HALF, 250.0, event.title.trim(), 380.0, WHITE);
@@ -1772,7 +1779,7 @@ pub fn glance_still(fonts: &Fonts, at: &GlanceIn) -> Canvas {
                     let when = paint::fit(fonts.regular(), 28.0, &when, 0.0, 340.0);
                     paint::text(&mut p, fonts.regular(), 28.0, HALF, 300.0, &when, 0.0, FLEDGE_ON);
                 }
-                None => paint::text(&mut p, fonts.medium(), 40.0, HALF, 250.0, "Nothing coming up", 0.0, WHITE),
+                None => paint::text(&mut p, fonts.medium(), 40.0, HALF, 250.0, tr!("glance.nothing_coming"), 0.0, WHITE),
             }
         }
     }
@@ -1811,9 +1818,9 @@ const BATTERY_WORDS: [[u8; 3]; 3] = [[123, 227, 164], [255, 122, 122], [255, 176
 /// green, where everything is white.
 fn battery_face(p: &mut Canvas, fonts: &Fonts, battery: Option<&model::Battery>, filled: bool) {
     let Some(battery) = battery else {
-        glance_label(p, fonts, 150.0, "Battery");
+        glance_label(p, fonts, 150.0, tr!("glance.battery"));
         paint::text(p, fonts.digits(), 170.0, HALF, NUMBER_BASELINE, "–", 0.0, WHITE);
-        paint::text(p, fonts.regular(), 26.0, HALF, 352.0, "No battery chosen", 0.0, GLANCE_QUIET);
+        paint::text(p, fonts.regular(), 26.0, HALF, 352.0, tr!("glance.no_battery"), 0.0, GLANCE_QUIET);
         return;
     };
     let mood = battery.mood();
@@ -1971,20 +1978,20 @@ fn event_when(event: &model::Event, at: &GlanceIn) -> String {
     let local = event.start + at.glance.offset;
     let days = local.div_euclid(86_400) - at.days();
     let day = match days {
-        ..=0 => "today".to_owned(),
-        1 => "tomorrow".to_owned(),
+        ..=0 => tr!("event.today").to_owned(),
+        1 => tr!("event.tomorrow").to_owned(),
         2..=6 => weekday(at.glance, local.div_euclid(86_400)),
         _ => glance_date(at.glance, local.div_euclid(86_400), true),
     };
     if event.all_day {
-        return format!("All day · {day}");
+        return tr!("event.all_day", day = day);
     }
     let time = at.glance.clock.time(local.rem_euclid(86_400) / 60, true);
     let away = (event.start - at.now) as f64 / 60.0;
     let soon = match away.ceil() as i64 {
-        ..=0 => "now".to_owned(),
-        minutes @ 1..=59 => format!("in {minutes} min"),
-        minutes if days == 0 => format!("in {} h", (minutes as f64 / 60.0).round() as i64),
+        ..=0 => tr!("event.now").to_owned(),
+        minutes @ 1..=59 => tr!("event.in_minutes", minutes = minutes),
+        minutes if days == 0 => tr!("event.in_hours", hours = (minutes as f64 / 60.0).round() as i64),
         _ => day,
     };
     format!("{time} · {soon}")
@@ -2014,9 +2021,6 @@ fn analog_hands(p: &mut Canvas, minutes: i64) {
     paint::circle(p, HALF, HALF, 9.0, colour(FLEDGE_ON));
 }
 
-const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
-                            "October", "November", "December"];
 
 /// The day of the week (0 Sunday), the day of the month and the month
 /// (0 January) of `days` since 1970.
@@ -2036,7 +2040,7 @@ fn civil(days: i64) -> (usize, i64, usize) {
 /// The day of the week in the glance's words.
 fn weekday(glance: &Glance, days: i64) -> String {
     let (weekday, _, _) = civil(days);
-    glance.words().map_or(DAYS[weekday].to_owned(), |words| words.days[weekday].clone())
+    glance.words().map_or_else(|| locale::numbered("day", weekday), |words| words.days[weekday].clone())
 }
 
 /// The date as the glance says it: "Sunday 8 November" ("Sun 8 Nov"
@@ -2047,8 +2051,8 @@ fn glance_date(glance: &Glance, days: i64, short: bool) -> String {
     let (day_name, month_name) = match (glance.words(), short) {
         (Some(words), false) => (words.days[weekday].clone(), words.months[month].clone()),
         (Some(words), true) => (words.days_short[weekday].clone(), words.months_short[month].clone()),
-        (None, false) => (DAYS[weekday].to_owned(), MONTHS[month].to_owned()),
-        (None, true) => (DAYS[weekday][..3].to_owned(), MONTHS[month][..3].to_owned()),
+        (None, false) => (locale::numbered("day", weekday), locale::numbered("month", month)),
+        (None, true) => (locale::numbered("day_short", weekday), locale::numbered("month_short", month)),
     };
     if glance.month_first() {
         format!("{day_name}, {month_name} {day}")
@@ -2076,23 +2080,19 @@ fn weather_icon(condition: &str) -> &'static str {
 
 /// Home Assistant's weather condition in words.
 fn condition_name(condition: &str) -> String {
-    match condition {
-        "partlycloudy" => "Partly cloudy".to_owned(),
-        "clear-night" => "Clear".to_owned(),
-        "snowy-rainy" => "Sleet".to_owned(),
-        "lightning-rainy" => "Thunderstorms".to_owned(),
-        "windy-variant" => "Windy".to_owned(),
-        "exceptional" => String::new(),
-        other => capitalise(&other.replace('-', " ")),
+    if condition == "exceptional" {
+        return String::new();
     }
+    locale::named("weather", condition)
+        .map_or_else(|| capitalise(&condition.replace('-', " ")), str::to_owned)
 }
 
 /// What's on among the cards: lights, switches and fans, each counted by
 /// what Home Assistant calls them (a smart plug is a switch, not a light),
 /// and what's playing by its title.
 fn whats_on(cards: &[Card]) -> String {
-    // (one, many, how many on), in the order they're said.
-    let mut kinds = [("light", "lights", 0usize), ("switch", "switches", 0), ("fan", "fans", 0)];
+    // How many lights, switches and fans are on, in the order they're said.
+    let mut on = [0usize; 3];
     for card in cards {
         let Card::Lights(card) = card else { continue };
         for light in card.lights.iter().filter(|l| l.on) {
@@ -2101,19 +2101,23 @@ fn whats_on(cards: &[Card]) -> String {
                 "fan" => 2,
                 _ => 1, // switch, input_boolean and the like
             };
-            kinds[kind].2 += 1;
+            on[kind] += 1;
         }
     }
     let playing = cards.iter().find_map(|c| match c {
         Card::Media(m) if m.state == "playing" => Some(if m.title.is_empty() { m.name.clone() } else { m.title.clone() }),
         _ => None,
     });
-    let mut parts: Vec<String> = kinds.iter().filter(|(_, _, n)| *n > 0)
-        .map(|(one, many, n)| format!("{n} {} on", if *n == 1 { one } else { many })).collect();
+    let [lights, switches, fans] = on;
+    let mut parts: Vec<String> = [
+        (lights, tr!("whats_on.one_light"), tr!("whats_on.lights", count = lights)),
+        (switches, tr!("whats_on.one_switch"), tr!("whats_on.switches", count = switches)),
+        (fans, tr!("whats_on.one_fan"), tr!("whats_on.fans", count = fans)),
+    ].into_iter().filter(|(n, _, _)| *n > 0).map(|(n, one, many)| if n == 1 { one.to_owned() } else { many }).collect();
     if let Some(title) = playing {
-        parts.push(format!("playing {title}"));
+        parts.push(tr!("whats_on.playing", title = title));
     }
-    if parts.is_empty() { "All quiet".to_owned() } else { parts.join(" · ") }
+    if parts.is_empty() { tr!("whats_on.all_quiet").to_owned() } else { parts.join(" · ") }
 }
 
 /// A thermostat preset's icon in its menu.
@@ -2150,15 +2154,15 @@ const PROMPT_ROWS: usize = 4;
 
 fn mode_prompt(fonts: &Fonts, nest: &Nest, selected: usize, layer: Layer) -> Canvas {
     let mut p = list_backdrop(layer, Some(selected));
-    for (i, line) in crate::ui::machine::MODE_PROMPT.split('\n').enumerate() {
+    for (i, line) in tr!("nest.mode_prompt").split('\n').enumerate() {
         let line = paint::fit(fonts.regular(), 22.0, line, 0.0, 330.0);
         paint::text(&mut p, fonts.regular(), 22.0, HALF, 118.0 + 30.0 * i as f32, &line, 0.0, WHITE);
     }
     let cools = nest.on_mode() == "cool";
     let rows = [
-        (if cools { "mdi:snowflake" } else { "mdi:fire" }, if cools { "Cool" } else { "Heat" }),
-        ("mdi:power", "Off"),
-        ("mdi:window-close", "Cancel"),
+        (if cools { "mdi:snowflake" } else { "mdi:fire" }, if cools { tr!("climate.cool") } else { tr!("climate.heat") }),
+        ("mdi:power", tr!("state.off")),
+        ("mdi:window-close", tr!("list.cancel")),
     ];
     for (i, (icon_name, name)) in rows.iter().enumerate() {
         let row = i + 1;
@@ -2182,12 +2186,12 @@ fn option_list(fonts: &Fonts, card: &OptionsCard, selected: usize, layer: Layer)
         let chosen = layer.chosen(row == selected);
         let (name, now) = match card.options.get(row) {
             Some(option) => (option.as_str(), card.current.as_deref() == Some(option.as_str())),
-            None => ("Back", false),
+            None => (tr!("list.back"), false),
         };
         if row == card.options.len() {
             icon(&mut p, "mdi:arrow-left", "back", x + 34.0, y + h / 2.0, 28.0, if chosen { WHITE } else { GREY });
         }
-        let value = if now { "Now" } else { "" };
+        let value = if now { tr!("list.now") } else { "" };
         let value_width = paint::measure(fonts.regular(), 24.0, value, 0.0);
         let name = paint::fit(fonts.regular(), 26.0, name, 0.0, w - 90.0 - value_width - 16.0);
         paint::text_at(&mut p, fonts.regular(), 26.0, x + 62.0, y + 37.0, &name, 0.0, WHITE, 1.0);
@@ -2221,17 +2225,13 @@ fn cover_still(fonts: &Fonts, card: &CoverCard, opened: bool, parked: Parked) ->
     }
     label(&mut p, fonts, 150.0, &card.name, COVER);
     if !card.positionable {
-        let words = match card.state.as_str() {
-            "opening" => "Opening".to_owned(),
-            "closing" => "Closing".to_owned(),
-            state => capitalise(state),
-        };
+        let words = locale::named("cover_state", &card.state).map_or_else(|| capitalise(&card.state), str::to_owned);
         paint::text(&mut p, fonts.regular(), 80.0, HALF, NUMBER_BASELINE - 12.0, &words, 0.0, WHITE);
     }
     if parked.as_ref().is_some_and(|edge| parked_words(&mut p, fonts, edge, PARKED_WORDS, GREY)) {
     } else if opened {
         let open = card.state == "open" || card.state == "opening";
-        line(&mut p, fonts, 366.0, if open { "Hold to close" } else { "Hold to open" }, GREY);
+        line(&mut p, fonts, 366.0, if open { tr!("cover.hold_close") } else { tr!("cover.hold_open") }, GREY);
     }
     p
 }
@@ -2311,14 +2311,14 @@ fn alarm_note(p: &mut Canvas, fonts: &Fonts, note: Option<&str>, y: f32) -> bool
 /// under the word.
 fn alarm_state(card: &AlarmCard) -> ([u8; 3], &'static str, &'static str, String) {
     match (card.state.as_str(), card.armed()) {
-        (_, Some(mode)) => (ALARM_ARMED, alarm_mode_icon(mode), "Armed", card.mode_name(mode)),
-        ("disarmed", _) => (ECO, "mdi:shield-lock-open-outline", "Disarmed", String::new()),
-        ("arming", _) => (AMBER, "mdi:home-export-outline", "Arming", "Leave now".into()),
-        ("pending", _) => (AMBER, "mdi:door-open", "Entry delay",
-                           if card.wants_digits() { "Enter the code".into() } else { String::new() }),
-        ("triggered", _) => (ALARM_RED, "mdi:alarm-light", "Alarm", card.sensors.first().cloned().unwrap_or_default()),
-        ("disarming", _) => (AMBER, "mdi:shield-lock-open-outline", "Disarming", String::new()),
-        _ => (DIM, "mdi:shield-lock-open-outline", "Unavailable", String::new()),
+        (_, Some(mode)) => (ALARM_ARMED, alarm_mode_icon(mode), tr!("alarm.armed"), card.mode_name(mode)),
+        ("disarmed", _) => (ECO, "mdi:shield-lock-open-outline", tr!("alarm.disarmed"), String::new()),
+        ("arming", _) => (AMBER, "mdi:home-export-outline", tr!("alarm.arming"), tr!("alarm.leave_now").into()),
+        ("pending", _) => (AMBER, "mdi:door-open", tr!("alarm.entry_delay"),
+                           if card.wants_digits() { tr!("alarm.enter_code").into() } else { String::new() }),
+        ("triggered", _) => (ALARM_RED, "mdi:alarm-light", tr!("alarm.alarm"), card.sensors.first().cloned().unwrap_or_default()),
+        ("disarming", _) => (AMBER, "mdi:shield-lock-open-outline", tr!("alarm.disarming"), String::new()),
+        _ => (DIM, "mdi:shield-lock-open-outline", tr!("alarm.unavailable"), String::new()),
     }
 }
 
@@ -2327,7 +2327,7 @@ fn alarm_state(card: &AlarmCard) -> ([u8; 3], &'static str, &'static str, String
 /// whole ring lit in the same; the alarm's name small above it. Opened
 /// while a delay runs, the seconds left take the word's place.
 fn alarm_screen(fonts: &Fonts, card: &AlarmCard, now: Option<f64>, note: Option<&str>) -> Canvas {
-    let name = if card.name.is_empty() { "Alarm" } else { card.name.as_str() };
+    let name = if card.name.is_empty() { tr!("alarm.alarm") } else { card.name.as_str() };
     let (accent, icon_name, word, under) = alarm_state(card);
     let triggered = card.state == "triggered";
     let mut p = alarm_face(if accent == DIM { BLACK } else { accent });
@@ -2344,11 +2344,11 @@ fn alarm_screen(fonts: &Fonts, card: &AlarmCard, now: Option<f64>, note: Option<
     // On the Nest's solid red, everything white.
     let (accent, words) = if triggered && !paint::fledge() { (WHITE, WHITE) } else { (accent, GREY) };
     let hint = match card.state.as_str() {
-        "arming" => "Press to cancel",
-        "pending" | "triggered" if card.wants_digits() => "Press to enter the code",
-        "pending" | "triggered" => "Press to disarm",
-        "disarmed" if !card.modes.is_empty() => "Press to arm",
-        _ if card.armed().is_some() => "Press to disarm",
+        "arming" => tr!("alarm.press_to_cancel"),
+        "pending" | "triggered" if card.wants_digits() => tr!("alarm.press_to_enter_code"),
+        "pending" | "triggered" => tr!("alarm.press_to_disarm"),
+        "disarmed" if !card.modes.is_empty() => tr!("alarm.press_to_arm"),
+        _ if card.armed().is_some() => tr!("alarm.press_to_disarm"),
         _ => "",
     };
     let seconds = now.and_then(|now| card.left(now)).filter(|_| timed).map(|(_, s)| s);
@@ -2404,8 +2404,8 @@ fn alarm_pad(fonts: &Fonts, card: &AlarmCard, arm: Option<&AlarmMode>, at: usize
     if let Some(seconds) = locked {
         paint::ring(&mut p, |_| colour(DIM), &[]);
         icon(&mut p, "mdi:lock", "lock", HALF, 200.0, 78.0, GREY);
-        paint::text(&mut p, fonts.medium(), 26.0, HALF, 290.0, &format!("Try again in {seconds} s"), 0.0, WHITE);
-        line(&mut p, fonts, 326.0, "Too many tries", GREY);
+        paint::text(&mut p, fonts.medium(), 26.0, HALF, 290.0, &tr!("alarm.try_again", seconds = seconds), 0.0, WHITE);
+        line(&mut p, fonts, 326.0, tr!("alarm.too_many_tries"), GREY);
         return p;
     }
     let (mark, _, _) = pad_place(at, n);
@@ -2429,10 +2429,10 @@ fn alarm_pad(fonts: &Fonts, card: &AlarmCard, arm: Option<&AlarmMode>, at: usize
     let title = match (arm, pending) {
         (Some(mode), _) => card.mode_name(&mode.mode),
         (None, true) => match card.left(now) {
-            Some((_, seconds)) => format!("Disarm · {seconds} s"),
-            None => "Disarm now".to_owned(),
+            Some((_, seconds)) => tr!("alarm.disarm_seconds", seconds = seconds),
+            None => tr!("alarm.disarm_now").to_owned(),
         },
-        (None, false) => "Disarm".to_owned(),
+        (None, false) => tr!("alarm.disarm").to_owned(),
     };
     let title_icon = arm.map_or("mdi:shield-lock-open-outline", |mode| alarm_mode_icon(&mode.mode));
     pill_words(&mut p, fonts, 150.0, &title, accent, Some(title_icon));
@@ -2450,7 +2450,7 @@ fn alarm_pad(fonts: &Fonts, card: &AlarmCard, arm: Option<&AlarmMode>, at: usize
         None => entered + usize::from(!waiting),
     };
     if shown == 0 || (entered == 0 && card.code_length.is_none() && !waiting) {
-        line(&mut p, fonts, 336.0, "Enter the code", GREY);
+        line(&mut p, fonts, 336.0, tr!("alarm.enter_code"), GREY);
     } else {
         let gap = if shown > 6 { 20.0 } else { 26.0 };
         let left = HALF - (shown - 1) as f32 * gap / 2.0;
@@ -2460,12 +2460,12 @@ fn alarm_pad(fonts: &Fonts, card: &AlarmCard, arm: Option<&AlarmMode>, at: usize
         }
     }
     if waiting {
-        line(&mut p, fonts, 404.0, "Checking…", GREY);
+        line(&mut p, fonts, 404.0, tr!("alarm.checking"), GREY);
     } else if !alarm_note(&mut p, fonts, note, 404.0) {
         let hint = match (super::machine::DIGITS.get(at), entered) {
-            (None, _) => if arm.is_some() { "Press to arm" } else { "Press to disarm" },
-            (Some(_), 0) => "Press to enter · hold to go back",
-            (Some(_), _) => "Hold to rub out",
+            (None, _) => if arm.is_some() { tr!("alarm.press_to_arm") } else { tr!("alarm.press_to_disarm") },
+            (Some(_), 0) => tr!("alarm.press_enter_hold_back"),
+            (Some(_), _) => tr!("alarm.hold_rub_out"),
         };
         line(&mut p, fonts, 404.0, hint, GREY);
     }
@@ -2643,15 +2643,15 @@ pub fn alarm_choices(card: &AlarmCard, selected: usize) -> (String, Vec<(String,
     let code = card.wants_digits();
     let items = choices.iter().map(|option| {
         let (icon, name, under) = match option {
-            AlarmOption::Back => ("mdi:arrow-left", "Back".to_owned(), "To the cards"),
+            AlarmOption::Back => ("mdi:arrow-left", tr!("list.back").to_owned(), tr!("list.to_the_cards")),
             AlarmOption::Arm(i) => {
                 let mode = card.modes.get(*i as usize);
                 (mode.map_or("mdi:shield-lock", |m| alarm_mode_icon(&m.mode)), mode.map_or(String::new(), |m| card.mode_name(&m.mode)),
-                 if code { "Press, then the code" } else { "Press to arm" })
+                 if code { tr!("alarm.press_then_code") } else { tr!("alarm.press_to_arm") })
             }
-            AlarmOption::Disarm => ("mdi:shield-lock-open", "Disarm".to_owned(),
-                                    if code { "Press, then the code" } else { "Press to disarm" }),
-            AlarmOption::Cancel => ("mdi:window-close", "Cancel".to_owned(), "Press to stop it arming"),
+            AlarmOption::Disarm => ("mdi:shield-lock-open", tr!("alarm.disarm").to_owned(),
+                                    if code { tr!("alarm.press_then_code") } else { tr!("alarm.press_to_disarm") }),
+            AlarmOption::Cancel => ("mdi:window-close", tr!("list.cancel").to_owned(), tr!("alarm.press_stop_arming")),
         };
         (icon.to_owned(), name, under.to_owned())
     }).collect();
@@ -2660,7 +2660,7 @@ pub fn alarm_choices(card: &AlarmCard, selected: usize) -> (String, Vec<(String,
         Some(AlarmOption::Cancel) => AMBER,
         _ => ALARM_ARMED,
     };
-    let title = if card.name.is_empty() { "Alarm".to_owned() } else { card.name.clone() };
+    let title = if card.name.is_empty() { tr!("alarm.alarm").to_owned() } else { card.name.clone() };
     (title, items, accent)
 }
 
@@ -2672,14 +2672,14 @@ fn alarm_open(fonts: &Fonts, card: &AlarmCard, arm: &AlarmMode, sensors: &[Strin
     pill_words(&mut p, fonts, 104.0, &card.mode_name(&arm.mode), AMBER, Some(alarm_mode_icon(&arm.mode)));
     icon(&mut p, "mdi:door-open", &card.id, HALF, 190.0, 76.0, WHITE);
     let what = match sensors {
-        [one] => format!("{one} is open"),
-        [] => "Something is open".to_owned(),
-        many => format!("{} are open", many.len()),
+        [one] => tr!("alarm.one_open", name = one),
+        [] => tr!("alarm.something_open").to_owned(),
+        many => tr!("alarm.many_open", count = many.len()),
     };
     let what = paint::fit(fonts.medium(), 30.0, &what, 0.0, 340.0);
     paint::text(&mut p, fonts.medium(), 30.0, HALF, 272.0, &what, 0.0, WHITE);
-    line(&mut p, fonts, 314.0, "Press to arm anyway", WHITE);
-    line(&mut p, fonts, 348.0, "Hold to leave it disarmed", GREY);
+    line(&mut p, fonts, 314.0, tr!("alarm.press_arm_anyway"), WHITE);
+    line(&mut p, fonts, 348.0, tr!("alarm.hold_leave_disarmed"), GREY);
     p
 }
 
