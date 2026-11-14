@@ -58,6 +58,26 @@ pub fn simple(bucket: &Fields) -> Value {
     Value::Object(fields!{"days" => Value::Object(days)})
 }
 
+/// Whether the schedule has hot water on at `day` (0 Monday), `now` seconds
+/// after midnight, and when that next changes ("HH:MM"), in the week ahead.
+pub fn now_and_next(bucket: &Fields, day: usize, now: i64) -> (bool, Option<String>) {
+    const WEEK: i64 = 7 * DAY;
+    let at = day as i64 * DAY + now;
+    let spans: Vec<(i64, i64)> = periods(bucket).into_iter().map(|(sd, st, ed, et)| {
+        let start = sd * DAY + st;
+        let mut end = ed * DAY + et;
+        if end <= start {
+            end += WEEK;
+        }
+        (start, end)
+    }).collect();
+    // Each span, and again a week on, so one running past Sunday counts.
+    let on = spans.iter().any(|(s, e)| (*s..*e).contains(&at) || (*s..*e).contains(&(at + WEEK)));
+    let edges = spans.iter().flat_map(|(s, e)| [*s, *e, s + WEEK, e + WEEK]);
+    let next = edges.filter(|t| *t > at).min().map(hhmm);
+    (on, next)
+}
+
 /// "HH:MM" as seconds after midnight.
 fn seconds(s: &str) -> Option<i64> {
     let (h, m) = s.split_once(':')?;

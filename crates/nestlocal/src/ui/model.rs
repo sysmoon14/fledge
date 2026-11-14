@@ -1107,6 +1107,36 @@ pub struct Nest {
     /// Whether it acts as a thermostat; not, its heating is off and it has
     /// no card or settings of its own (role.rs).
     pub acting: bool,
+    /// While heating control is Home Assistant's (demand.rs): what it asks.
+    /// Its card is then only what it's doing and why (screens::nest_status).
+    pub asked: Option<Asked>,
+    /// Whether its hot water is on now, and when that next changes ("HH:MM").
+    pub hot_water_on: bool,
+    pub hot_water_next: Option<String>,
+}
+
+/// Home Assistant's heating control, as the thermostat's card says it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Asked {
+    /// heating, idle or on_its_own (demand::Phase).
+    pub phase: String,
+    /// The rooms asking for heat.
+    pub rooms: Vec<String>,
+}
+
+impl Asked {
+    /// Why it's heating or not, in a household's words.
+    pub fn reason(&self) -> String {
+        match self.phase.as_str() {
+            "heating" => match self.rooms.as_slice() {
+                [] => "Heat wanted".into(),
+                [one] => format!("{one} wants heat"),
+                more => format!("{} rooms want heat", more.len()),
+            },
+            "idle" => "No rooms want heat".into(),
+            _ => "On its own schedule".into(),
+        }
+    }
 }
 
 impl Nest {
@@ -1117,6 +1147,9 @@ impl Nest {
         let on = |k: &str| s.get(k).and_then(Value::as_bool).unwrap_or(false);
         let text = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
         let fahrenheit = text("temperature_scale") == "F";
+        // bridge::state gives °C (what Home Assistant is told); the card is
+        // in the Nest's own scale.
+        let shown = |k: &str| number(k).map(|c| if fahrenheit { (c * 1.8 + 32.0).round() } else { c });
         let (min, max, step) = if fahrenheit { (48.0, 90.0, 1.0) } else { (9.0, 32.0, 0.5) };
         let eco = text("preset") == "eco";
         let (can_heat, can_cool) = (on("can_heat"), on("can_cool"));
@@ -1133,8 +1166,8 @@ impl Nest {
             icon: String::new(),
             mode: text("mode"),
             action: text("action"),
-            target: number("target"),
-            current: number("current_temperature"),
+            target: shown("target"),
+            current: shown("current_temperature"),
             min, max, step,
             preset: Some(if eco { "eco" } else { "none" }.to_owned()),
             preset_modes: vec!["none".into(), "eco".into()],
@@ -1145,6 +1178,15 @@ impl Nest {
         };
         let mut card = card;
         card.settle_action();
+        let asked = match text("heat_control_phase").as_str() {
+            phase @ ("heating" | "idle" | "on_its_own") => Some(Asked {
+                phase: phase.to_owned(),
+                rooms: s.get("heat_control_rooms").and_then(Value::as_array)
+                    .map_or(Vec::new(), |l| l.iter().filter_map(Value::as_str).map(str::to_owned).collect()),
+            }),
+            _ => None,
+        };
+
         let boost = s.get("hot_water_boost").and_then(|v| match v {
             Value::String(m) => m.parse().ok(),
             Value::Number(m) => m.as_u64().map(|m| m as u32),
@@ -1161,8 +1203,8 @@ impl Nest {
             hot_water: on("has_hot_water_control"),
             hot_water_boost: boost,
             hot_water_schedule: on("hot_water_schedule"),
-            eco_low: number("away_temperature_low"),
-            eco_high: number("away_temperature_high"),
+            eco_low: shown("away_temperature_low"),
+            eco_high: shown("away_temperature_high"),
             learning: on("learning_mode"),
             home_away: on("auto_away_enable"),
             early_on: on("preconditioning_enabled"),
@@ -1171,6 +1213,9 @@ impl Nest {
             update: s.get("update").and_then(Value::as_str).map(str::to_owned),
             next_change: s.get("next_change").and_then(Value::as_str).map(str::to_owned),
             acting: s.get("acting").and_then(Value::as_bool).unwrap_or(true),
+            asked,
+            hot_water_on: on("hot_water_active"),
+            hot_water_next: s.get("hot_water_next").and_then(Value::as_str).map(str::to_owned),
         }
     }
 
@@ -1184,7 +1229,8 @@ impl Nest {
             can_heat: can("heat"), can_cool: can("cool"), fahrenheit: false,
             hot_water: false, hot_water_boost: None, hot_water_schedule: false, eco_low: None, eco_high: None,
             learning: false, home_away: false, early_on: false, sunblock: false,
-            version: String::new(), update: None, next_change: None, acting: true,
+            version: String::new(), update: None, next_change: None, acting: true, asked: None,
+            hot_water_on: false, hot_water_next: None,
         }
     }
 
@@ -1634,6 +1680,20 @@ mod tests {
         let with = Nest::from_state(state(true).as_object().unwrap());
         assert_eq!(with.card.choices(ClimateChoice::Fan), (&["auto".to_owned(), "on".to_owned()][..], Some("auto")));
         assert_eq!(with.card.choices(ClimateChoice::Preset).0, ["none", "eco"]);
+    }
+
+    #[test]
+    fn a_fahrenheit_nest_s_card_is_in_fahrenheit() {
+        // bridge::state gives °C, rounded to the whole °F the unit shows.
+        let state = serde_json::json!({"mode": "heat", "target": 22.22222, "current_temperature": 20.55556,
+            "away_temperature_low": 10.0, "away_temperature_high": 29.44444, "temperature_scale": "F"});
+        let nest = Nest::from_state(state.as_object().unwrap());
+        assert_eq!((nest.card.target, nest.card.current), (Some(72.0), Some(69.0)));
+        assert_eq!((nest.eco_low, nest.eco_high), (Some(50.0), Some(85.0)));
+        assert_eq!(nest.celsius(72.0), 22.0, "and back to °C for its commands");
+        let celsius = serde_json::json!({"mode": "heat", "target": 21.5, "current_temperature": 20.0, "temperature_scale": "C"});
+        let nest = Nest::from_state(celsius.as_object().unwrap());
+        assert_eq!((nest.card.target, nest.card.current), (Some(21.5), Some(20.0)));
     }
 
     #[test]
