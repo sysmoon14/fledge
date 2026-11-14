@@ -42,6 +42,7 @@ use std::borrow::Cow;
 use screens::Screen;
 
 use crate::logf;
+use crate::tr;
 
 /// What of the cards this build understands, for the Fledge integration to
 /// check (<base>/ui/protocol). Raise it with each addition Fledge relies on:
@@ -1383,7 +1384,7 @@ impl Runtime {
         prof::time(prof::Part::Overlay, || {
             paint::around_cards(&mut self.scratch, &self.fonts, &name, title, count as usize, nearest, fade);
             if self.machine.hint {
-                paint::hint(&mut self.scratch, &self.fonts, "Turn to browse · press to open");
+                paint::hint(&mut self.scratch, &self.fonts, tr!("hint.browse"));
             }
         });
         self.display.show(&self.scratch);
@@ -1413,8 +1414,8 @@ impl Runtime {
     fn name(&self, index: usize) -> String {
         match self.machine.deck().get(index) {
             // Its name from Home Assistant, as its own screens show it.
-            Some(Slot::Thermostat) => self.machine.cards.thermostat_name().unwrap_or("Thermostat").to_owned(),
-            Some(Slot::Settings) => "Settings".into(),
+            Some(Slot::Thermostat) => self.machine.cards.thermostat_name().unwrap_or(tr!("nest.thermostat")).to_owned(),
+            Some(Slot::Settings) => tr!("settings.title").into(),
             Some(&Slot::Card(slot)) => match self.machine.cards.cards.get(slot) {
                 Some(Card::Lights(card)) => card.name.clone(),
                 Some(Card::Climate(card)) => card.name.clone(),
@@ -2011,7 +2012,7 @@ impl Runtime {
         let now = |action: &Action| {
             let (Action::Choose(list), Mode::Dial { of, .. }) = (action, view) else { return None };
             if let (ClimateChoice::HotWater, Some(minutes)) = (list, self.machine.nest.as_ref()?.hot_water_boost) {
-                return Some(format!("{minutes} min left"));
+                return Some(tr!("menu.minutes_left", minutes = minutes));
             }
             let now = self.machine.choices(*of, *list).1.filter(|now| !now.is_empty())?;
             Some(screens::choice_label(*list, &now))
@@ -2669,26 +2670,26 @@ fn hold_state(hold: bool) {
 /// does. `now`: what a list is on now, in words.
 fn menu_item(action: Action, now: Option<String>) -> (String, String, String) {
     let (icon, name, under) = match action {
-        Action::Back => ("mdi:arrow-left", "Back", "To the cards"),
-        Action::Switch(true) => ("mdi:power", "Turn on", "Press to turn it on"),
-        Action::Switch(false) => ("mdi:power", "Turn off", "Press to turn it off"),
-        Action::Play(true) => ("mdi:play", "Play", "Press to play"),
-        Action::Play(false) => ("mdi:pause", "Pause", "Press to pause"),
-        Action::Warmth => ("mdi:white-balance-sunny", "Warmth", "Press to set its white"),
-        Action::Colour => ("mdi:palette", "Colour", "Press to choose a colour"),
-        Action::Next => ("mdi:skip-next", "Next", "Press for the next track"),
-        Action::Previous => ("mdi:skip-previous", "Previous", "Press for the track before"),
-        Action::Members => ("mdi:format-list-bulleted", "Each light", "Press to switch each one"),
-        Action::Open => ("mdi:arrow-up-bold", "Open", "Press to open it fully"),
-        Action::Close => ("mdi:arrow-down-bold", "Close", "Press to close it"),
-        Action::NestDial => ("mdi:thermometer", "Nest's dial", "Press for the Nest's own screens"),
-        Action::Run => ("mdi:play", "Run", "Press to run it"),
+        Action::Back => ("mdi:arrow-left", tr!("list.back"), tr!("list.to_the_cards")),
+        Action::Switch(true) => ("mdi:power", tr!("menu.turn_on"), tr!("menu.turn_on_hint")),
+        Action::Switch(false) => ("mdi:power", tr!("menu.turn_off"), tr!("menu.turn_off_hint")),
+        Action::Play(true) => ("mdi:play", tr!("menu.play"), tr!("menu.play_hint")),
+        Action::Play(false) => ("mdi:pause", tr!("menu.pause"), tr!("menu.pause_hint")),
+        Action::Warmth => ("mdi:white-balance-sunny", tr!("light.warmth"), tr!("menu.warmth_hint")),
+        Action::Colour => ("mdi:palette", tr!("light.colour"), tr!("menu.colour_hint")),
+        Action::Next => ("mdi:skip-next", tr!("menu.next"), tr!("menu.next_hint")),
+        Action::Previous => ("mdi:skip-previous", tr!("menu.previous"), tr!("menu.previous_hint")),
+        Action::Members => ("mdi:format-list-bulleted", tr!("menu.members"), tr!("menu.members_hint")),
+        Action::Open => ("mdi:arrow-up-bold", tr!("menu.open"), tr!("menu.open_hint")),
+        Action::Close => ("mdi:arrow-down-bold", tr!("menu.close"), tr!("menu.close_hint")),
+        Action::NestDial => ("mdi:thermometer", tr!("menu.nest_dial"), tr!("menu.nest_dial_hint")),
+        Action::Run => ("mdi:play", tr!("menu.run"), tr!("menu.run_hint")),
         // Named by its face (face_item); this only if it went meanwhile.
-        Action::Face(_) => ("mdi:play", "Run", "Press to do it"),
+        Action::Face(_) => ("mdi:play", tr!("menu.run"), tr!("menu.face_hint")),
         Action::Choose(list) => {
             let under = match now {
-                Some(now) => format!("{now} · press to change"),
-                None => "Press to choose".to_owned(),
+                Some(now) => tr!("menu.choose_now", now = now),
+                None => tr!("menu.choose").to_owned(),
             };
             return (list.icon().to_owned(), list.title().to_owned(), under);
         }
@@ -2701,9 +2702,9 @@ fn menu_item(action: Action, now: Option<String>) -> (String, String, String) {
 fn face_item(action: &model::FaceAction) -> (String, String, String) {
     let name = if action.name.trim().is_empty() { action.id.clone() } else { action.name.clone() };
     let (icon, under) = match (action.switched(), action.on) {
-        (false, _) => ("mdi:play", "Press to run it"),
-        (true, Some(true)) => ("mdi:power", "On · press to turn it off"),
-        (true, _) => ("mdi:power", "Off · press to turn it on"),
+        (false, _) => ("mdi:play", tr!("menu.run_hint")),
+        (true, Some(true)) => ("mdi:power", tr!("menu.face_on")),
+        (true, _) => ("mdi:power", tr!("menu.face_off")),
     };
     let icon = if action.icon.is_empty() { icon.to_owned() } else { action.icon.clone() };
     (icon, name, under.to_owned())
@@ -2877,7 +2878,8 @@ fn off_dial(page: &[u8]) -> bool {
 
 /// Every screen, drawn to PNGs in UNFR0ZEN_UI_SHOTS with the fonts in
 /// UNFR0ZEN_UI_FONTS (the unit's /nestlabs/share/fonts): how they look,
-/// without a unit. `cargo test -p nestlocal ui_shots -- --ignored`
+/// without a unit. `cargo test -p nestlocal ui_shots -- --ignored`, in
+/// UNFR0ZEN_UI_LANGUAGE's words (nl) if set.
 #[cfg(test)]
 mod shots {
     use super::*;
@@ -2965,6 +2967,9 @@ mod shots {
             panic!("set UNFR0ZEN_UI_FONTS and UNFR0ZEN_UI_SHOTS");
         };
         let fonts = paint::Fonts::load(&fonts).unwrap();
+        let wanted = std::env::var("UNFR0ZEN_UI_LANGUAGE").unwrap_or_default();
+        let (language, from) = crate::locale::start(&wanted, "");
+        assert!(wanted.is_empty() || wanted.to_ascii_lowercase().starts_with(language), "drawn in {language}: {from}");
         paint::set_theme(if std::env::var("UNFR0ZEN_UI_THEME").is_ok_and(|t| t == "nest") { paint::Theme::Nest } else { paint::Theme::Fledge });
         let cards = Cards::parse(br#"{"cards":[
             {"kind":"lights","name":"Bedroom","icon":"mdi:lightbulb-group","lights":[
@@ -2989,7 +2994,7 @@ mod shots {
             "action":"drying","current":24.5,"presets":["away","boost"],"modes":["off","cool","heat","dry","fan_only","heat_cool"],
             "fan_modes":["auto","low","high"],"fan_mode":"auto"}]}"#).unwrap();
         let [Card::Climate(ac)] = &ac.cards[..] else { panic!() };
-        let modes = model::OptionsCard { id: ac.id.clone(), name: format!("{} · Mode", ac.name), icon: String::new(),
+        let modes = model::OptionsCard { id: ac.id.clone(), name: format!("{} · {}", ac.name, ClimateChoice::Mode.title()), icon: String::new(),
                                          options: ac.modes.iter().map(|m| screens::climate_label(m)).collect(),
                                          current: Some(screens::climate_label(&ac.mode)) };
         // Cooling, in its away preset: the preset under its number.
@@ -3039,8 +3044,8 @@ mod shots {
         ] {
             save(&screens::draw(&fonts, &screen, None), &format!("{out}/{name}.png"));
         }
-        let lamp_options = [screens::Opt { icon: "mdi:arrow-left", name: "Back", under: "To the cards" },
-                            screens::Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn it off" }];
+        let lamp_items = [menu_item(Action::Back, None), menu_item(Action::Switch(false), None)];
+        let lamp_options: Vec<screens::Opt> = lamp_items.iter().map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
         save(&screens::options(&fonts, "Reading Lamp", &lamp_options, 0, lights.lights[0].colour()), &format!("{out}/9-menu.png"));
         // The ring of options turning from Back to the next, and back again.
         let (mut turn, accent) = (screens::options_turn(&fonts, "Reading Lamp"), lights.lights[0].colour());
@@ -3127,6 +3132,7 @@ mod shots {
         let triggered = alarm("triggered", Some("number"), None);
         let mut any_length = armed.clone();
         any_length.code_length = None;
+        let rejected = tr!("alarm.note_rejected_tries", tries = 2);
         let shots = [
             ("c1-alarm-disarmed", Screen::AlarmCard { card: &disarmed }),
             ("c2-alarm-armed", Screen::AlarmCard { card: &armed }),
@@ -3136,7 +3142,7 @@ mod shots {
             ("c5-alarm-pad-any-length", Screen::AlarmPad { card: &any_length, arm: None, at: 10, entered: 5, waiting: false,
                                                            note: None, locked: None, now }),
             ("c6-alarm-pad-entry", Screen::AlarmPad { card: &pending, arm: None, at: 2, entered: 0, waiting: false,
-                                                      note: Some("Not accepted · 2 tries left"), locked: None, now }),
+                                                      note: Some(&rejected), locked: None, now }),
             ("c7-alarm-pad-entry-plain", Screen::AlarmPad { card: &pending_plain, arm: None, at: 4, entered: 1,
                                                             waiting: false, note: None, locked: None, now }),
             ("c8-alarm-triggered", Screen::AlarmView { card: &triggered, now, note: None }),
@@ -3255,50 +3261,43 @@ mod shots {
             save(&screens::draw(&fonts, &Screen::ModePrompt { nest: Cow::Borrowed(off), selected }, None),
                  &format!("{out}/t11-nest-off-prompt-{selected}.png"));
         }
-        // Every device's options, one chosen: o<n>-<device>.png.
-        use screens::Opt;
-        let back = |under| Opt { icon: "mdi:arrow-left", name: "Back", under };
+        // Every device's options, one chosen, as its menu has them:
+        // o<n>-<device>.png.
         let lamp_light = &lights.lights[0];
+        let lists = |list: ClimateChoice, now: &str| (Action::Choose(list), Some(screens::choice_label(list, now)));
         // A device, its name, its options, its colour, and the one chosen.
-        type Menu<'a> = (&'a str, &'a str, Vec<Opt<'a>>, [u8; 3], usize);
+        type Menu<'a> = (&'a str, String, Vec<(Action, Option<String>)>, [u8; 3], usize);
         let menus: Vec<Menu> = vec![
-            ("lamp", "Reading Lamp",
-             vec![back("To the cards"), Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn it off" },
-                  Opt { icon: "mdi:white-balance-sunny", name: "Warmth", under: "Press to set its white" },
-                  Opt { icon: "mdi:palette", name: "Colour", under: "Press to choose a colour" }],
+            ("lamp", "Reading Lamp".into(),
+             vec![(Action::Back, None), (Action::Switch(false), None), (Action::Warmth, None), (Action::Colour, None)],
              lamp_light.colour(), 1),
-            ("group", "Bedroom Lights",
-             vec![back("To the cards"), Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn them off" },
-                  Opt { icon: "mdi:format-list-bulleted", name: "Each light", under: "Press to switch each one" }],
+            ("group", "Bedroom Lights".into(),
+             vec![(Action::Back, None), (Action::Switch(false), None), (Action::Members, None)],
              lights.lights[2].colour(), 2),
-            ("speaker", "Bedroom speaker",
-             vec![back("To the cards"), Opt { icon: "mdi:pause", name: "Pause", under: "Press to pause" },
-                  Opt { icon: "mdi:skip-previous", name: "Previous", under: "Press for the track before" },
-                  Opt { icon: "mdi:skip-next", name: "Next", under: "Press for the next track" }],
+            ("speaker", "Bedroom speaker".into(),
+             vec![(Action::Back, None), (Action::Play(false), None), (Action::Previous, None), (Action::Next, None)],
              paint::MEDIA, 3),
-            ("thermostat", "Thermostat",
-             vec![back("To the cards"), Opt { icon: "mdi:leaf", name: "Eco", under: "Press to turn Eco on" },
-                  Opt { icon: "mdi:power", name: "Turn off", under: "Press to turn the heating off" },
-                  Opt { icon: "mdi:water-boiler", name: "Stop boost", under: "Press to stop the hot water" },
-                  Opt { icon: "mdi:thermometer", name: "Nest's dial", under: "Press for the Nest's own screens" }],
+            ("thermostat", tr!("nest.thermostat").into(),
+             vec![(Action::Back, None), lists(ClimateChoice::Mode, "heat"),
+                  (Action::Choose(ClimateChoice::HotWater), Some(tr!("menu.minutes_left", minutes = 30))),
+                  (Action::NestDial, None)],
              paint::HEAT, 1),
-            ("ac", "Living room AC",
-             vec![back("To the cards"), Opt { icon: "mdi:thermostat", name: "Mode", under: "Cool · press to change" },
-                  Opt { icon: "mdi:fan", name: "Fan", under: "Auto · press to change" },
-                  Opt { icon: "mdi:tune-variant", name: "Preset", under: "Away · press to change" },
-                  Opt { icon: "mdi:arrow-oscillating", name: "Swing", under: "Swing · press to change" },
-                  Opt { icon: "mdi:arrow-left-right", name: "Horizontal swing", under: "Off · press to change" }],
+            ("ac", "Living room AC".into(),
+             vec![(Action::Back, None), lists(ClimateChoice::Mode, "cool"), lists(ClimateChoice::Fan, "auto"),
+                  lists(ClimateChoice::Preset, "away"), lists(ClimateChoice::Swing, "vertical"),
+                  lists(ClimateChoice::SwingHorizontal, "off")],
              paint::HEAT, 3),
-            ("cover", "Bedroom blind",
-             vec![back("To the cards"), Opt { icon: "mdi:arrow-up-bold", name: "Open", under: "Press to open it fully" },
-                  Opt { icon: "mdi:arrow-down-bold", name: "Close", under: "Press to close it" }],
+            ("cover", "Bedroom blind".into(),
+             vec![(Action::Back, None), (Action::Open, None), (Action::Close, None)],
              [120, 170, 255], 2),
-            ("scene", "Goodnight",
-             vec![back("To the cards"), Opt { icon: "mdi:play", name: "Run", under: "Press to run it" }],
+            ("scene", "Goodnight".into(),
+             vec![(Action::Back, None), (Action::Run, None)],
              [255, 196, 87], 1),
         ];
-        for (i, (device, title, new, accent, selected)) in menus.iter().enumerate() {
-            save(&screens::options(&fonts, title, new, *selected, *accent), &format!("{out}/o{i}-{device}.png"));
+        for (i, (device, title, actions, accent, selected)) in menus.into_iter().enumerate() {
+            let items: Vec<_> = actions.into_iter().map(|(action, now)| menu_item(action, now)).collect();
+            let options: Vec<screens::Opt> = items.iter().map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
+            save(&screens::options(&fonts, &title, &options, selected, accent), &format!("{out}/o{i}-{device}.png"));
         }
         // A switch's own screen, on and off.
         let fan = model::Light { id: "switch.fan".into(), name: "Fan".into(), on: true, dimmable: false, ..Default::default() };

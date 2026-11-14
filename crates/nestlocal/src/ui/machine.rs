@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use super::model::{past, Ring, AlarmCard, AlarmResult, Alert, Card, Cards, ClimateCard, ClimateChoice, Code, Command, Far, Glance, Near, Nest, Wake};
 use crate::motion::Sensor;
 use crate::logf;
+use crate::tr;
 
 /// Ring counts per step, by what a step moves: a card, a list row, a value.
 /// REL_DIAL reports the ADC's raw counts; a step is a deliberate movement.
@@ -271,7 +272,6 @@ pub enum Action {
 /// The off thermostat's prompt, as the Nest's words, and its choices: on
 /// (heat), left off, or not now. Listed under it as Settings are, from row 1
 /// (row 0 is the question).
-pub const MODE_PROMPT: &str = "To adjust the temperature,\nchange the thermostat mode";
 pub const PROMPT_ON: usize = 1;
 #[cfg(test)]
 pub const PROMPT_OFF: usize = 2;
@@ -2155,7 +2155,7 @@ impl Machine {
             return self.go(Mode::AlarmPad { slot, arm: None, at: PAD_START, entered: Code::default() }, out);
         }
         if card.wants_text() {
-            self.alarm_note = Some(("Disarm it from Home Assistant".into(), self.last_input));
+            self.alarm_note = Some((tr!("alarm.note_disarm_in_ha").into(), self.last_input));
         } else {
             self.alarm_send(slot, None, None, false, out);
         }
@@ -2184,7 +2184,7 @@ impl Machine {
             return;
         }
         if card.wants_text() {
-            self.alarm_note = Some(("Arm it from Home Assistant".into(), self.last_input));
+            self.alarm_note = Some((tr!("alarm.note_arm_in_ha").into(), self.last_input));
         } else {
             self.alarm_send(slot, Some(arm), None, false, out);
         }
@@ -2242,16 +2242,17 @@ impl Machine {
                     return self.go(Mode::AlarmOpen { slot, arm }, out);
                 }
                 match result.sensors.first() {
-                    Some(sensor) => format!("Not armed: {sensor} is open"),
-                    None => "Not armed: something is open".into(),
+                    Some(sensor) => tr!("alarm.note_not_armed_one", name = sensor),
+                    None => tr!("alarm.note_not_armed").into(),
                 }
             }
-            "locked" => "Too many tries".into(),
+            "locked" => tr!("alarm.too_many_tries").into(),
             "rejected" => match result.tries {
-                Some(tries) if tries > 0 => format!("Not accepted · {tries} {} left", if tries == 1 { "try" } else { "tries" }),
-                _ => "Not accepted".into(),
+                Some(1) => tr!("alarm.note_rejected_one_try").into(),
+                Some(tries) if tries > 0 => tr!("alarm.note_rejected_tries", tries = tries),
+                _ => tr!("alarm.note_rejected").into(),
             },
-            _ => "That didn't work: see Home Assistant".into(),
+            _ => tr!("alarm.note_failed").into(),
         };
         out.push(Effect::ClickLow);
         self.alarm_note = Some((note, now));
@@ -2315,7 +2316,7 @@ impl Machine {
         }
         if self.alarm_wait.is_some_and(|at| now.duration_since(at) >= ALARM_WAIT) {
             self.alarm_wait = None;
-            self.alarm_note = Some(("No answer from Home Assistant".into(), now));
+            self.alarm_note = Some((tr!("alarm.note_no_answer").into(), now));
             if let Mode::AlarmPad { slot, arm, at, .. } = self.mode.clone() {
                 self.mode = Mode::AlarmPad { slot, arm, at, entered: Code::default() };
             }
