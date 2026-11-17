@@ -609,14 +609,15 @@ impl Bridge {
         if can_heat && can_cool {
             modes.push("heat_cool");
         }
-        // What the unit's screen shows.
+        // What the unit's screen shows; Home Assistant takes a step in its own
+        // unit, unconverted.
         let precision = if sprint(dev.get("temperature_scale")) == "F" { 1.0 } else { 0.5 };
         let mut climate = fields!{
             "state_topic" => Value::Null,
             "modes" => modes,
             "temperature_unit" => "C",
             "precision" => num(precision),
-            "temp_step" => 0.5,
+            "temp_step" => num(precision),
             "min_temp" => 9,
             "max_temp" => 32,
             "mode_state_topic" => st.clone(),
@@ -908,10 +909,10 @@ impl Bridge {
             add("number", key, name, c);
         };
         if can_heat {
-            number_entity(&mut add, "away_temperature_low", "Eco heat temperature", ECO_LOW.0, ECO_LOW.1, 0.5, "°C", "temperature");
+            number_entity(&mut add, "away_temperature_low", "Eco heat temperature", ECO_LOW.0, ECO_LOW.1, precision, "°C", "temperature");
         }
         if can_cool {
-            number_entity(&mut add, "away_temperature_high", "Eco cool temperature", ECO_HIGH.0, ECO_HIGH.1, 0.5, "°C", "temperature");
+            number_entity(&mut add, "away_temperature_high", "Eco cool temperature", ECO_HIGH.0, ECO_HIGH.1, precision, "°C", "temperature");
         }
         if truthy(dev.get("has_humidifier")) || truthy(dev.get("has_dehumidifier")) {
             number_entity(&mut add, "target_humidity", "Target humidity", 10.0, 60.0, 5.0, "%", "");
@@ -1479,6 +1480,7 @@ pub mod tests {
         let climate: Value = serde_json::from_str(&configs["homeassistant/climate/nestlocal_s/thermostat/config"]).unwrap();
         assert_eq!(climate["modes"], json!(["off", "heat"]));
         assert_eq!(climate["precision"], json!(1));
+        assert_eq!(climate["temp_step"], json!(1));
         assert_eq!(climate["name"], Value::Null);
         assert!(climate.get("state_topic").is_none() && climate.get("temperature_low_command_topic").is_none());
         assert!(configs.contains_key("homeassistant/binary_sensor/nestlocal_s/heating/config"));
