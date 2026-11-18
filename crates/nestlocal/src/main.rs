@@ -11,6 +11,7 @@ mod commands;
 mod demand;
 mod device;
 mod doom;
+mod durable;
 mod entropy;
 mod flags;
 mod health;
