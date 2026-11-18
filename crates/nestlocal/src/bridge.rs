@@ -474,6 +474,11 @@ impl Bridge {
         }
     }
 
+    /// Whether the connection needs the unit awake for now (wake.rs).
+    pub fn holds_awake(&self) -> bool {
+        self.mqtt.get().is_some_and(mqtt::Client::holds_awake)
+    }
+
     fn publish_availability(&self, alive: bool) {
         if let Some(c) = self.mqtt.get() {
             c.publish(&format!("{}/availability", self.base), if alive { "online" } else { "offline" }.as_bytes(), 1, true);

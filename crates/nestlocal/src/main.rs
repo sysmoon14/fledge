@@ -301,8 +301,10 @@ async fn run(config: flags::Config) {
     }
     if !config.wake_iface.is_empty() {
         let bridge = bridge.clone().filter(|_| broker_port.is_some());
-        wake::start(broker_port, config.matter, config.zigbee,
-                    config.wake_iface.clone(), move || if let Some(bridge) = &bridge { bridge.woke() });
+        let holding = bridge.clone();
+        wake::start(broker_port, config.matter, config.zigbee, config.wake_iface.clone(),
+                    move || if let Some(bridge) = &bridge { bridge.woke() },
+                    move || holding.as_ref().is_some_and(|bridge| bridge.holds_awake()));
     }
     if let Err(e) = settings_ui::init(config.matter, config.zigbee, config.doom) { logf!("settings UI: {e}"); }
     if config.doom {
