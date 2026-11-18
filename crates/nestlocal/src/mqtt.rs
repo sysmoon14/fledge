@@ -386,9 +386,11 @@ fn packet(header: u8, body: Vec<u8>) -> Vec<u8> {
 }
 
 fn connect_packet(o: &Options) -> Vec<u8> {
-    // Clean session, a will retained at QoS 1, and a user and password
-    // when there is a user.
-    let mut flags = 0x02 | 0x04 | 0x08 | 0x20;
+    // A session the broker keeps (no clean session): it holds the
+    // subscriptions and queues the QoS 1 commands sent while the unit is
+    // away, delivered when it connects again. A will retained at QoS 1, and
+    // a user and password when there is a user.
+    let mut flags = 0x04 | 0x08 | 0x20;
     if o.user.is_some() {
         flags |= 0x80 | 0x40;
     }
@@ -518,7 +520,7 @@ pub mod tests {
                           will: ("nestlocal/S/availability".into(), b"offline".to_vec()), tls: None };
         let connect = connect_packet(&o);
         assert_eq!(&connect[..2], &[0x10, connect.len() as u8 - 2]);
-        assert_eq!(connect[9], 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80);
+        assert_eq!(connect[9], 0x04 | 0x08 | 0x20 | 0x40 | 0x80, "no clean session");
 
         let publish = encode(Request::Publish { topic: "t/x".into(), payload: vec![b'x'; 300], qos: 1, retain: true }, 7);
         let mut buf = BytesMut::from(&publish[..]);
@@ -577,7 +579,7 @@ pub mod tests {
         let o = Options { client_id: "c".into(), user: None, password: "ignored".into(),
                           will: ("w".into(), b"offline".to_vec()), tls: None };
         let connect = connect_packet(&o);
-        assert_eq!(connect[9], 0x02 | 0x04 | 0x08 | 0x20);
+        assert_eq!(connect[9], 0x04 | 0x08 | 0x20);
         assert!(connect.ends_with(b"\x00\x07offline"));
     }
 
