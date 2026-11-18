@@ -24,6 +24,7 @@ mod motion;
 mod nest_app;
 mod mqtt;
 mod mqtttls;
+mod network;
 mod nlsettings;
 mod occupancy;
 mod role;
@@ -244,6 +245,9 @@ async fn run(config: flags::Config) {
     // nestlocal.init holds nlclient back until here.
     let _ = std::fs::create_dir_all(settings_ui::DIR)
         .and_then(|()| std::fs::write(std::path::Path::new(settings_ui::DIR).join(NLCLIENT_MAY_START), b""));
+    // Before anything looks a name up: until it has read connman's services,
+    // network::up() does not wait.
+    network::start().await;
     if !config.ntp_server.is_empty() {
         tokio::spawn(clock::keep_clock(config.ntp_server.clone()));
     }

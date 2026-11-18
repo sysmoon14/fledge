@@ -70,6 +70,7 @@ pub async fn sntp(server: &str) -> std::io::Result<SystemTime> {
 pub async fn keep_clock(server: String) {
     let mut failed = false;
     loop {
+        crate::network::up().await;
         match sntp(&server).await {
             Ok(t) => {
                 failed = false;
