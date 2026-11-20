@@ -3457,6 +3457,8 @@ dependencies = [
  "embassy-time-queue-utils",
  "fledge-pixels",
  "futures-lite",
+ "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "http-body",
  "http-body-util",
  "hyper",
