@@ -128,6 +128,7 @@ as its firmware takes no press from Fledge.
 | Device | Codename | SoC | MQTT | Matter (Wi-Fi) | Matter (Thread) | Zigbee |
 |-|-|-|-|-|-|-|
 | Nest Learning Thermostat (3rd generation) | `diamond3` | i.MX6SoloX | Tested | Tested | Tested | Tested |
+| Nest Learning Thermostat (2nd generation) | `j49` | TI AM3703 | Tested with Fledge | Untested | Untested | Untested |
 
 *Tested*: on a unit, by upstream unfr0zen, before Fledge's changes. Fledge
 itself has been tested on these:
@@ -162,6 +163,7 @@ network doesn't need internet access.
 | Device | Nest firmware |
 |-|-|
 | Nest Learning Thermostat (3rd generation) | 5.9.4-5, 6.3-5, 6.4-8, 6.5-14 |
+| Nest Learning Thermostat (2nd generation) | 5.9.4-5 |
 
 Other versions aren't blocked: Fledge patches them on their structure and
 keeps the stock nlclient beside the run log. Running a version not listed here?
