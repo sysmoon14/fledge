@@ -88,3 +88,11 @@ The version comes from `git describe --tag --always --dirty`.
 
 - macOS universal app bundle: `sh utils/make_macos_app.sh` → `dist/Fledge.app`
 - Linux desktop entry and icon: `sh utils/install_linux.sh`
+
+## How many people use it
+
+`python3 utils/usage-stats.py` reads each release's download counts from
+GitHub: app downloads by platform, and how many thermostats fetched each
+release's `nestlocal-armv7` through Home Assistant's update entity. Nothing is
+sent from users' thermostats or Home Assistant; the numbers are downloads, not
+people, so read them as a trend.
