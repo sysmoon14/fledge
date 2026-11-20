@@ -96,6 +96,10 @@ impl Run {
         let worker = thread::spawn(move || {
             let mut progress = ChannelProgress { tx: tx.clone() };
             let result = job(&mut progress, tx.clone(), flag).map_err(|e| e.to_string());
+            // A refusal outside any stage reaches the run log only here.
+            if let Err(error) = &result {
+                log::error!("{error}");
+            }
             let _ = tx.send(Event::Done(result));
         });
         Run { events, cancel, _worker: worker }
