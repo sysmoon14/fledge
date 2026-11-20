@@ -42,6 +42,10 @@
 //!                                      ON, OFF or {"on": true, "lease": 600}:
 //!                                      the boost runs on while asked
 //!                                      (hotwater.rs)
+//!   <prefix>/<serial>/set/time_zone    a tz database name (retained): the
+//!                                      zone the Nest's own screens and
+//!                                      schedule keep, from its next weather
+//!                                      fetch (weather.rs)
 //!   <prefix>/<serial>/set/raw/<bucket> merge a JSON object into a bucket
 //!                                      (anything the entities don't cover)
 

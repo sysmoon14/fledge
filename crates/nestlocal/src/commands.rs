@@ -653,6 +653,13 @@ impl Bridge {
 
             // Not a bucket: the unit's clock (clock.rs).
             "time" => self.time_answer(arg).map(|()| None),
+            // Not a bucket either: nlclient takes it from the weather answer.
+            "time_zone" => {
+                if self.outdoor.set_zone(arg)? {
+                    logf!("mqtt: time zone {arg}");
+                }
+                Ok(None)
+            }
 
             "heating_times" => {
                 // Days the command names replace theirs; apply turns learning
@@ -797,8 +804,16 @@ mod tests {
         let (_, f) = b.fields("fan_mode", "on").unwrap().unwrap();
         let ahead = f["fan_timer_timeout"].as_f64().unwrap() - chrono::Utc::now().timestamp() as f64;
         assert!((1795.0..=1801.0).contains(&ahead), "fan on: timeout {ahead} s from now, want the unit's 1800");
-        for (name, arg) in [("mode", "auto"), ("target", "99"), ("preset", "away"), ("nope", ""),
-                            ("outdoor_temperature", "unavailable"), ("outdoor_humidity", "101")] {
+        for (name, arg) in [
+            ("mode", "auto"),
+            ("target", "99"),
+            ("preset", "away"),
+            ("nope", ""),
+            ("outdoor_temperature", "unavailable"),
+            ("outdoor_humidity", "101"),
+            ("time_zone", "No/Such_Zone"),
+            ("time_zone", "../UTC"),
+        ] {
             assert!(b.fields(name, arg).is_err(), "{name} {arg} accepted");
         }
     }

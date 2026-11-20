@@ -66,6 +66,10 @@ const ANSWER_RETRY: Duration = Duration::from_secs(2);
 /// UTCTime's zero, 2000-01-01 UTC, in seconds since 1970.
 const ZIGBEE_EPOCH: u64 = 946_684_800;
 const NO_TIME: u32 = 0xFFFF_FFFF;
+/// The Time cluster's Time (UTCTime) and LocalTime (uint32, seconds since
+/// 2000 in local time) attributes.
+const TIME_ATTRIBUTE: u16 = 0x0000;
+const LOCAL_TIME: u16 = 0x0007;
 
 #[derive(Default)]
 struct PairingAttempt { deadline: Option<Instant>, stopped: bool }
@@ -466,7 +470,7 @@ impl Server {
         }
         let message = Incoming::read(&callback.params)?;
         if message.aps.cluster == TIME && message.aps.destination_endpoint == THERMOSTAT_ENDPOINT {
-            self.time_answer(&message.payload);
+            self.time_answer(nest, &message.payload);
         }
         if let Some((endpoint, answer)) = answer(nest, &message) {
             let to = (message.sender, message.aps.source_endpoint);
@@ -509,10 +513,10 @@ impl Server {
         Ok(())
     }
 
-    /// Reads the coordinator's Time attribute.
+    /// Reads the coordinator's Time and LocalTime attributes.
     fn ask_time(&mut self, ezsp: &mut Ezsp) -> Result<(), String> {
         self.sequence = self.sequence.wrapping_add(1);
-        let request = zcl::read_request(self.sequence, &[0x0000]);
+        let request = zcl::read_request(self.sequence, &[TIME_ATTRIBUTE, LOCAL_TIME]);
         if send(ezsp, (COORDINATOR, COORDINATOR_ENDPOINT), THERMOSTAT_ENDPOINT, TIME, &request)? {
             self.time_asked = Some((SystemTime::now(), self.sequence));
         }
@@ -520,23 +524,50 @@ impl Server {
         Ok(())
     }
 
-    /// Takes the coordinator's answer to ask_time, if `payload` is one and
-    /// came promptly: true when it set the clock.
-    fn time_answer(&mut self, payload: &[u8]) -> bool {
+    /// Takes the coordinator's answer to ask_time, if `payload` is one:
+    /// the time zone of LocalTime's offset from Time, and the time if it
+    /// came promptly. True when it set the clock.
+    fn time_answer(&mut self, nest: &Nest, payload: &[u8]) -> bool {
         let Some((sequence, values)) = zcl::read_response(payload) else {
             return false;
         };
         let Some((asked, _)) = self.time_asked.take_if(|(_, s)| *s == sequence) else {
             return false;
         };
-        let Some(Value::Utc(t)) = values.iter().find(|(id, _)| *id == 0x0000).map(|(_, v)| v) else {
+        let Some(Value::Utc(t)) = values.iter().find(|(id, _)| *id == TIME_ATTRIBUTE).map(|(_, v)| v) else {
             return false;
         };
-        if *t == NO_TIME || !clock::answer(asked, UNIX_EPOCH + Duration::from_secs(ZIGBEE_EPOCH + u64::from(*t)), "the Zigbee coordinator") {
+        if let Some(Value::U32(local)) = values.iter().find(|(id, _)| *id == LOCAL_TIME).map(|(_, v)| v) {
+            self.take_zone(nest, *t, *local);
+        }
+        if *t == NO_TIME
+            || !clock::answer(
+                asked,
+                UNIX_EPOCH + Duration::from_secs(ZIGBEE_EPOCH + u64::from(*t)),
+                "the Zigbee coordinator",
+            )
+        {
             return false;
         }
         self.next_time = Instant::now() + clock::RECHECK;
         true
+    }
+
+    /// Sets the unit's time zone to one at local's offset from t, both as
+    /// the coordinator read them, unless a zone came by name over MQTT.
+    fn take_zone(&self, nest: &Nest, t: u32, local: u32) {
+        if t == NO_TIME || local == NO_TIME || nest.bridge.outdoor.has_named_zone() {
+            return;
+        }
+        let offset = i64::from(local) - i64::from(t);
+        let Some(zone) = clock::offset_zone(Path::new(clock::ZONEINFO), offset) else {
+            return logf!("zigbee: no time zone keeps the coordinator's offset, {offset} s");
+        };
+        match nest.bridge.outdoor.set_offset_zone(&zone) {
+            Ok(true) => logf!("zigbee: time zone {zone}"),
+            Ok(false) => {}
+            Err(e) => logf!("zigbee: time zone {zone}: {e}"),
+        }
     }
 }
 
@@ -635,6 +666,7 @@ mod tests {
 
     #[test]
     fn the_coordinators_time_sets_the_clock_when_it_is_the_answer_to_the_last_ask() {
+        let nest = Nest::new(crate::bridge::tests::test_bridge());
         let mut server = Server {
             sequence: 0, reported: BTreeMap::new(), next_full: Instant::now(), pending: false,
             time_asked: Some((SystemTime::now(), 9)), next_time: Instant::now(),
@@ -647,20 +679,20 @@ mod tests {
             frame.extend(t.to_le_bytes());
             frame
         };
-        assert!(!server.time_answer(&answer(8, (now - ZIGBEE_EPOCH) as u32)), "another sequence");
+        assert!(!server.time_answer(&nest, &answer(8, (now - ZIGBEE_EPOCH) as u32)), "another sequence");
         assert!(server.time_asked.is_some());
-        assert!(server.time_answer(&answer(9, (now - ZIGBEE_EPOCH) as u32)));
+        assert!(server.time_answer(&nest, &answer(9, (now - ZIGBEE_EPOCH) as u32)));
         assert!(server.time_asked.is_none());
         assert!(server.next_time > Instant::now() + clock::RECHECK - Duration::from_secs(5));
         // No time in the answer, or asked nothing.
         server.time_asked = Some((SystemTime::now(), 10));
-        assert!(!server.time_answer(&answer(10, NO_TIME)));
+        assert!(!server.time_answer(&nest, &answer(10, NO_TIME)));
         server.time_asked = Some((SystemTime::now(), 11));
-        assert!(!server.time_answer(&[0x18, 11, 0x01, 0x00, 0x00, 0x86]));
-        assert!(!server.time_answer(&answer(12, 0)));
+        assert!(!server.time_answer(&nest, &[0x18, 11, 0x01, 0x00, 0x00, 0x86]));
+        assert!(!server.time_answer(&nest, &answer(12, 0)));
         // One that waited too long is not trusted.
         server.time_asked = Some((SystemTime::now() - clock::ANSWER - Duration::from_secs(1), 13));
-        assert!(!server.time_answer(&answer(13, (now - ZIGBEE_EPOCH) as u32)));
+        assert!(!server.time_answer(&nest, &answer(13, (now - ZIGBEE_EPOCH) as u32)));
     }
 
     #[test]
