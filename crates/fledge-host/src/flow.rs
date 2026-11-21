@@ -189,7 +189,7 @@ impl PatchInputs {
             overlay,
             mqtt,
             matter: matter.then(|| Matter::from_pairing_code(code.unwrap_or(nestlocal::DEFAULT_MATTER_CODE))).transpose()?,
-            wake_filter: if matter { assets::WAKE_FILTER.to_vec() } else { Vec::new() },
+            wake_filter: assets::WAKE_FILTER.to_vec(),
             thread: self.matter_thread.then(assets::thread),
             zigbee: self.zigbee,
             wwn_boiler: self.wwn_boiler,

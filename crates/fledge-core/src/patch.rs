@@ -120,8 +120,16 @@ const NLSLEEPD_START: (&str, &str) = (
     "\n ${STARTDAEMON} -q -b -m -p \"${NLSLEEPD_PID_FILE}\" -a ${NLSLEEPD_APP} ",
     "\n LD_PRELOAD=/nestlabs/lib/libwakefilter.so ${STARTDAEMON} -q -b -m -p \"${NLSLEEPD_PID_FILE}\" -a ${NLSLEEPD_APP} ");
 
-/// nlsleepd started with the wake pattern library for a unit with Matter, so
-/// that a controller looking the sleeping unit up wakes it; as stock without.
+/// Whether the unit gets the wake pattern library: with Matter, so that a
+/// controller looking the sleeping unit up wakes it, and on a gen 2 with MQTT,
+/// whose nlsleepd sets a pattern that keeps the broker's data from waking it
+/// (platform/common/wakefilter leaves that pattern out).
+fn wake_filter_installed(target: Device, options: &Options) -> bool {
+    !options.wake_filter.is_empty() && (options.matter.is_some() || (target == Device::J49 && options.mqtt.is_some()))
+}
+
+/// nlsleepd started with the wake pattern library when the unit gets it; as
+/// stock without.
 fn patch_wake_patterns(tree: &mut Tree, enabled: bool) -> Result<()> {
     let (stock, preloaded) = NLSLEEPD_START;
     let mut script = text(tree, NLSLEEP)?.replace(preloaded, stock);
@@ -469,8 +477,9 @@ pub struct Options {
     pub overlay: Option<Overlay>,
     pub mqtt: Option<Mqtt>,
     pub matter: Option<Matter>,
-    /// The library nlsleepd preloads for Matter (platform/common/wakefilter):
-    /// installed with Matter on a gen 2 or gen 3, removed without.
+    /// The library nlsleepd preloads (platform/common/wakefilter): installed
+    /// with Matter on a gen 2 or gen 3 and with MQTT on a gen 2, removed
+    /// without.
     pub wake_filter: Vec<u8>,
     /// Files for the optional onboard Thread transport.
     pub thread: Option<Overlay>,
@@ -678,7 +687,7 @@ pub fn patch_on_device(volume: &mut impl Volume, target: Device, options: &Optio
     if matches!(target, Device::Diamond3 | Device::J49) {
         fetch(volume, &mut tree, &mut originals, &[NLSLEEP], false, true)?;
         fetch(volume, &mut tree, &mut originals, &[WAKE_FILTER], false, false)?;
-        let wake = options.matter.is_some() && !options.wake_filter.is_empty();
+        let wake = wake_filter_installed(target, options);
         if wake {
             tree.insert(WAKE_FILTER.into(), (options.wake_filter.clone(), 0o755));
         }
@@ -1206,6 +1215,21 @@ mod tests {
         assert_eq!(script(&tree), preloaded);
         patch_wake_patterns(&mut tree, false).unwrap();
         assert_eq!(script(&tree), SCRIPT);
+    }
+
+    #[test]
+    fn a_gen_2_with_mqtt_gets_the_wake_pattern_library_and_a_gen_3_only_with_matter() {
+        let mqtt = Some(Mqtt { url: "tcp://b:1883".into(), ..Mqtt::default() });
+        let matter = Some(Matter::from_pairing_code(nestlocal::DEFAULT_MATTER_CODE).unwrap());
+        let library = b"\x7fELF library".to_vec();
+        let with_mqtt = Options { mqtt, wake_filter: library.clone(), ..options() };
+        assert!(wake_filter_installed(Device::J49, &with_mqtt));
+        assert!(!wake_filter_installed(Device::Diamond3, &with_mqtt));
+        let with_matter = Options { matter, wake_filter: library.clone(), ..options() };
+        assert!(wake_filter_installed(Device::J49, &with_matter));
+        assert!(wake_filter_installed(Device::Diamond3, &with_matter));
+        assert!(!wake_filter_installed(Device::J49, &Options { wake_filter: library, ..options() }));
+        assert!(!wake_filter_installed(Device::J49, &Options { wake_filter: Vec::new(), ..with_mqtt }));
     }
 
     #[test]

@@ -12,8 +12,9 @@
 //!   whatever its patterns: it answers those on its own wakes.
 //!
 //! nestlocal lists a pattern for each in `LIST`, and the library preloaded
-//! into nlsleepd (platform/common/wakefilter, which the app installs
-//! and names in nlsleepd's init script with Matter) adds them to
+//! into nlsleepd (platform/common/wakefilter, which the app installs and
+//! names in nlsleepd's init script with Matter, and on a gen 2 with MQTT
+//! too) adds them to
 //! nlsleepd's before each sleep: a line a pattern, `OFFSET MASK PATTERN`, the
 //! offset into the frame in decimal, nl80211's mask (a bit a pattern byte,
 //! least significant first) and the bytes in hex.

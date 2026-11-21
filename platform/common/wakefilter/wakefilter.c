@@ -9,6 +9,14 @@
  * least significant first) and the pattern bytes in hex. The chip takes
  * MAX_PATTERNS: nlsleepd's come first and the list fills what is left.
  *
+ * One of the gen 2's nlsleepd patterns is left out: a TCP segment from the
+ * broker with ACK alone set. The WL1271 takes it as one that must not wake
+ * the unit, and a segment of data without PSH (all but the last of a message
+ * longer than one) is one too: with it the unit sleeps through the segment
+ * and every retransmission until the broker times the connection out. A
+ * bare ACK wakes the unit instead, which costs no measurable battery. The
+ * gen 3's nlsleepd sets no such pattern.
+ *
  * Whatever nlsleepd's init script runs on the way to it is preloaded with
  * this too, and has no libnl: its functions are weak references, used only
  * where nl_send_auto_complete is called, and once in a process with libnl
@@ -128,6 +136,29 @@ static void add_listed(struct nl_msg *msg, int count)
 	}
 }
 
+/* Whether a pattern entry is nlsleepd's for IPv4 TCP whose flags byte (frame
+ * byte 47) must be ACK alone. */
+static int ack_only(struct nlattr *entry)
+{
+	struct nlattr *a;
+	u8 *mask = 0, *pattern = 0;
+	int mask_len = 0, pattern_len = 0;
+
+	FOR_EACH_ATTR(a, entry + 1, (u8 *)entry + entry->len) {
+		if ((a->type & NLA_TYPE_MASK) == NL80211_PKTPAT_MASK) {
+			mask = (u8 *)(a + 1);
+			mask_len = a->len - 4;
+		} else if ((a->type & NLA_TYPE_MASK) == NL80211_PKTPAT_PATTERN) {
+			pattern = (u8 *)(a + 1);
+			pattern_len = a->len - 4;
+		}
+	}
+	return mask && pattern && pattern_len == 48 && mask_len >= 6 &&
+	       (mask[1] & 0x30) == 0x30 && pattern[12] == 0x08 && pattern[13] == 0x00 &&
+	       (mask[2] & 0x80) && pattern[23] == 6 &&
+	       (mask[5] & 0x80) && pattern[47] == 0x10;
+}
+
 /* The message with the list's patterns added to its triggers, or NULL when
  * it is not one that enables wake on WLAN. */
 static struct nl_msg *with_listed(struct nlmsghdr *hdr)
@@ -167,7 +198,7 @@ static struct nl_msg *with_listed(struct nlmsghdr *hdr)
 		if ((sub->type & NLA_TYPE_MASK) != NL80211_WOWLAN_TRIG_PKT_PATTERN)
 			continue;
 		FOR_EACH_ATTR(entry, sub + 1, (u8 *)sub + sub->len)
-			if (nla_put(msg, ++count, entry->len - 4, entry + 1) < 0)
+			if (!ack_only(entry) && nla_put(msg, ++count, entry->len - 4, entry + 1) < 0)
 				goto failed;
 	}
 	add_listed(msg, count);
