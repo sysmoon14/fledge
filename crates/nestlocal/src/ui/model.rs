@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use crate::{locale, tr};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct Cards {
@@ -733,13 +734,8 @@ impl AlarmCard {
     /// A mode's name on the Nest: as Fledge was told, else Home Assistant's.
     pub fn mode_name(&self, mode: &str) -> String {
         let named = self.modes.iter().find(|m| m.mode == mode).map(|m| m.name.trim()).filter(|n| !n.is_empty());
-        named.map(str::to_owned).unwrap_or_else(|| match mode {
-            "home" => "Home".into(),
-            "away" => "Away".into(),
-            "night" => "Night".into(),
-            "vacation" => "Vacation".into(),
-            "custom_bypass" => "Custom".into(),
-            other => other.replace('_', " "),
+        named.map(str::to_owned).unwrap_or_else(|| {
+            locale::named("alarm_mode", mode).map_or_else(|| mode.replace('_', " "), str::to_owned)
         })
     }
 
@@ -984,12 +980,12 @@ impl ClimateChoice {
     /// Its name, as Home Assistant's more-info shows it.
     pub fn title(self) -> &'static str {
         match self {
-            ClimateChoice::Mode => "Mode",
-            ClimateChoice::Fan => "Fan",
-            ClimateChoice::Preset => "Preset",
-            ClimateChoice::Swing => "Swing",
-            ClimateChoice::SwingHorizontal => "Horizontal swing",
-            ClimateChoice::HotWater => "Hot water boost",
+            ClimateChoice::Mode => tr!("choice.mode"),
+            ClimateChoice::Fan => tr!("choice.fan"),
+            ClimateChoice::Preset => tr!("choice.preset"),
+            ClimateChoice::Swing => tr!("choice.swing"),
+            ClimateChoice::SwingHorizontal => tr!("choice.swing_horizontal"),
+            ClimateChoice::HotWater => tr!("choice.hot_water"),
         }
     }
 
@@ -1129,12 +1125,12 @@ impl Asked {
     pub fn reason(&self) -> String {
         match self.phase.as_str() {
             "heating" => match self.rooms.as_slice() {
-                [] => "Heat wanted".into(),
-                [one] => format!("{one} wants heat"),
-                more => format!("{} rooms want heat", more.len()),
+                [] => tr!("nest.heat_wanted").into(),
+                [one] => tr!("nest.room_wants_heat", room = one),
+                more => tr!("nest.rooms_want_heat", count = more.len()),
             },
-            "idle" => "No rooms want heat".into(),
-            _ => "On its own schedule".into(),
+            "idle" => tr!("nest.no_rooms_want_heat").into(),
+            _ => tr!("nest.own_schedule").into(),
         }
     }
 }
@@ -1162,7 +1158,7 @@ impl Nest {
         let fan_mode = s.get("fan_mode").and_then(Value::as_str).map(str::to_owned).filter(|_| on("has_fan"));
         let card = ClimateCard {
             id: "nest".into(),
-            name: "Thermostat".into(),
+            name: tr!("nest.thermostat").into(),
             icon: String::new(),
             mode: text("mode"),
             action: text("action"),
