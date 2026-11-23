@@ -51,6 +51,8 @@ pub fn lookup(name: &str, entity: &str) -> Option<Icon> {
         "lights" => "mdi:lightbulb-group",
         "settings" => "mdi:cog",
         "back" => "mdi:arrow-left",
+        // A notification whose icon this doesn't carry: its bell, not nothing.
+        "alert" => "mdi:bell-ring",
         _ => return None,
     };
     icons.get(fallback).copied()
@@ -59,6 +61,13 @@ pub fn lookup(name: &str, entity: &str) -> Option<Icon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notification_s_unknown_icon_is_its_bell() {
+        assert_eq!(lookup("mdi:microsoft-teams", "alert"), lookup("mdi:bell-ring", ""));
+        assert!(lookup("mdi:microsoft-teams", "").is_none());
+        assert_eq!(lookup("mdi:doorbell", "alert"), lookup("mdi:doorbell", ""), "one it carries: itself");
+    }
 
     #[test]
     fn finds_home_assistants_names_and_falls_back_by_domain() {
