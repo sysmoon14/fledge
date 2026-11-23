@@ -153,6 +153,7 @@
   "menu.face_hint": "Press to do it",
   "menu.face_off": "Off · press to turn it on",
   "menu.face_on": "On · press to turn it off",
+  "menu.source": "Source",
   "menu.members": "Each light",
   "menu.members_hint": "Press to switch each one",
   "menu.minutes_left": "{minutes} min left",

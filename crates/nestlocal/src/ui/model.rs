@@ -1312,6 +1312,12 @@ pub struct MediaCard {
     pub position_at: Option<f64>,
     #[serde(default)]
     pub duration: Option<f64>,
+    /// The inputs or outputs it can play from (Home Assistant's source
+    /// list), and the one it's on: a list on its menu.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 impl MediaCard {
@@ -1574,6 +1580,8 @@ pub enum Command {
     Climate(String, ClimateChoice, String),
     /// A select's option.
     Select(String, String),
+    /// A media player's source, by name.
+    Source(String, String),
     /// A cover's position, percent open; or open or closed whole.
     Position(String, u8),
     Open(String),
@@ -1607,6 +1615,7 @@ impl Command {
             Command::Previous(id) => json!({"id": id, "action": "previous"}),
             Command::Climate(id, choice, o) => json!({"id": id, "action": choice.action(), "option": o}),
             Command::Select(id, o) => json!({"id": id, "action": "select", "option": o}),
+            Command::Source(id, o) => json!({"id": id, "action": "source", "option": o}),
             Command::Position(id, p) => json!({"id": id, "action": "position", "value": p}),
             Command::Open(id) => json!({"id": id, "action": "open"}),
             Command::Close(id) => json!({"id": id, "action": "close"}),

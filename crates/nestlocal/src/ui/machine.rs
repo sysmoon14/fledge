@@ -363,6 +363,8 @@ pub enum Action {
     /// A media player's next and previous tracks.
     Next,
     Previous,
+    /// A media player's sources: a list to choose from.
+    Source,
     /// A climate's modes, fan speeds, presets, swing or horizontal swing:
     /// a list to choose from.
     Choose(ClimateChoice),
@@ -434,6 +436,8 @@ pub enum Mode {
     DialList { of: Dial, list: ClimateChoice, selected: usize },
     /// A light group's own lights, `selected` highlighted (its last row Back).
     Members { slot: usize, selected: usize },
+    /// A media player's sources, its Back row after them.
+    Sources { slot: usize, selected: usize },
     /// A cover, the ring setting how open (percent).
     CoverSet { slot: usize, value: u8 },
     /// The time, the weather and what's on, as someone comes near; a touch
@@ -485,7 +489,7 @@ impl Mode {
         match self {
             Mode::LightList { slot, .. } | Mode::LightDim { slot, .. } | Mode::LightWarmth { slot, .. }
             | Mode::LightHue { slot, .. } | Mode::Camera { slot }
-            | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. }
+            | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. } | Mode::Sources { slot, .. }
             | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::FaceView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
             | Mode::AlarmModes { slot, .. }
             | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
@@ -797,7 +801,7 @@ impl Machine {
                 Dial::Card(slot) => matches!(cards.cards.get(*slot), Some(Card::Climate(_))),
             },
             Mode::LightList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(_))),
-            Mode::Volume { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Media(_))),
+            Mode::Volume { slot, .. } | Mode::Sources { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Media(_))),
             Mode::Camera { slot } => matches!(cards.cards.get(*slot), Some(Card::Camera(_))),
             Mode::OptionList { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Options(_))),
             Mode::CoverSet { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Cover(_))),
@@ -1153,7 +1157,7 @@ impl Machine {
                     Mode::Home | Mode::Chooser(_) => CARD_STEP,
                     Mode::Menu { .. } => MENU_STEP,
                     Mode::LightList { .. } | Mode::OptionList { .. } | Mode::DialList { .. } | Mode::Members { .. }
-                    | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
+                    | Mode::Sources { .. } | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
                     | Mode::AlarmPad { .. } | Mode::AlarmModes { .. } => ROW_STEP,
                     Mode::Dial { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
@@ -1514,6 +1518,12 @@ impl Machine {
                     self.mode = Mode::Members { slot, selected };
                 }
             }
+            Mode::Sources { slot, selected } => {
+                if let Some(Card::Media(card)) = self.card(slot) {
+                    let selected = (selected as i32 + steps).clamp(0, card.sources.len() as i32) as usize;
+                    self.mode = Mode::Sources { slot, selected };
+                }
+            }
             Mode::CoverSet { slot, value } => {
                 if let Some(Card::Cover(card)) = self.card(slot) {
                     if card.positionable {
@@ -1653,9 +1663,11 @@ impl Machine {
             }
             view @ Mode::Volume { slot, .. } => {
                 let playing = matches!(self.card(slot), Some(Card::Media(m)) if m.state == "playing");
-                self.mode = Mode::Menu { view: Box::new(view),
-                                         actions: vec![Action::Back, Action::Play(!playing), Action::Previous, Action::Next],
-                                         selected: 0 };
+                let mut actions = vec![Action::Back, Action::Play(!playing), Action::Previous, Action::Next];
+                if matches!(self.card(slot), Some(Card::Media(m)) if !m.sources.is_empty()) {
+                    actions.push(Action::Source);
+                }
+                self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
             }
             view @ Mode::Dial { of, .. } => {
                 // Its target goes now; then its menu: its modes, fan
@@ -1694,6 +1706,19 @@ impl Machine {
                     }
                 }
                 self.go(Mode::Chooser(self.place(Slot::Card(slot))), out);
+            }
+            Mode::Sources { slot, selected } => {
+                // Chosen (or Back): back to its screen, the source on it.
+                if let Some(Card::Media(card)) = self.cards.cards.get_mut(slot) {
+                    if let Some(source) = card.sources.get(selected).cloned() {
+                        out.push(Effect::Send(Command::Source(card.id.clone(), source.clone())));
+                        card.source = Some(source);
+                    }
+                }
+                if let Some(Card::Media(card)) = self.card(slot) {
+                    let [low, high] = card.volume_ends();
+                    self.mode = Mode::Volume { slot, value: card.volume.unwrap_or(30.clamp(low, high)) };
+                }
             }
             Mode::DialList { of, list, selected } => {
                 if let Some(choice) = self.choices(of, list).0.get(selected).cloned() {
@@ -2162,6 +2187,13 @@ impl Machine {
                 self.mode = Mode::DialList { of, list, selected };
             }
             (Action::Members, Mode::LightDim { slot, .. }) => self.mode = Mode::Members { slot, selected: 0 },
+            (Action::Source, Mode::Volume { slot, .. }) => {
+                // On the source it's on now, if it says.
+                if let Some(Card::Media(card)) = self.card(slot) {
+                    let at = card.source.as_ref().and_then(|s| card.sources.iter().position(|o| o == s));
+                    self.mode = Mode::Sources { slot, selected: at.unwrap_or(0) };
+                }
+            }
             (Action::NestDial, _) => self.go(Mode::Native, out),
             (Action::Run, view @ Mode::ActionView { slot }) => {
                 self.run(slot, out);
@@ -2274,7 +2306,8 @@ impl Machine {
             return;
         }
         if matches!(self.mode, Mode::Dial { .. } | Mode::AlarmView { .. }
-                    | Mode::Camera { .. } | Mode::OptionList { .. } | Mode::DialList { .. } | Mode::Members { .. }) {
+                    | Mode::Camera { .. } | Mode::OptionList { .. } | Mode::DialList { .. } | Mode::Members { .. }
+                    | Mode::Sources { .. }) {
             // An open card with no main action to hold for: nothing. Its
             // menu's Back (or a press, on a camera) goes back.
             return;
@@ -4973,6 +5006,53 @@ mod tests {
         assert!(Rig::sends(&effects).contains(&Command::PlayPause("media_player.speaker".into())));
         assert!(matches!(&rig.machine.cards.cards[2], Card::Media(m) if m.state == "paused"));
         assert_eq!(rig.machine.mode, Mode::Volume { slot: 2, value: 25 });
+    }
+
+    fn monitor(sources: &str, source: &str) -> Cards {
+        Cards::parse(format!(r#"{{"cards":[{{"kind":"media","id":"media_player.monitor","name":"Monitor",
+            "state":"playing","volume":20,"sources":{sources},"source":{source}}}]}}"#).as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_media_player_s_menu_lists_its_sources_on_the_one_it_s_on() {
+        let mut rig = Rig::with(monitor(r#"["HDMI 1","Apollo (HDMI3)","Macbook (HDMI4)"]"#, r#""Macbook (HDMI4)""#));
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 20 });
+        rig.press();
+        let Mode::Menu { actions, .. } = &rig.machine.mode else { panic!("its menu") };
+        assert_eq!(actions.last(), Some(&Action::Source), "after the tracks");
+        rig.rows(4);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Sources { slot: 0, selected: 2 }, "on the source it's on");
+        rig.rows(-1);
+        assert_eq!(Rig::sends(&rig.press()), vec![Command::Source("media_player.monitor".into(), "Apollo (HDMI3)".into())]);
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 0, value: 20 }, "back to its screen");
+        assert!(matches!(&rig.machine.cards.cards[0], Card::Media(m) if m.source.as_deref() == Some("Apollo (HDMI3)")));
+        // Its Back row, past the sources: nothing sent.
+        rig.press();
+        rig.rows(4);
+        rig.press();
+        rig.rows(5);
+        assert!(Rig::sends(&rig.press()).is_empty());
+        assert!(matches!(rig.machine.mode, Mode::Volume { .. }));
+    }
+
+    #[test]
+    fn a_media_player_without_sources_has_no_source_item() {
+        let mut rig = Rig::with(monitor("[]", "null"));
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        rig.turn(CARD_STEP);
+        rig.press();
+        rig.press();
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. } if !actions.contains(&Action::Source)));
+        assert_eq!(Command::Source("media_player.m".into(), "HDMI 1".into()).payload(),
+                   serde_json::json!({"id": "media_player.m", "action": "source", "option": "HDMI 1"}));
     }
 
     #[test]

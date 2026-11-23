@@ -2091,6 +2091,16 @@ impl Runtime {
                 Card::Options(card) => Screen::OptionList { card: Cow::Borrowed(card), selected: *selected },
                 _ => return None,
             },
+            Mode::Sources { slot, selected } => match card(*slot)? {
+                Card::Media(card) => Screen::OptionList { card: Cow::Owned(OptionsCard {
+                    id: card.id.clone(),
+                    name: format!("{} · {}", card.name, tr!("menu.source")),
+                    icon: String::new(),
+                    options: card.sources.clone(),
+                    current: card.source.clone(),
+                }), selected: *selected },
+                _ => return None,
+            },
             Mode::DialList { of, list, selected } => match machine.climate(*of) {
                 Some(card) => {
                     let (choices, now) = machine.choices(*of, *list);
@@ -2213,6 +2223,12 @@ impl Runtime {
         };
         // What each list is on now, so the menu says before it opens.
         let now = |action: &Action| {
+            if let (Action::Source, Mode::Volume { slot, .. }) = (action, view) {
+                return match self.machine.cards.cards.get(*slot) {
+                    Some(Card::Media(card)) => card.source.clone().filter(|s| !s.is_empty()),
+                    _ => None,
+                };
+            }
             let (Action::Choose(list), Mode::Dial { of, .. }) = (action, view) else { return None };
             if let (ClimateChoice::HotWater, Some(minutes)) = (list, self.machine.nest.as_ref()?.hot_water_boost) {
                 return Some(tr!("menu.minutes_left", minutes = minutes));
@@ -2602,7 +2618,7 @@ fn depth(mode: &Mode, machine: &Machine) -> u8 {
             Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
             _ => 1,
         },
-        Mode::Members { .. } | Mode::DialList { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
+        Mode::Members { .. } | Mode::Sources { .. } | Mode::DialList { .. } | Mode::SettingSet { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
         | Mode::AlarmPad { .. } | Mode::AlarmOpen { .. } | Mode::AlarmModes { .. } => 2,
         Mode::LightWarmth { slot, light, .. } | Mode::LightHue { slot, light, .. } => {
             depth(&Mode::LightDim { slot: *slot, light: *light, on: true, value: 0 }, machine) + 1
@@ -2789,6 +2805,17 @@ mod tests {
     }
 
     #[test]
+    fn every_menu_action_has_an_icon_it_carries() {
+        let actions = [Action::Back, Action::Switch(true), Action::Switch(false), Action::Play(true), Action::Play(false),
+                       Action::Warmth, Action::Colour, Action::Next, Action::Previous, Action::Members, Action::Source,
+                       Action::Open, Action::Close, Action::NestDial, Action::Run, Action::Face(0)];
+        for action in actions {
+            let (icon, ..) = menu_item(action, None);
+            assert!(icons::lookup(&icon, "").is_some(), "{action:?}: {icon}");
+        }
+    }
+
+    #[test]
     fn going_in_and_out_fades_and_the_rest_cuts() {
         let m = &machine_with_rooms();
         assert_eq!(transition(&Mode::Home, &Mode::Chooser(1), true, m), Transition::Cut, "the cards follow the ring");
@@ -2937,6 +2964,13 @@ fn menu_item(action: Action, now: Option<String>) -> (String, String, String) {
         Action::Next => ("mdi:skip-next", tr!("menu.next"), tr!("menu.next_hint")),
         Action::Previous => ("mdi:skip-previous", tr!("menu.previous"), tr!("menu.previous_hint")),
         Action::Members => ("mdi:format-list-bulleted", tr!("menu.members"), tr!("menu.members_hint")),
+        Action::Source => {
+            let under = match now {
+                Some(now) => tr!("menu.choose_now", now = now),
+                None => tr!("menu.choose").to_owned(),
+            };
+            return ("mdi:volume-source".to_owned(), tr!("menu.source").to_owned(), under);
+        }
         Action::Open => ("mdi:arrow-up-bold", tr!("menu.open"), tr!("menu.open_hint")),
         Action::Close => ("mdi:arrow-down-bold", tr!("menu.close"), tr!("menu.close_hint")),
         Action::NestDial => ("mdi:thermometer", tr!("menu.nest_dial"), tr!("menu.nest_dial_hint")),
@@ -3569,6 +3603,14 @@ mod shots {
             current: Some("Off".into()) };
         save(&screens::draw(&fonts, &Screen::OptionsCard { card: &boost }, None), &format!("{out}/b1-options.png"));
         save(&screens::draw(&fonts, &Screen::OptionList { card: Cow::Borrowed(&boost), selected: 2 }, None), &format!("{out}/b2-option-list.png"));
+        let sources = OptionsCard {
+            id: "media_player.office_monitor".into(),
+            name: format!("Office Monitor · {}", tr!("menu.source")),
+            icon: String::new(),
+            options: ["HDMI 1", "HDMI 2", "Apollo (HDMI3)", "Macbook (HDMI4)", "Live TV"].map(String::from).to_vec(),
+            current: Some("Macbook (HDMI4)".into()),
+        };
+        save(&screens::draw(&fonts, &Screen::OptionList { card: Cow::Borrowed(&sources), selected: 2 }, None), &format!("{out}/b3-media-sources.png"));
         let blind = model::CoverCard { id: "cover.blind".into(), name: "Bedroom blind".into(), icon: String::new(),
             state: "open".into(), position: Some(60), positionable: true, position_limits: None, position_push: [false; 2] };
         save(&screens::draw(&fonts, &Screen::CoverCard { card: &blind }, None), &format!("{out}/b3-cover.png"));
@@ -3755,6 +3797,10 @@ mod shots {
             ("speaker", "Bedroom speaker".into(),
              vec![(Action::Back, None), (Action::Play(false), None), (Action::Previous, None), (Action::Next, None)],
              paint::MEDIA, 3),
+            ("monitor", "Office Monitor".into(),
+             vec![(Action::Back, None), (Action::Play(false), None), (Action::Previous, None), (Action::Next, None),
+                  (Action::Source, Some("Macbook (HDMI4)".into()))],
+             paint::MEDIA, 4),
             ("thermostat", tr!("nest.thermostat").into(),
              vec![(Action::Back, None), lists(ClimateChoice::Mode, "heat"),
                   (Action::Choose(ClimateChoice::HotWater), Some(tr!("menu.minutes_left", minutes = 30))),
