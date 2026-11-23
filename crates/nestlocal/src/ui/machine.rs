@@ -937,7 +937,17 @@ impl Machine {
         self.kept_on = on;
         // Either way, what shows times out afresh from now.
         self.last_input = now;
-        if !on || self.mode != Mode::Home || self.turn != 0 {
+        if on {
+            self.show_kept(now, lit, out);
+        }
+    }
+
+    /// Kept on, at rest: what Home Assistant chose for across the room
+    /// shows, as being seen would; black, the backlight off, for nothing. As
+    /// it's turned on, and whenever the screen comes to rest while it's on
+    /// (the cards ready after a restart, the Nest's own screens left).
+    fn show_kept(&mut self, now: Instant, lit: bool, out: &mut Vec<Effect>) {
+        if self.mode != Mode::Home || self.turn != 0 {
             return;
         }
         let far = self.cards.far();
@@ -2899,6 +2909,10 @@ impl Machine {
                     self.settings_open = false;
                     self.go(Mode::Home, out);
                 }
+                return;
+            }
+            Mode::Home if self.kept_on && lit => {
+                self.show_kept(now, lit, out);
                 return;
             }
             Mode::Idle | Mode::Home => return,
@@ -4969,6 +4983,28 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Glance, "the cards time out to the glance");
         rig.wait(Duration::from_secs(120));
         assert_eq!(rig.machine.mode, Mode::Glance);
+    }
+
+    #[test]
+    fn kept_on_before_the_cards_are_ready_shows_them_once_they_are() {
+        for (far, shows) in [("wake", "card"), ("glance", "glance"), ("dark", "dark")] {
+            let (mut rig, _) = holding(presence(far, "none"));
+            let mut out = vec![];
+            // Home Assistant's retained Keep screen on, as nestlocal starts:
+            // the cards not up yet (nlclient's screen).
+            rig.machine.mode = Mode::Native;
+            rig.machine.keep_on(true, rig.now, true, &mut out);
+            assert_eq!(rig.machine.mode, Mode::Native, "{far}: nothing to show over yet");
+            // The cards take the display, at rest.
+            rig.machine.mode = Mode::Home;
+            rig.wait(Duration::from_secs(1));
+            match shows {
+                "card" => assert!(matches!(rig.machine.mode, Mode::Chooser(_) | Mode::Dial { .. }),
+                                  "{far}: what it wakes to, not a blank screen: {:?}", rig.machine.mode),
+                "glance" => assert_eq!(rig.machine.mode, Mode::Glance),
+                _ => assert!(rig.machine.mode == Mode::Home && rig.machine.backlight_off(), "dark, backlight off"),
+            }
+        }
     }
 
     #[test]
