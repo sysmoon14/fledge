@@ -231,6 +231,9 @@ pub const NATIVE_IDLE: Duration = Duration::from_secs(5);
 /// What Home Assistant wakes the Nest to changed: a screen left this long
 /// untouched moves to it (an automation's choice, or Automatic's).
 pub const FOLLOW_WAKE: Duration = Duration::from_secs(5);
+/// Following it, each step of the way (out to the cards, across to its
+/// card, into it) shows at least this long, and until the cards rest.
+pub const JOURNEY_STEP: Duration = Duration::from_millis(450);
 /// How often the unit is held awake again while a card shows.
 pub const KEEP: Duration = Duration::from_secs(4);
 /// The least time between commands while turning.
@@ -609,6 +612,12 @@ pub struct Machine {
     /// What waking shows changed, and the screen hasn't followed yet
     /// (FOLLOW_WAKE); a hand on it drops it.
     wake_moved: bool,
+    /// Following what waking shows, the way a hand would: out to the cards
+    /// (stage 0), across to its card (1), then into it; and since when.
+    pub journey: Option<(u8, Instant)>,
+    /// Whether the cards on screen have come to rest (the runtime says;
+    /// a journey's next step waits for it).
+    pub cards_settled: bool,
     /// Each alarm's state as last heard, by entity: one coming to need
     /// whoever's there (its entry delay, going off) takes the screen.
     alarm_states: std::collections::HashMap<String, String>,
@@ -643,7 +652,7 @@ impl Machine {
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, trial: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
-            rests: false, near_at: None, kept_dark: false, kept_on: false, wake_moved: false, floor: None, push: None, alarm_states: Default::default(), alarm_takeover: None,
+            rests: false, near_at: None, kept_dark: false, kept_on: false, wake_moved: false, journey: None, cards_settled: true, floor: None, push: None, alarm_states: Default::default(), alarm_takeover: None,
             alarm_code: None, alarm_arming: None, alarm_wait: None, alarm_note: None, alarm_locked: None,
             alarm_open: Vec::new(), alarm_drawn: None, expected: Vec::new(), reported: Cards::default(), trails: Vec::new(),
         }
@@ -1024,8 +1033,9 @@ impl Machine {
         let pause = now.duration_since(self.last_input);
         self.last_input = now;
         // A hand on it: whatever it does shows, lit; Home Assistant's new
-        // choice waits for the next wake.
+        // choice waits for the next wake, and the hand takes over a journey.
         self.wake_moved = false;
+        self.journey = None;
         self.kept_dark = false;
         match (&self.mode, input) {
             (Mode::Idle, _) => return,
@@ -1198,16 +1208,56 @@ impl Machine {
             Wake::Thermostat => matches!(self.mode, Mode::Dial { of: Dial::Nest, .. }),
             Wake::Chooser => matches!(self.mode, Mode::Chooser(_)),
         };
-        if !shows {
-            logf!("ui: Home Assistant's wake changed: following it");
-            self.last_input = now;
-            self.wake(out);
+        if shows {
+            return;
         }
+        logf!("ui: Home Assistant's wake changed: following it");
+        self.last_input = now;
+        if !matches!(self.mode, Mode::Chooser(_)) {
+            // Out to the cards, on the card this was.
+            let from = match &self.mode {
+                Mode::Dial { of: Dial::Nest, .. } => Slot::Thermostat,
+                mode => mode.card_slot().unwrap_or(Slot::Thermostat),
+            };
+            self.go(Mode::Chooser(self.place(from)), out);
+        }
+        self.journey = Some((0, now));
+    }
+
+    /// The journey's next step, once the last has shown long enough and
+    /// the cards rest: across to the card waking shows, then into it as a
+    /// press would (zooming in). Anything else showing ends it.
+    fn journey_step(&mut self, now: Instant, out: &mut Vec<Effect>) {
+        let Some((stage, at)) = self.journey else { return };
+        if !matches!(self.mode, Mode::Chooser(_)) || self.alarm_urgent() {
+            self.journey = None;
+            return;
+        }
+        if now.duration_since(at) < JOURNEY_STEP || !self.cards_settled {
+            return;
+        }
+        self.last_input = now;
+        let target = match self.cards.wake() {
+            Wake::Card(slot) => self.place(Slot::Card(slot)),
+            Wake::Thermostat | Wake::Chooser => self.place(Slot::Thermostat),
+        };
+        if stage == 0 && self.mode != Mode::Chooser(target) {
+            self.journey = Some((1, now));
+            self.go(Mode::Chooser(target), out);
+            return;
+        }
+        self.journey = None;
+        self.show_wake(out);
     }
 
     /// The display lit: what Home Assistant chose shows, as it lights.
     fn wake(&mut self, out: &mut Vec<Effect>) {
         self.woke = true;
+        self.show_wake(out);
+    }
+
+    /// What waking shows, from wherever the screen is.
+    fn show_wake(&mut self, out: &mut Vec<Effect>) {
         match self.cards.wake() {
             Wake::Chooser => {
                 self.hint = true;
@@ -2858,6 +2908,7 @@ impl Machine {
         if self.wake_moved && idle >= FOLLOW_WAKE {
             self.follow_wake(now, out);
         }
+        self.journey_step(now, out);
         if let Mode::Camera { slot } = self.mode {
             // While it shows, a new picture every few seconds.
             if self.pictured.is_none_or(|at| now.duration_since(at) >= CAMERA_EVERY) {
@@ -4747,7 +4798,19 @@ mod tests {
         rig.wait(FOLLOW_WAKE - Duration::from_secs(1));
         assert_eq!(rig.machine.mode.card_slot(), Some(Slot::Card(0)), "not at once");
         rig.wait(Duration::from_secs(1));
-        assert_eq!(rig.machine.mode.card_slot(), Some(Slot::Card(1)), "untouched: B now");
+        let (a, b) = (rig.machine.place(Slot::Card(0)), rig.machine.place(Slot::Card(1)));
+        assert_eq!(rig.machine.mode, Mode::Chooser(a), "untouched: out to the cards, on A");
+        rig.machine.cards_settled = false;
+        rig.wait(JOURNEY_STEP * 2);
+        assert_eq!(rig.machine.mode, Mode::Chooser(a), "the cards still zooming: it waits");
+        rig.machine.cards_settled = true;
+        rig.wait(MS * 100);
+        assert_eq!(rig.machine.mode, Mode::Chooser(b), "across to B");
+        rig.wait(JOURNEY_STEP - MS * 100);
+        assert_eq!(rig.machine.mode, Mode::Chooser(b), "B shows a moment");
+        rig.wait(MS * 100);
+        assert_eq!(rig.machine.mode.card_slot(), Some(Slot::Card(1)), "then into B");
+        assert!(rig.machine.journey.is_none());
         // A hand on it: Home Assistant's next choice waits for the next wake.
         rig.machine.set_cards(waking_to("0", "wake"), &mut out);
         rig.turn(1);
@@ -4755,7 +4818,7 @@ mod tests {
         assert_eq!(rig.machine.mode.card_slot(), Some(Slot::Card(1)), "touched: stays");
         rig.machine.set_cards(waking_to("\"chooser\"", "wake"), &mut out);
         rig.wait(FOLLOW_WAKE * 3);
-        assert!(matches!(rig.machine.mode, Mode::Chooser(_)), "the chooser");
+        assert_eq!(rig.machine.mode, Mode::Chooser(rig.machine.place(Slot::Thermostat)), "the chooser, on the thermostat");
         // The same cards again: nothing moves.
         rig.machine.set_cards(waking_to("\"chooser\"", "wake"), &mut out);
         rig.turn(CARD_STEP);
@@ -4763,6 +4826,20 @@ mod tests {
         let at = rig.machine.mode.clone();
         rig.wait(FOLLOW_WAKE * 3);
         assert_eq!(rig.machine.mode, at);
+    }
+
+    #[test]
+    fn a_hand_on_the_ring_ends_the_journey_where_it_is() {
+        let (mut rig, _) = holding(waking_to("0", "wake"));
+        let mut out = vec![];
+        rig.machine.keep_on(true, rig.now, true, &mut out);
+        rig.machine.set_cards(waking_to("1", "wake"), &mut out);
+        rig.wait(FOLLOW_WAKE);
+        assert!(rig.machine.journey.is_some() && matches!(rig.machine.mode, Mode::Chooser(_)));
+        rig.turn(1);
+        assert!(rig.machine.journey.is_none(), "the hand's now");
+        rig.wait(Duration::from_secs(5));
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)), "left where the hand has it");
     }
 
     #[test]

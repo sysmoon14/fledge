@@ -899,6 +899,7 @@ impl Runtime {
                     self.machine.input(Input::NativeBack, now, lit, &mut effects);
                 }
             }
+            self.machine.cards_settled = !self.moving();
             let display = &mut self.display;
             self.machine.tick(now, lit, &mut || home_dial(display), &mut effects);
             let off = self.machine.backlight_off();
@@ -2624,7 +2625,8 @@ fn transition(before: &Mode, after: &Mode, turned: bool, machine: &Machine) -> T
     if before == after || same_view || !(before.owning() || after.owning()) || *after == Mode::Native {
         return Transition::Cut;
     }
-    if cards(before) && cards(after) && turned {
+    if cards(before) && cards(after) && (turned || machine.journey.is_some()) {
+        // The ring, or a journey to what waking shows: the cards slide.
         return Transition::Cut;
     }
     match (before, after) {
@@ -2791,6 +2793,10 @@ mod tests {
         let m = &machine_with_rooms();
         assert_eq!(transition(&Mode::Home, &Mode::Chooser(1), true, m), Transition::Cut, "the cards follow the ring");
         assert_eq!(transition(&Mode::Chooser(4), &Mode::Home, true, m), Transition::Cut);
+        let mut journeying = machine_with_rooms();
+        journeying.journey = Some((1, Instant::now()));
+        assert_eq!(transition(&Mode::Chooser(0), &Mode::Chooser(2), false, &journeying), Transition::Cut,
+                   "following what waking shows: the cards slide across");
         assert_eq!(transition(&Mode::Chooser(2), &Mode::Home, false, m), Transition::Fade, "left alone");
         let list = Mode::LightList { slot: 0, selected: 0 };
         assert_eq!(transition(&Mode::Chooser(1), &list, true, m), Transition::Fade, "onto a card's own screens");
