@@ -2698,6 +2698,21 @@ mod tests {
         assert!(back_chosen(&back) && !back_chosen(&settings) && !back_chosen(&eco) && !back_chosen(&dial_));
         assert!(settings_chosen(&settings) && !settings_chosen(&back) && !settings_chosen(&eco));
         assert!(!dial(&vec![0; dial_.len()]), "black is not the dial");
+        for other in [&dial_, &back, &settings, &eco, &tile, &done] {
+            assert!(!off_dial(other), "only off is the off dial");
+        }
+    }
+
+    #[test]
+    fn the_gen_2_s_dial_is_known_while_the_thermostat_is_off() {
+        // Ben's gen 2, 2026-11-23: off, Eco's leaf, 23 °C now; no band of ticks.
+        let off = gen2_frame(include_bytes!("../testdata/gen2-off-dial.png"));
+        assert!(off_dial(&off) && dial(&off) && !settings_tile(&off), "Back and Done find it");
+        let mut busy = off.clone();
+        for px in busy.chunks_mut(4).step_by(97) {
+            px[..3].copy_from_slice(&[255, 255, 255]);
+        }
+        assert!(!off_dial(&busy), "white elsewhere (a menu's icons): not the off dial");
     }
 
     #[test]
@@ -3019,6 +3034,26 @@ mod gen2 {
         hit * 2 > total
     }
 
+    /// The dial while the thermostat is off: no ticks, its large white OFF
+    /// in the middle (about 720 pixels), and nothing else white (its menu's
+    /// icons are, its Settings tiles are blue). The gen 3's check at 2/3.
+    pub fn off_dial(page: &[u8]) -> bool {
+        let in_box = |x: usize, y: usize| (113..=207).contains(&x) && (137..=183).contains(&y);
+        if !(400..=2000).contains(&white_in(page, 113..208, 137..184)) {
+            return false;
+        }
+        let mut elsewhere = 0;
+        for x in (7..313).step_by(2) {
+            for y in (7..313).step_by(2) {
+                let (dx, dy) = (x as i32 - 160, y as i32 - 160);
+                if !in_box(x, y) && dx * dx + dy * dy < 153 * 153 {
+                    elsewhere += rgb(page, x, y).iter().all(|&c| c > 200) as u32;
+                }
+            }
+        }
+        elsewhere < 40
+    }
+
     /// The menu with Back chosen (as it opens): its arrow, bottom left, lit
     /// white (about 600 pixels; none with anything else chosen).
     pub fn back_chosen(page: &[u8]) -> bool {
@@ -3140,7 +3175,7 @@ fn blank(page: &[u8]) -> bool {
 /// Whether a frame shows nlclient's home dial: its ring lit around the edge.
 fn dial(page: &[u8]) -> bool {
     if gen2::page(page) {
-        return gen2::dial(page);
+        return gen2::dial(page) || gen2::off_dial(page);
     }
     if !gen3_page(page) {
         return false;
@@ -3168,7 +3203,7 @@ fn dial(page: &[u8]) -> bool {
 /// edge, its Settings tiles are blue).
 fn off_dial(page: &[u8]) -> bool {
     if gen2::page(page) {
-        return false; // the gen 2's: unmeasured, and its dial check needs neither
+        return gen2::off_dial(page);
     }
     if !gen3_page(page) {
         return false;
