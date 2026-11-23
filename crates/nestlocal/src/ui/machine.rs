@@ -600,6 +600,9 @@ pub struct Machine {
     /// Assistant asks (Far::Dark): the backlight goes off until anything
     /// shows (backlight_off).
     kept_dark: bool,
+    /// Home Assistant keeps the screen on (set/screen_on): nothing times out
+    /// to black but as it chose for across the room (keep_on).
+    pub kept_on: bool,
     /// Each alarm's state as last heard, by entity: one coming to need
     /// whoever's there (its entry delay, going off) takes the screen.
     alarm_states: std::collections::HashMap<String, String>,
@@ -634,7 +637,7 @@ impl Machine {
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, trial: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
-            rests: false, near_at: None, kept_dark: false, floor: None, push: None, alarm_states: Default::default(), alarm_takeover: None,
+            rests: false, near_at: None, kept_dark: false, kept_on: false, floor: None, push: None, alarm_states: Default::default(), alarm_takeover: None,
             alarm_code: None, alarm_arming: None, alarm_wait: None, alarm_note: None, alarm_locked: None,
             alarm_open: Vec::new(), alarm_drawn: None, expected: Vec::new(), reported: Cards::default(), trails: Vec::new(),
         }
@@ -896,10 +899,39 @@ impl Machine {
     /// one, until nlclient puts the display out (as it would its Farsight),
     /// rather than black on a lit display; else rest.
     fn left_alone(&self) -> Mode {
-        if self.cards.far() == Far::Glance && self.holds_screen() {
+        if self.cards.far() == Far::Glance && (self.holds_screen() || self.kept_on) {
             Mode::Glance
         } else {
             Mode::Home
+        }
+    }
+
+    /// Home Assistant keeps the screen on, or leaves it as usual. Kept on,
+    /// what shows follows the choice for across the room: the glance stays;
+    /// what waking shows stays, its time-out off; nothing goes black, the
+    /// backlight off. Turned on over black, it shows as being seen would.
+    pub fn keep_on(&mut self, on: bool, now: Instant, lit: bool, out: &mut Vec<Effect>) {
+        if on == self.kept_on {
+            return;
+        }
+        self.kept_on = on;
+        // Either way, what shows times out afresh from now.
+        self.last_input = now;
+        if !on || self.mode != Mode::Home || self.turn != 0 {
+            return;
+        }
+        let far = self.cards.far();
+        if far == Far::Dark {
+            self.kept_dark = lit;
+            return;
+        }
+        if !lit {
+            out.push(Effect::WakeDisplay);
+            self.lighting = Some(now + LIGHTING);
+        }
+        match far {
+            Far::Glance => self.go(Mode::Glance, out),
+            _ => self.wake(out),
         }
     }
 
@@ -2770,18 +2802,25 @@ impl Machine {
         // journey starts again from what waking shows.
         let timeout = self.cards.card_idle().unwrap_or(CARD_IDLE);
         let urgent = self.alarm_urgent();
+        // Kept on with what waking shows for across the room: that stays,
+        // but for a camera's full screen, whose pictures don't run all day.
+        let kept = self.kept_on && self.cards.far() == Far::Wake;
         let back = match self.mode {
             // An alarm coming in or going off stays until it's dealt with.
             _ if urgent => None,
-            Mode::Glance if idle >= GLANCE_IDLE && !self.holds_screen() => Some(Mode::Home),
+            Mode::Glance if idle >= GLANCE_IDLE && !self.holds_screen() && !self.kept_on => Some(Mode::Home),
             Mode::Glance | Mode::Alert { .. } => None,
+            Mode::Camera { slot } if kept && idle >= CAMERA_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
             Mode::Camera { .. } if idle >= timeout.max(CAMERA_IDLE) => Some(self.left_alone()),
             Mode::Camera { .. } => None,
+            _ if kept => None,
             _ if idle >= timeout => Some(self.left_alone()),
             _ => None,
         };
         if let Some(mode) = back {
             self.last_input = now;
+            // Kept on and nothing across the room: black, the backlight off.
+            self.kept_dark |= self.kept_on && mode == Mode::Home && self.cards.far() == Far::Dark;
             self.go(mode, out);
         }
         if let Mode::Camera { slot } = self.mode {
@@ -4655,6 +4694,72 @@ mod tests {
         rig.lit = true;
         rig.tick();
         assert_eq!(rig.machine.mode, Mode::Chooser(0), "woken again: from the start");
+    }
+
+    #[test]
+    fn kept_on_with_waking_across_the_room_the_cards_stay() {
+        let (mut rig, _) = holding(presence("wake", "none"));
+        let mut out = vec![];
+        rig.machine.keep_on(true, rig.now, true, &mut out);
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)), "kept on over black: what waking shows");
+        rig.wait(Duration::from_secs(120));
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)), "no time-out while kept on");
+        rig.turn(CARD_STEP);
+        rig.wait(SNAP);
+        rig.press();
+        let opened = rig.machine.mode.clone();
+        assert!(!matches!(opened, Mode::Chooser(_) | Mode::Home));
+        rig.wait(Duration::from_secs(120));
+        assert_eq!(rig.machine.mode, opened, "what's opened stays too");
+        rig.machine.keep_on(false, rig.now, true, &mut out);
+        rig.wait(Duration::from_secs(9));
+        assert_eq!(rig.machine.mode, opened, "as usual again: the time-out starts afresh");
+        rig.wait(Duration::from_secs(2));
+        assert_eq!(rig.machine.mode, Mode::Home);
+    }
+
+    #[test]
+    fn kept_on_with_waking_a_camera_goes_back_to_its_card() {
+        let mut rig = Rig::with(Cards::parse(br#"{"cards":[{"kind":"camera","id":"camera.front","name":"Front"}],
+            "presence":{"far":"wake"}}"#).unwrap());
+        let mut out = vec![];
+        rig.machine.keep_on(true, rig.now, true, &mut out);
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Camera { slot: 0 });
+        rig.wait(CAMERA_IDLE);
+        assert_eq!(rig.machine.mode, Mode::Chooser(rig.machine.place(Slot::Card(0))), "its pictures stop, the card stays");
+        rig.wait(Duration::from_secs(120));
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)));
+    }
+
+    #[test]
+    fn kept_on_with_the_glance_across_the_room_the_glance_stays() {
+        // Without nlclient's screen patch too, whose glance otherwise goes after GLANCE_IDLE.
+        let mut rig = Rig::with(presence("glance", "none"));
+        let mut out = vec![];
+        rig.machine.keep_on(true, rig.now, true, &mut out);
+        assert_eq!(rig.machine.mode, Mode::Glance);
+        rig.wait(Duration::from_secs(120));
+        assert_eq!(rig.machine.mode, Mode::Glance);
+        rig.turn(CARD_STEP);
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)));
+        rig.wait(Duration::from_secs(11));
+        assert_eq!(rig.machine.mode, Mode::Glance, "the cards time out to the glance");
+        rig.wait(Duration::from_secs(120));
+        assert_eq!(rig.machine.mode, Mode::Glance);
+    }
+
+    #[test]
+    fn kept_on_with_nothing_across_the_room_it_goes_black() {
+        let (mut rig, _) = holding(presence("dark", "none"));
+        let mut out = vec![];
+        rig.machine.keep_on(true, rig.now, true, &mut out);
+        assert!(rig.machine.mode == Mode::Home && rig.machine.backlight_off(), "nothing shows, and black is dark");
+        rig.turn(CARD_STEP);
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)) && !rig.machine.backlight_off());
+        rig.wait(Duration::from_secs(11));
+        assert!(rig.machine.mode == Mode::Home && rig.machine.backlight_off(), "timed out as usual, the backlight off");
     }
 
     #[test]

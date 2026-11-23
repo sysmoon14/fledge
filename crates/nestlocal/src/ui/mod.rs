@@ -829,8 +829,9 @@ impl Runtime {
                 logf!("ui: Home Assistant wakes the display");
                 self.machine.wake_up(now, lit, &mut effects);
             }
-            if self.ui.keep_on.load(std::sync::atomic::Ordering::Relaxed)
-                && now.duration_since(self.kept_on) >= Duration::from_secs(4) {
+            let kept_on = self.ui.keep_on.load(std::sync::atomic::Ordering::Relaxed);
+            self.machine.keep_on(kept_on, now, lit, &mut effects);
+            if kept_on && now.duration_since(self.kept_on) >= Duration::from_secs(4) {
                 // Kept on by Home Assistant: nlclient's display too.
                 self.kept_on = now;
                 device::wake_display();
