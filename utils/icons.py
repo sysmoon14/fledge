@@ -46,7 +46,9 @@ NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause", "pa
          "flash", "lightning-bolt", "account", "account-multiple", "trash-can", "trash-can-outline", "recycle",
          "solar-power", "solar-panel", "battery", "battery-charging", "gauge", "water-percent", "text",
          "currency-gbp", "currency-usd", "currency-eur", "trending-up", "trending-down", "home-thermometer",
-         "molecule-co2", "bell", "package-variant", "dog", "baby-face-outline", "alarm"}
+         "molecule-co2", "bell", "package-variant", "dog", "baby-face-outline", "alarm",
+         # A media player's Source: a remote's input button.
+         "import"}
 
 # Home Assistant's Material Symbols sets, by its prefixes.
 SETS = {"outlined": "m3o", "rounded": "m3r", "sharp": "m3s"}

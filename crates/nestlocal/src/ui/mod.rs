@@ -2969,7 +2969,7 @@ fn menu_item(action: Action, now: Option<String>) -> (String, String, String) {
                 Some(now) => tr!("menu.choose_now", now = now),
                 None => tr!("menu.choose").to_owned(),
             };
-            return ("mdi:volume-source".to_owned(), tr!("menu.source").to_owned(), under);
+            return ("mdi:import".to_owned(), tr!("menu.source").to_owned(), under);
         }
         Action::Open => ("mdi:arrow-up-bold", tr!("menu.open"), tr!("menu.open_hint")),
         Action::Close => ("mdi:arrow-down-bold", tr!("menu.close"), tr!("menu.close_hint")),
