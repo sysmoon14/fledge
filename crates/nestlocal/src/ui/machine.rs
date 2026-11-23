@@ -1047,13 +1047,13 @@ impl Machine {
             (Mode::Alert { id, .. }, Input::Press) => {
                 let id = id.clone();
                 out.push(Effect::Click);
-                self.end_alert(Some(Command::AlertPressed(id)), out);
+                self.end_alert(Some(Command::AlertPressed(id)), now, out);
                 return;
             }
             (Mode::Alert { id, .. }, Input::LongPress) => {
                 let id = id.clone();
                 out.push(Effect::Click);
-                self.end_alert(Some(Command::AlertDismissed(id)), out);
+                self.end_alert(Some(Command::AlertDismissed(id)), now, out);
                 return;
             }
             (Mode::Alert { .. }, _) => return,
@@ -1291,7 +1291,7 @@ impl Machine {
         }
         if alert.dismiss {
             if matches!(&self.mode, Mode::Alert { id, .. } if *id == alert.id) {
-                self.end_alert(None, out);
+                self.end_alert(None, now, out);
             }
             return;
         }
@@ -1344,13 +1344,16 @@ impl Machine {
 
     /// The notification goes, saying why (`said`: pressed or dismissed; None
     /// when Home Assistant took it back), and what it covered shows again.
-    fn end_alert(&mut self, said: Option<Command>, out: &mut Vec<Effect>) {
+    /// The notification gone: what it covered shows again, as it was, its
+    /// time-out starting afresh (the notification's own time isn't its).
+    fn end_alert(&mut self, said: Option<Command>, now: Instant, out: &mut Vec<Effect>) {
         let Mode::Alert { back, .. } = self.mode.clone() else { return };
         if let Some(command) = said {
             out.push(Effect::Send(command));
         }
         self.alert = None;
         self.alert_until = None;
+        self.last_input = now;
         self.go(*back, out);
     }
 
@@ -2833,7 +2836,7 @@ impl Machine {
             let dark = !lit && !self.lighting.is_some_and(|until| now < until);
             if dark || self.alert_until.is_some_and(|until| now >= until) {
                 let id = id.clone();
-                self.end_alert(Some(Command::AlertDismissed(id)), out);
+                self.end_alert(Some(Command::AlertDismissed(id)), now, out);
             }
         }
         if let Some((_, until)) = &self.trial {
@@ -2903,6 +2906,7 @@ impl Machine {
         }
         if dark {
             // Something else put the display out: give it back.
+            logf!("ui: the display went out: {:?} put away", self.mode);
             self.go(Mode::Home, out);
             return;
         }
@@ -2933,6 +2937,7 @@ impl Machine {
             _ => None,
         };
         if let Some(mode) = back {
+            logf!("ui: left alone {} s: {:?} times out", idle.as_secs(), self.mode);
             self.last_input = now;
             // Kept on and nothing across the room: black, the backlight off.
             self.kept_dark |= self.kept_on && mode == Mode::Home && self.cards.far() == Far::Dark;
@@ -3350,6 +3355,28 @@ mod tests {
         let mut out = vec![];
         rig.machine.show_alert(gone, rig.now, true, &mut out);
         assert!(Rig::sends(&out).is_empty() && rig.machine.mode == dimmer, "Home Assistant took it back");
+    }
+
+    #[test]
+    fn a_notification_that_goes_by_itself_leaves_what_it_covered_its_whole_time_out() {
+        let mut rig = Rig::woken();
+        rig.turn(CARD_STEP);
+        rig.press();
+        let dimmer = rig.machine.mode.clone();
+        rig.machine.show_alert(alert("teams", 45.0), rig.now, true, &mut vec![]);
+        rig.wait(Duration::from_secs(46));
+        assert_eq!(rig.machine.mode, dimmer, "its time up: the dimmer it covered, not timed out behind it");
+        rig.wait(CARD_IDLE - Duration::from_secs(2));
+        assert_eq!(rig.machine.mode, dimmer, "a whole time-out of its own");
+        rig.machine.show_alert(alert("door", 60.0), rig.now, true, &mut vec![]);
+        rig.wait(Duration::from_secs(30));
+        let mut gone = alert("door", 60.0);
+        gone.dismiss = true;
+        rig.machine.show_alert(gone, rig.now, true, &mut vec![]);
+        rig.wait(Duration::from_secs(1));
+        assert_eq!(rig.machine.mode, dimmer, "taken back by Home Assistant: the same");
+        rig.wait(CARD_IDLE);
+        assert_ne!(rig.machine.mode, dimmer, "then it times out as usual");
     }
 
     #[test]
