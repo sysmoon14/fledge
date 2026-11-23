@@ -228,6 +228,9 @@ pub const CARD_IDLE: Duration = Duration::from_secs(20);
 /// Back to the thermostat this long after the last input on nlclient's
 /// screens, once nlclient shows its home dial again.
 pub const NATIVE_IDLE: Duration = Duration::from_secs(5);
+/// What Home Assistant wakes the Nest to changed: a screen left this long
+/// untouched moves to it (an automation's choice, or Automatic's).
+pub const FOLLOW_WAKE: Duration = Duration::from_secs(5);
 /// How often the unit is held awake again while a card shows.
 pub const KEEP: Duration = Duration::from_secs(4);
 /// The least time between commands while turning.
@@ -603,6 +606,9 @@ pub struct Machine {
     /// Home Assistant keeps the screen on (set/screen_on): nothing times out
     /// to black but as it chose for across the room (keep_on).
     pub kept_on: bool,
+    /// What waking shows changed, and the screen hasn't followed yet
+    /// (FOLLOW_WAKE); a hand on it drops it.
+    wake_moved: bool,
     /// Each alarm's state as last heard, by entity: one coming to need
     /// whoever's there (its entry delay, going off) takes the screen.
     alarm_states: std::collections::HashMap<String, String>,
@@ -637,7 +643,7 @@ impl Machine {
             last_keep: None, turn: 0, movement: 0, pending: None, last_sent: now, owned: false, held: false,
             lighting: None, was_lit: None, alert: None, alert_until: None, trial: None, ran: None, pictured: None, settings_open: false,
             nest: None, nest_dial: false, set_at: None, menu_stepped: None, dial_offset: 0.0, volume_at: None, fledge: false,
-            rests: false, near_at: None, kept_dark: false, kept_on: false, floor: None, push: None, alarm_states: Default::default(), alarm_takeover: None,
+            rests: false, near_at: None, kept_dark: false, kept_on: false, wake_moved: false, floor: None, push: None, alarm_states: Default::default(), alarm_takeover: None,
             alarm_code: None, alarm_arming: None, alarm_wait: None, alarm_note: None, alarm_locked: None,
             alarm_open: Vec::new(), alarm_drawn: None, expected: Vec::new(), reported: Cards::default(), trails: Vec::new(),
         }
@@ -763,6 +769,7 @@ impl Machine {
         });
         self.trails = trails;
         self.reported = cards.clone();
+        self.wake_moved |= cards.wake() != self.cards.wake() && !self.cards.cards.is_empty();
         self.cards = cards;
         // Its own ring's limits come with the cards.
         if let Some(nest) = self.nest.as_mut() {
@@ -1016,7 +1023,9 @@ impl Machine {
     pub fn input(&mut self, input: Input, now: Instant, lit: bool, out: &mut Vec<Effect>) {
         let pause = now.duration_since(self.last_input);
         self.last_input = now;
-        // A hand on it: whatever it does shows, lit.
+        // A hand on it: whatever it does shows, lit; Home Assistant's new
+        // choice waits for the next wake.
+        self.wake_moved = false;
         self.kept_dark = false;
         match (&self.mode, input) {
             (Mode::Idle, _) => return,
@@ -1168,6 +1177,29 @@ impl Machine {
             self.lighting = Some(now + LIGHTING);
         }
         if self.mode == Mode::Home {
+            self.last_input = now;
+            self.wake(out);
+        }
+    }
+
+    /// What waking shows changed: an untouched screen of the cards moves to
+    /// it, as waking would show it. The glance, black and nlclient's own
+    /// screens stay (the next wake shows it), as do alerts and an alarm
+    /// that needs whoever's there.
+    fn follow_wake(&mut self, now: Instant, out: &mut Vec<Effect>) {
+        self.wake_moved = false;
+        if matches!(self.mode, Mode::Idle | Mode::Native | Mode::Home | Mode::Glance | Mode::Alert { .. })
+            || self.alarm_urgent() || (matches!(self.mode, Mode::Chooser(_)) && self.turn != 0) {
+            return;
+        }
+        let shows = match self.cards.wake() {
+            Wake::Card(slot) => self.mode.card_slot() == Some(Slot::Card(slot))
+                || self.mode == Mode::Chooser(self.place(Slot::Card(slot))),
+            Wake::Thermostat => matches!(self.mode, Mode::Dial { of: Dial::Nest, .. }),
+            Wake::Chooser => matches!(self.mode, Mode::Chooser(_)),
+        };
+        if !shows {
+            logf!("ui: Home Assistant's wake changed: following it");
             self.last_input = now;
             self.wake(out);
         }
@@ -2822,6 +2854,9 @@ impl Machine {
             // Kept on and nothing across the room: black, the backlight off.
             self.kept_dark |= self.kept_on && mode == Mode::Home && self.cards.far() == Far::Dark;
             self.go(mode, out);
+        }
+        if self.wake_moved && idle >= FOLLOW_WAKE {
+            self.follow_wake(now, out);
         }
         if let Mode::Camera { slot } = self.mode {
             // While it shows, a new picture every few seconds.
@@ -4694,6 +4729,55 @@ mod tests {
         rig.lit = true;
         rig.tick();
         assert_eq!(rig.machine.mode, Mode::Chooser(0), "woken again: from the start");
+    }
+
+    fn waking_to(wake: &str, far: &str) -> Cards {
+        Cards::parse(format!(r#"{{"cards":[{{"kind":"climate","id":"climate.a","name":"A"}},
+            {{"kind":"climate","id":"climate.b","name":"B"}}],"glance":{{"offset":0}},
+            "presence":{{"far":"{far}"}},"wake":{wake}}}"#).as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn an_untouched_screen_follows_what_waking_shows() {
+        let (mut rig, _) = holding(waking_to("0", "wake"));
+        let mut out = vec![];
+        rig.machine.keep_on(true, rig.now, true, &mut out);
+        assert_eq!(rig.machine.mode.card_slot(), Some(Slot::Card(0)), "woken to A");
+        rig.machine.set_cards(waking_to("1", "wake"), &mut out);
+        rig.wait(FOLLOW_WAKE - Duration::from_secs(1));
+        assert_eq!(rig.machine.mode.card_slot(), Some(Slot::Card(0)), "not at once");
+        rig.wait(Duration::from_secs(1));
+        assert_eq!(rig.machine.mode.card_slot(), Some(Slot::Card(1)), "untouched: B now");
+        // A hand on it: Home Assistant's next choice waits for the next wake.
+        rig.machine.set_cards(waking_to("0", "wake"), &mut out);
+        rig.turn(1);
+        rig.wait(FOLLOW_WAKE * 3);
+        assert_eq!(rig.machine.mode.card_slot(), Some(Slot::Card(1)), "touched: stays");
+        rig.machine.set_cards(waking_to("\"chooser\"", "wake"), &mut out);
+        rig.wait(FOLLOW_WAKE * 3);
+        assert!(matches!(rig.machine.mode, Mode::Chooser(_)), "the chooser");
+        // The same cards again: nothing moves.
+        rig.machine.set_cards(waking_to("\"chooser\"", "wake"), &mut out);
+        rig.turn(CARD_STEP);
+        rig.wait(SNAP);
+        let at = rig.machine.mode.clone();
+        rig.wait(FOLLOW_WAKE * 3);
+        assert_eq!(rig.machine.mode, at);
+    }
+
+    #[test]
+    fn the_glance_and_black_stay_as_waking_changes() {
+        let (mut rig, _) = holding(waking_to("0", "glance"));
+        let mut out = vec![];
+        rig.machine.keep_on(true, rig.now, true, &mut out);
+        assert_eq!(rig.machine.mode, Mode::Glance);
+        rig.machine.set_cards(waking_to("1", "glance"), &mut out);
+        rig.wait(FOLLOW_WAKE * 3);
+        assert_eq!(rig.machine.mode, Mode::Glance, "the glance stays: a turn shows B");
+        let (mut rig, _) = holding(waking_to("0", "wake"));
+        rig.machine.set_cards(waking_to("1", "wake"), &mut out);
+        rig.wait(FOLLOW_WAKE * 3);
+        assert_eq!(rig.machine.mode, Mode::Home, "black stays");
     }
 
     #[test]
