@@ -379,9 +379,37 @@ impl Display {
         }
     }
 
+    /// Maps fb0 again if it has grown to two pages since it was mapped: the
+    /// gen 2's nlclient makes its second page as it sets up its display,
+    /// which can come after this process opened it. Mapped at one page, the
+    /// UI could neither flip nor reach the page nlclient left shown.
+    fn grow(&mut self) {
+        if self.len >= 2 * self.side * self.stride {
+            return;
+        }
+        let Some(rows) = sys("virtual_size").ok().and_then(|s| s.split(',').nth(1)?.parse::<usize>().ok()) else {
+            return;
+        };
+        let Some(len) = grown(self.len, self.stride, rows) else { return };
+        // SAFETY: a shared mapping of the framebuffer device, len its size now.
+        let map = unsafe {
+            libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED,
+                       self.file.as_raw_fd(), 0)
+        };
+        if map == libc::MAP_FAILED {
+            crate::logf!("ui: /dev/fb0: mmap of {rows} rows: {}", std::io::Error::last_os_error());
+            return;
+        }
+        // SAFETY: unmaps what was mapped before; nothing borrows it past a call.
+        unsafe { libc::munmap(self.map.cast(), self.len) };
+        crate::logf!("ui: fb0 grew to {rows} rows: mapped again");
+        (self.map, self.len) = (map.cast(), len);
+    }
+
     /// The UI takes the display: from now on frames are drawn unseen and
     /// flipped to. Without two pages it draws straight on the shown one.
     pub fn begin(&mut self) {
+        self.grow();
         let rows = self.len / self.stride;
         if rows < 2 * self.side {
             return;
@@ -537,6 +565,7 @@ impl Display {
 
     /// The visible page as a Frame: what nlclient shows.
     pub fn save(&mut self) -> Frame {
+        self.grow();
         let (start, stride, side, turned) = (self.page(), self.stride, self.side, self.turned);
         let page = &self.bytes()[start..];
         prof::time(prof::Part::Read, || Self::take(page, stride, side, turned))
@@ -580,6 +609,13 @@ fn missed_pan(missed: u8, shown: usize, y: usize) -> (u8, bool) {
         (false, 2..) => (0, true),
         (false, n) => (n, false),
     }
+}
+
+/// The length to map fb0 at again, when its `rows` of `stride` bytes are
+/// more than the `len` mapped (Display::grow).
+fn grown(len: usize, stride: usize, rows: usize) -> Option<usize> {
+    let now = rows.checked_mul(stride)?;
+    (now > len).then_some(now)
 }
 
 /// Frame row `y` of `from` slid `by` rows towards `to` (Display::slide).
@@ -819,6 +855,14 @@ mod tests {
         assert_eq!(missed_pan(0, 320, 0), (1, false), "once may be a page still turning");
         assert_eq!(missed_pan(1, 320, 0), (0, true), "twice: draw where it shows");
         assert_eq!(missed_pan(1, 0, 0), (0, false), "a landing in between starts again");
+    }
+
+    #[test]
+    fn a_framebuffer_grown_after_opening_is_mapped_again() {
+        let stride = 320 * 4;
+        assert_eq!(grown(320 * stride, stride, 640), Some(640 * stride), "nlclient made its second page");
+        assert_eq!(grown(640 * stride, stride, 640), None, "both pages mapped already");
+        assert_eq!(grown(320 * stride, stride, 320), None, "still one page");
     }
 
     #[test]
