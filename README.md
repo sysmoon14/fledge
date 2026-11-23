@@ -43,8 +43,9 @@ then hands it the rest of your home:
   units, Fledge updates), in the same style. Nest's own menus are a press
   away for the rest, and Nest's own dial is a setting.
 - **It feels native.** Drawn at 60 frames a second, in Fledge's own look or
-  the Nest's (Settings → Theme). On an open card, press for its options and
-  long press to switch a light, pause the music or run a scene.
+  the Nest's (Settings → Theme), in the language the Nest is set to (English
+  or Dutch are supported at this moment). On an open card, press for its options and long press to switch
+  a light, pause the music or run a scene.
 - **Updates from Home Assistant.** The thermostat's software updates from
   an ordinary Home Assistant update entity, signed, with automatic rollback.
 
