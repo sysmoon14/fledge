@@ -20,6 +20,7 @@ mod heatlink;
 mod hotwater;
 mod json;
 mod liveness;
+mod locale;
 mod logger;
 mod matter;
 mod motion;
@@ -307,6 +308,8 @@ async fn run(config: flags::Config) {
                     move || if let Some(bridge) = &bridge { bridge.woke() },
                     move || holding.as_ref().is_some_and(|bridge| bridge.holds_awake()));
     }
+    let (language, from) = locale::start(&config.language, &config.settings);
+    logf!("nestlocal: the screen's language is {language} ({from})");
     if let Err(e) = settings_ui::init(config.matter, config.zigbee, config.doom) { logf!("settings UI: {e}"); }
     if config.doom {
         doom::start();
