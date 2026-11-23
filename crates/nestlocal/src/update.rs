@@ -155,9 +155,15 @@ pub fn release_of(version: &str) -> &str {
     }
 }
 
-/// Whether `latest` is newer than `installed`; neither readable is not.
+/// Whether `latest` is newer than `installed`. An unreadable `latest` is
+/// not; an unreadable `installed` (a build git couldn't describe, which
+/// stamps 0.1.0 or a bare hash) takes any release, as the entity offers it.
 pub fn newer(latest: &str, installed: &str) -> bool {
-    matches!((version_key(latest), version_key(installed)), (Some(l), Some(i)) if l > i)
+    match (version_key(latest), version_key(installed)) {
+        (Some(l), Some(i)) => l > i,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// An Ed25519 public key, base64 as utils/release-nestlocal.sh prints it.
@@ -787,9 +793,12 @@ mod tests {
         assert!(!newer("v0.3.2-rc.1", "v0.3.2-rc.1-1-gabc1234-dirty"));
         assert!(!newer("v0.3.2-rc.1", "v0.3.2-rc.2"));
         assert!(!newer("v0.3.1", "v0.3.2-rc.1"));
-        // Unreadable either side: never newer.
+        // An unreadable release is never newer; a build of unknown version
+        // takes any release.
         assert!(!newer("latest", "v0.3.2"));
-        assert!(!newer("v0.3.3", "f290a39"));
+        assert!(!newer("latest", "0.1.0"));
+        assert!(newer("v0.3.3", "f290a39"));
+        assert!(newer("v0.13.0-rc.3", "0.1.0"));
     }
 
     // A signature utils/release-nestlocal.sh's OpenSSL made, with a throwaway key.
