@@ -589,6 +589,16 @@ struct Ticker {
     shown: f32,
 }
 
+/// One frame's step of the dial's temperature now fading from `shown`
+/// towards `want`, settling there. Once there it stays (signum is 1 for 0,
+/// so stepping by it alone kept a hidden number blinking at 12%).
+fn fade_toward(shown: f32, want: f32) -> f32 {
+    if (want - shown).abs() < 0.12 {
+        return want;
+    }
+    shown + (want - shown).signum() * 0.12
+}
+
 /// How long the glance's line rests at its start, and how fast it then
 /// scrolls, in pixels a second: slow enough to read across a room.
 const TICKER_REST: f32 = 1.8;
@@ -1352,10 +1362,7 @@ impl Runtime {
             self.now_side = side;
         }
         let want = if visible && side == self.now_side { 1.0 } else { 0.0 };
-        let mut next = shown + (want - shown).signum() * 0.12;
-        if (next - want).abs() < 0.12 {
-            next = want;
-        }
+        let next = fade_toward(shown, want);
         if next != shown {
             self.force_draw = true;
         }
@@ -2383,9 +2390,10 @@ impl Runtime {
         }
         let mode = self.shown_mode();
         let Some(mut screen) = Self::screen(&self.machine, &mode) else { return };
-        if let Screen::NestSet { pulse, shown, .. } = &mut screen {
+        if let Screen::NestSet { nest, pulse, shown, .. } = &mut screen {
             *pulse = self.pulse.map(|at| at.elapsed().as_secs_f32() / PULSE.as_secs_f32());
-            let now = self.machine.nest.as_ref().and_then(|n| n.card.current).unwrap_or_default();
+            // The dial's own temperature now: a card's, not this Nest's.
+            let now = nest.card.current.unwrap_or_default();
             *shown = Some((self.now_shown.0, now - self.now_side));
         }
         let sweep = self.sweep.as_ref().map(|(_, shown)| *shown);
@@ -2740,6 +2748,22 @@ fn unix_now() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn now_label_fade_settles() {
+        // At the target, hidden stays hidden and shown stays shown.
+        assert_eq!(fade_toward(0.0, 0.0), 0.0);
+        assert_eq!(fade_toward(1.0, 1.0), 1.0);
+        // Fading in and out reaches its end and stops there.
+        for (from, want) in [(0.0, 1.0), (1.0, 0.0), (0.5, 0.0)] {
+            let mut shown = from;
+            for _ in 0..20 {
+                shown = fade_toward(shown, want);
+            }
+            assert_eq!(shown, want);
+            assert_eq!(fade_toward(shown, want), want);
+        }
+    }
 
     /// A frame as Display::save gives it (BGRX), from a picture of one.
     fn frame_from_png(bytes: &[u8]) -> Vec<u8> {
