@@ -24,6 +24,7 @@
   <tr><td><strong>Blind, cover</strong></td><td>the position</td><td>open / close</td><td>open, close</td></tr>
   <tr><td><strong>Scene, script, button</strong></td><td></td><td>runs it</td><td>Run</td></tr>
   <tr><td><strong>Face</strong></td><td></td><td>the action you chose, if any</td><td>Back, then up to four actions you choose. See <a href="#face-cards">Face cards</a>.</td></tr>
+  <tr><td><strong>Focus</strong></td><td>the length to start; a minute on or off while it runs</td><td>start, pause, carry on; ends busy</td><td>Skip, Stop; Busy (and End busy). See <a href="#focus-card">The Focus card</a>.</td></tr>
   <tr><td><strong>Camera</strong></td><td></td><td></td><td>opening it takes a fresh picture; the latest still fills the round screen</td></tr>
   <tr><td><strong>Alarm</strong></td><td>the option, or each digit of the code</td><td></td><td>arm (its modes), Disarm or Cancel. See <a href="alarm.html">Alarm panels</a>.</td></tr>
   <tr><td><strong>The thermostat</strong></td><td>the target temperature</td><td></td><td>Eco, heating on or off, hot water boost. See <a href="thermostat.html">The thermostat and Settings</a>.</td></tr>
@@ -35,6 +36,16 @@
 <ul>
   <li>Its options hold actions you choose, up to four after <strong>Back</strong>: scenes, scripts and buttons run; lights and switches turn on or off.</li>
   <li>A hold can do one of those actions. Without one, a hold does nothing.</li>
+</ul>
+
+<h2 id="focus-card">The Focus card</h2>
+<p>A Pomodoro timer and a busy sign. Add it in the panel's Cards tab (<strong>Add a card</strong>, then <strong>Focus</strong>). The timer runs on the Nest, so a block carries on through a restart of the Nest's software or of Home Assistant.</p>
+<ul>
+  <li>Hold to start a focus block (25 minutes unless you change it). The ring shows what's left, the dots the blocks towards the long break (every fourth break is the long one). Hold again to pause or carry on; turn to add or take away a minute.</li>
+  <li>When a block ends the Nest sounds its tones and shows what's next. The break waits for a hold, so it never starts while you're away, unless you set the card to start the next block by itself.</li>
+  <li><strong>Busy</strong> is open-ended and counts up. Start it from the card's options, from Home Assistant, or by itself while any entity you choose is on: a laptop's camera or microphone in use, say. A block running pauses while you're busy and carries on after.</li>
+  <li>While anything runs, the card stays on screen and waking shows it. Across the room, the minutes show large in place of the glance.</li>
+  <li>Home Assistant gets <strong>Focus</strong> (the state), <strong>Focus ends</strong>, <strong>Focus blocks today</strong>, <strong>Busy</strong> (on while focusing or busy: the one to use in automations), <strong>Busy mode</strong>, <strong>Focus length</strong> and <strong>Focus events</strong>, and the action <code>fledge.focus</code> (start, pause, resume, toggle, skip, stop, busy_on, busy_off, length). Notifications still show whenever they're sent; to hold one back while you're busy, add a condition on Busy to its automation.</li>
 </ul>
 
 <h2 id="limits">Ring limits</h2>
