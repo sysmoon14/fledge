@@ -717,14 +717,15 @@ impl Machine {
     /// While anything runs on the Focus card and it asks to keep the screen
     /// on: its place.
     fn focus_keeps(&self) -> Option<usize> {
-        self.focus_card().filter(|(_, card)| card.keep_on && self.focus.active()).map(|(slot, _)| slot)
+        self.focus_card().filter(|(_, card)| card.keep_on && self.focus.leads()).map(|(slot, _)| slot)
     }
 
-    /// What waking shows: the Focus card while anything runs on it, if it
+    /// What waking shows: the Focus card while it leads (a block, or busy
+    /// by hand: Focus::leads), if it
     /// asks; else what Home Assistant chose.
     fn wake_to(&self) -> Wake {
         match self.focus_card() {
-            Some((slot, card)) if card.wake_to && self.focus.active() => Wake::Card(slot),
+            Some((slot, card)) if card.wake_to && self.focus.leads() => Wake::Card(slot),
             _ => self.cards.wake(),
         }
     }
@@ -739,14 +740,14 @@ impl Machine {
         out.push(Effect::FocusChanged);
         self.dirty = true;
         self.focus_drawn = None;
-        if was_active != self.focus.active() && self.focus_card().is_some_and(|(_, c)| c.wake_to) && !self.cards.cards.is_empty() {
+        if was_active != self.focus.leads() && self.focus_card().is_some_and(|(_, c)| c.wake_to) && !self.cards.cards.is_empty() {
             self.wake_moved = true;
         }
     }
 
     /// Home Assistant's command for the timer (<base>/set/focus).
     pub fn focus_order(&mut self, order: &Order, now: Instant, out: &mut Vec<Effect>) {
-        let (plan, unix, was) = (self.plan(), self.unix(now), self.focus.active());
+        let (plan, unix, was) = (self.plan(), self.unix(now), self.focus.leads());
         match order.apply(&mut self.focus, &plan, unix) {
             Ok((happened, changed)) if changed || happened.is_some() => self.focus_changed(was, happened, out),
             Ok(_) => {}
@@ -775,7 +776,7 @@ impl Machine {
         if self.focus.new_day((unix as i64 + offset).div_euclid(86_400)) {
             out.push(Effect::FocusChanged);
         }
-        let (plan, was) = (self.plan(), self.focus.active());
+        let (plan, was) = (self.plan(), self.focus.leads());
         if let Some((happened, late)) = self.focus.tick(&plan, unix) {
             self.focus_changed(was, Some(happened), out);
             let tones = self.focus_card().map_or(3, |(_, card)| card.tones());
@@ -1612,7 +1613,7 @@ impl Machine {
             // The Focus card: the length to start, or a minute a step on or
             // off a block; nothing while busy or waiting.
             Mode::FocusView { .. } => {
-                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.active());
+                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.leads());
                 if self.focus.turn(&plan, steps, unix) {
                     out.push(Effect::Click);
                     self.focus_changed(was, None, out);
@@ -2379,7 +2380,7 @@ impl Machine {
                 self.mode = view;
             }
             (Action::FocusSkip | Action::FocusStop | Action::FocusBusy(_), view @ Mode::FocusView { .. }) => {
-                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.active());
+                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.leads());
                 let happened = match action {
                     Action::FocusSkip => self.focus.skip(&plan, unix),
                     Action::FocusStop => self.focus.stop(),
@@ -2458,7 +2459,7 @@ impl Machine {
             }
             // Held on the Focus card: starts, pauses, carries on, ends busy.
             Mode::FocusView { .. } => {
-                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.active());
+                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.leads());
                 let happened = self.focus.hold(&plan, unix);
                 self.focus_changed(was, happened, out);
                 true
@@ -3691,6 +3692,10 @@ mod tests {
         rig.machine.focus_order(&Order::parse(b"start").unwrap(), rig.now, &mut out);
         rig.machine.focus_order(&Order::parse(br#"{"command":"busy_on","auto":true,"status":"In a call"}"#).unwrap(), rig.now, &mut out);
         assert_eq!(rig.machine.focus.phase, Phase::Busy);
+        assert_eq!(rig.machine.wake_to(), Wake::Chooser, "busy by itself leaves waking to Home Assistant's choice");
+        assert_eq!(rig.machine.focus_keeps(), None, "and doesn't hold the screen");
+        rig.machine.focus_order(&Order::parse(b"busy_on").unwrap(), rig.now, &mut out);
+        assert_eq!(rig.machine.wake_to(), Wake::Card(0), "asked by hand: it leads");
         // Woken to it (it's what waking shows while busy); the ring does
         // nothing while busy, a press its options.
         open_focus(&mut rig);
@@ -3700,6 +3705,8 @@ mod tests {
         assert_eq!(rig.machine.mode, Mode::Chooser(1), "its Back: to the cards");
         let mut out = vec![];
         rig.machine.focus_order(&Order::parse(br#"{"command":"busy_off","auto":true}"#).unwrap(), rig.now, &mut out);
+        assert!(focus_events(&out).is_empty(), "made busy by hand: the entities going quiet don't end it");
+        rig.machine.focus_order(&Order::parse(b"busy_off").unwrap(), rig.now, &mut out);
         assert_eq!(focus_events(&out), vec![Happened::BusyEnded]);
         assert_eq!(rig.machine.focus.phase, Phase::Focus, "the block carries on");
         assert!(rig.machine.focus.running());

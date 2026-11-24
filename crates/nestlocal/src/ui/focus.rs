@@ -206,6 +206,13 @@ impl Focus {
         self.phase != Phase::Ready
     }
 
+    /// Whether the card takes the screen (kept on, woken to): anything
+    /// under way but busy Home Assistant's entities started, which leaves
+    /// the screen to its own automations (a call's own card, say).
+    pub fn leads(&self) -> bool {
+        self.active() && !(self.phase == Phase::Busy && self.auto)
+    }
+
     /// Paused: a block stopped part way, not by busy.
     pub fn paused(&self) -> bool {
         self.timing() && !self.running()
