@@ -5,7 +5,8 @@
 use super::icons;
 use crate::{locale, tr};
 use super::machine::Setting;
-use super::model::{self, ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, ClimateCard, ClimateChoice, CoverCard, Glance,
+use super::focus::{Focus, Phase, Plan};
+use super::model::{self, ActionCard, AlarmCard, AlarmMode, Alert, CameraCard, Card, ClimateCard, ClimateChoice, CoverCard, FocusCard, Glance,
                    Layout, Light, LightsCard, Line, MediaCard, Nest, OptionsCard, Weather};
 use super::paint::{self, *};
 
@@ -50,6 +51,9 @@ pub enum Screen<'a> {
     AlarmOpen { card: &'a AlarmCard, arm: &'a AlarmMode, sensors: &'a [String] },
     /// Home Assistant's glance, as its layout has it.
     Glance { at: GlanceIn<'a> },
+    /// The Focus card: its timer at `at`. `opened`, its own screen, saying
+    /// how to use it; `far`, for across the room, the minutes alone, large.
+    Focus { card: &'a FocusCard, at: FocusAt<'a>, opened: bool, far: bool },
     /// The lights card pressed: its lights and Back, `selected` highlighted.
     LightList { card: &'a LightsCard, selected: usize },
     LightDim { light: &'a Light, on: bool, value: u8 },
@@ -150,6 +154,7 @@ pub fn draw(fonts: &Fonts, screen: &Screen, sweep: Option<f32>) -> Canvas {
         Screen::AlarmOpen { card, arm, sensors } => alarm_open(fonts, card, arm, sensors),
         Screen::AlarmModes { card, selected } => alarm_modes(fonts, card, *selected),
         Screen::Glance { at } => glance_screen(fonts, at),
+        Screen::Focus { card, at, opened, far } => focus_screen(fonts, card, at, *opened, *far),
         Screen::LightList { card, selected } => light_list(fonts, card, *selected),
         Screen::NestCard { nest, .. } if nest.asked.is_some() => nest_status(fonts, nest),
         Screen::NestCard { nest, now } => nest_card(fonts, nest, *now),
@@ -2660,6 +2665,7 @@ pub fn accent(screen: &Screen) -> [u8; 3] {
         Screen::CoverSet { .. } => COVER,
         Screen::ActionCard { .. } => ACTION,
         Screen::AlarmView { .. } => ALARM_ARMED,
+        Screen::Focus { at, .. } => focus_colour(at.focus).0,
         _ => WHITE,
     }
 }
@@ -2904,4 +2910,175 @@ mod tests {
         assert_eq!(room(&lights), Some((40, [191, 0, 63])), "off lights don't count; brighter ones colour more");
         assert_eq!(room(&[light(true, None, [255, 255, 255])]).unwrap().0, 100, "on/off lights are full");
     }
+}
+
+/// The Focus card's timer as it draws: the timer, its settings, the time
+/// now (Unix seconds), and Home Assistant's clock (its offset from UTC in
+/// seconds, and how it writes the time) for when a block ends.
+#[derive(Clone, Copy)]
+pub struct FocusAt<'a> {
+    pub focus: &'a Focus,
+    pub plan: Plan,
+    pub now: f64,
+    pub offset: i64,
+    pub clock: model::Clock,
+}
+
+impl FocusAt<'_> {
+    /// The time of day at Unix `at`, as Home Assistant writes it.
+    fn time_of(&self, at: f64) -> String {
+        self.clock.time((at as i64 + self.offset).div_euclid(60), true)
+    }
+
+    /// What changes the card's frame among the cards: its state and the
+    /// minute it shows.
+    pub fn tile_key(&self) -> u32 {
+        let f = self.focus;
+        let minutes = match f.phase {
+            Phase::Busy => ((self.now - f.since.unwrap_or(self.now)) / 60.0) as u32,
+            _ => (f.left_at(self.now) / 60.0).ceil() as u32,
+        };
+        let phase = f.phase as u32;
+        minutes | (phase << 16) | (u32::from(f.running()) << 20) | (u32::from(f.waiting) << 21) | (f.done.min(15) << 22)
+            | (f.focus_minutes(&self.plan).min(127) << 26)
+    }
+}
+
+/// A block's colours: focus orange, a break's teal, busy red; grey while
+/// ready or paused. And whether it glows (running, or busy).
+const FOCUS_ORANGE: [u8; 3] = [255, 138, 61];
+const BREAK_TEAL: [u8; 3] = [77, 208, 225];
+const BUSY_RED: [u8; 3] = [240, 68, 56];
+
+pub fn focus_colour(focus: &Focus) -> ([u8; 3], bool) {
+    let base = match focus.phase {
+        Phase::Ready => return (GREY, false),
+        Phase::Focus => FOCUS_ORANGE,
+        Phase::ShortBreak | Phase::LongBreak => BREAK_TEAL,
+        Phase::Busy => return (BUSY_RED, true),
+    };
+    if focus.waiting {
+        // Done, the next waiting: in its own colour, still.
+        return (base, false);
+    }
+    if focus.running() { (base, true) } else { (GREY, false) }
+}
+
+/// Seconds as a timer shows them: 4:05, 18:42, 1:05:00.
+fn timer_text(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as i64;
+    let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// The dots under the timer: a round of focus blocks, those done filled,
+/// the one under way ringed.
+fn focus_dots(p: &mut Canvas, focus: &Focus, every: u32, y: f32, c: [u8; 3]) {
+    let every = every.clamp(1, 12);
+    let (gap, r) = (22.0, 5.5);
+    let left = HALF - gap * (every - 1) as f32 / 2.0;
+    let current = (focus.phase == Phase::Focus && !focus.waiting).then_some(focus.done);
+    for i in 0..every {
+        let x = left + gap * i as f32;
+        if i < focus.done {
+            paint::circle(p, x, y, r, colour(c));
+        } else if Some(i) == current {
+            paint::circle(p, x, y, r, colour(c));
+            paint::circle(p, x, y, r - 2.2, colour(BLACK));
+        } else {
+            paint::circle(p, x, y, r, alpha(DIM, 0.7));
+        }
+    }
+}
+
+/// The Focus card's screen. Its ring is what's left of the block; the time
+/// large in the middle, what it is above it, and when it ends (or how to
+/// start it) under; the round's dots at the bottom. A block run out says
+/// so, and what's next. Across the room, only the minutes, large.
+fn focus_screen(fonts: &Fonts, card: &FocusCard, at: &FocusAt, opened: bool, far: bool) -> Canvas {
+    let f = at.focus;
+    let (c, glows) = focus_colour(f);
+    let mut p = paint::face(if glows && paint::fledge() { c } else { BLACK });
+    let fraction = match f.phase {
+        Phase::Ready => f.focus_minutes(&at.plan) as f32 / super::focus::LENGTH_MAX as f32,
+        Phase::Busy => 1.0,
+        _ if f.waiting => 1.0,
+        _ => f.fraction(at.now),
+    };
+    let lit = fraction * TICKS as f32;
+    let track = if paint::fledge() { alpha(WHITE, 0.10) } else { alpha(DIM, 0.45) };
+    paint::ring(&mut p, |i| if (i as f32) < lit { colour(c) } else { track }, &[]);
+    let since = || f.since.map_or(0.0, |since| at.now - since);
+    if far {
+        let minutes = match f.phase {
+            Phase::Busy => (since() / 60.0).floor() as i64,
+            _ => (f.left_at(at.now) / 60.0).ceil() as i64,
+        };
+        hero(&mut p, fonts, &minutes.to_string(), 210.0, 310.0, 330.0, WHITE);
+        let word = match f.phase {
+            Phase::Busy => tr!("focus.far_busy"),
+            _ if f.paused() => tr!("focus.paused"),
+            _ if f.phase.is_break() => tr!("focus.far_break"),
+            _ => tr!("focus.far_focus"),
+        };
+        line(&mut p, fonts, 372.0, word, c);
+        return p;
+    }
+    if f.waiting {
+        let ended = if f.phase.is_break() { tr!("focus.focus_done") } else { tr!("focus.break_over") };
+        icon(&mut p, "mdi:bell-ring", "", HALF, 128.0, 64.0, c);
+        let big = paint::fit(fonts.medium(), 46.0, ended, 0.0, 340.0);
+        paint::text(&mut p, fonts.medium(), 46.0, HALF, 228.0, &big, 0.0, WHITE);
+        let minutes = (f.length / 60.0).round() as i64;
+        let next = match f.phase {
+            Phase::LongBreak => tr!("focus.next_long_break", minutes = minutes),
+            Phase::ShortBreak => tr!("focus.next_break", minutes = minutes),
+            _ => tr!("focus.next_focus", minutes = minutes),
+        };
+        let today = tr!("focus.today", count = f.today);
+        line(&mut p, fonts, 272.0, &today, GREY);
+        line(&mut p, fonts, 308.0, &next, WHITE);
+        let hint = if f.phase.is_break() { tr!("focus.hold_start_break") } else { tr!("focus.hold_start_focus") };
+        if opened {
+            line(&mut p, fonts, 350.0, hint, c);
+        }
+        focus_dots(&mut p, f, at.plan.every, 398.0, FOCUS_ORANGE);
+        return p;
+    }
+    let (label, icon_name) = match f.phase {
+        Phase::Ready => (card_name_or(card), "m3o:timer-play"),
+        Phase::Busy if !f.status.is_empty() => (tr!("focus.busy_status", status = f.status), "mdi:minus-circle"),
+        Phase::Busy => (tr!("focus.busy").to_owned(), "mdi:minus-circle"),
+        _ if f.paused() => (tr!("focus.paused").to_owned(), "m3o:timer-pause"),
+        Phase::Focus => (tr!("focus.block", block = f.block(), blocks = at.plan.every), "m3o:timer-play"),
+        Phase::LongBreak => (tr!("focus.long_break").to_owned(), "mdi:coffee"),
+        _ => (tr!("focus.short_break").to_owned(), "mdi:coffee"),
+    };
+    pill_words(&mut p, fonts, 150.0, &label, if c == GREY { WHITE } else { c }, Some(icon_name));
+    let time = match f.phase {
+        Phase::Ready => timer_text(f.focus_minutes(&at.plan) as f64 * 60.0),
+        Phase::Busy => timer_text(since()),
+        _ => timer_text(f.left_at(at.now)),
+    };
+    let size = if time.len() > 5 { 104.0 } else { 128.0 };
+    let width = paint::measure(fonts.clock(), size, &time, -3.0);
+    paint::text_at(&mut p, fonts.clock(), size, HALF - width / 2.0, 296.0, &time, -3.0, WHITE, 1.0);
+    let under = match f.phase {
+        Phase::Ready if opened => tr!("focus.hold_to_start").to_owned(),
+        Phase::Ready => tr!("focus.ready").to_owned(),
+        Phase::Busy => f.since.map(|since| tr!("focus.since", time = at.time_of(since))).unwrap_or_default(),
+        _ if f.paused() && opened => tr!("focus.hold_to_carry_on").to_owned(),
+        _ if f.paused() => String::new(),
+        _ => tr!("focus.until", time = at.time_of(at.now + f.left_at(at.now))),
+    };
+    line(&mut p, fonts, 346.0, &under, GREY);
+    if f.phase != Phase::Busy {
+        focus_dots(&mut p, f, at.plan.every, 398.0, FOCUS_ORANGE);
+    }
+    p
+}
+
+/// The Focus card's name, or its kind's.
+pub fn card_name_or(card: &FocusCard) -> String {
+    if card.name.trim().is_empty() { tr!("focus.title").to_owned() } else { card.name.clone() }
 }

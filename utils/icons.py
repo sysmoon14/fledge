@@ -48,7 +48,9 @@ NAMES = {"cog", "cog-outline", "arrow-left", "thermometer", "play", "pause", "pa
          "currency-gbp", "currency-usd", "currency-eur", "trending-up", "trending-down", "home-thermometer",
          "molecule-co2", "bell", "package-variant", "dog", "baby-face-outline", "alarm",
          # A media player's Source: a remote's input button.
-         "import"}
+         "import",
+         # The Focus card's Stop and Busy (hand-added: plain shapes).
+         "stop", "minus-circle"}
 
 # Home Assistant's Material Symbols sets, by its prefixes.
 SETS = {"outlined": "m3o", "rounded": "m3r", "sharp": "m3s"}

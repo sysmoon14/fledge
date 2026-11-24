@@ -177,6 +177,12 @@ impl Bridge {
             }
             return;
         }
+        if name == "focus" {
+            if let Err(e) = self.ui.focus_order(payload) {
+                logf!("mqtt: focus: {e}");
+            }
+            return;
+        }
         if name == "alarm_result" {
             if let Err(e) = self.ui.set_alarm_result(payload) {
                 logf!("mqtt: alarm_result: {e}");

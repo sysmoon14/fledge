@@ -17,13 +17,20 @@
 //!                                      -update-repo (update.rs; retained)
 //!   <prefix>/<serial>/ui/protocol      what of the home screen cards this build
 //!                                      understands (ui::PROTOCOL; retained)
+//!   <prefix>/<serial>/focus            the Focus card's timer (ui/focus.rs:
+//!                                      state, ends, block, today, busy, ...;
+//!                                      retained), and focus/event what just
+//!                                      happened to it (focus_done, ...)
 //!   <prefix>/<serial>/set/<command>    Home Assistant's commands; for the
 //!                                      home screen cards ui, art/<entity>,
 //!                                      screen_on (ON/OFF, retained),
 //!                                      screen_wake, alert (notifications),
-//!                                      alarm_result (an alarm command's answer)
-//!                                      and glance_try (a glance shown for 20 s;
-//!                                      empty ends it)
+//!                                      alarm_result (an alarm command's answer),
+//!                                      glance_try (a glance shown for 20 s;
+//!                                      empty ends it) and focus (the Focus
+//!                                      card's timer: {"command": "start",
+//!                                      "minutes": 50}, pause, resume, toggle,
+//!                                      skip, stop, busy_on, busy_off, length)
 //!   <prefix>/<serial>/set/act_as_thermostat
 //!                                      ON/OFF: OFF makes it a panel on the
 //!                                      wall, its heating and hot water off
@@ -1332,6 +1339,15 @@ impl crate::ui::Sender for Bridge {
     fn ui_frames(&self, slowest_ms: u32, typical_ms: f32) {
         let payload = serde_json::json!({"slowest": slowest_ms, "typical": (typical_ms * 10.0).round() / 10.0}).to_string();
         self.publish(&format!("{}/ui/frames", self.base), true, payload.as_bytes());
+    }
+
+    fn focus(&self, state: &str) {
+        self.publish(&format!("{}/focus", self.base), true, state.as_bytes());
+    }
+
+    fn focus_event(&self, event: &str) {
+        let payload = serde_json::json!({"event": event}).to_string();
+        self.publish(&format!("{}/focus/event", self.base), false, payload.as_bytes());
     }
 
     fn send(&self, command: &crate::ui::Command) {

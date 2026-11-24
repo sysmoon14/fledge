@@ -20,6 +20,7 @@
 mod device;
 #[cfg(test)]
 mod film;
+mod focus;
 mod icons;
 mod machine;
 mod model;
@@ -83,7 +84,9 @@ use crate::tr;
 ///      kelvin_whole say how far), and it says when it's at one; the
 ///      battery face (glance layout "battery", glance.battery)
 ///  15  the thermostat's own ring stops at limits too (thermostat_limits)
-pub const PROTOCOL: u32 = 15;
+///  16  the Focus card (kind "focus": Pomodoro blocks and busy, its timer
+///      on the Nest; <base>/focus, <base>/focus/event, <base>/set/focus)
+pub const PROTOCOL: u32 = 16;
 
 /// The alerts the Nest has shown, as its log tells them (motion.rs):
 /// each hands it its own screen until it's done.
@@ -127,6 +130,9 @@ pub struct Ui {
     /// A glance to try for a while (<base>/set/glance_try), counted; None
     /// puts the saved one back.
     glance_try: Mutex<(u64, Option<model::Glance>)>,
+    /// Home Assistant's commands for the Focus card's timer (<base>/set/focus),
+    /// waiting for the UI to do them.
+    focus_orders: Mutex<Vec<focus::Order>>,
 }
 
 impl Ui {
@@ -238,6 +244,13 @@ impl Ui {
         Ok(())
     }
 
+    /// Takes a command for the Focus card's timer (<base>/set/focus).
+    pub fn focus_order(&self, payload: &[u8]) -> Result<(), String> {
+        let order = focus::Order::parse(payload)?;
+        self.focus_orders.lock().unwrap().push(order);
+        Ok(())
+    }
+
     /// A picture by its key among the art (a notification's).
     fn art(&self, key: &str) -> Option<Arc<Art>> {
         self.art.lock().unwrap().get(key).cloned()
@@ -263,6 +276,10 @@ pub trait Sender: Send + Sync + 'static {
     /// The last minute's frames while the UI drew: the slowest, and the
     /// time a frame took on average, in ms.
     fn ui_frames(&self, _slowest_ms: u32, _typical_ms: f32) {}
+    /// The Focus card's timer, as JSON (<base>/focus, retained), and what
+    /// just happened to it (<base>/focus/event).
+    fn focus(&self, _state: &str) {}
+    fn focus_event(&self, _event: &str) {}
 }
 
 /// Kept while the thermostat shows Nest's own dial rather than its card.
@@ -351,6 +368,10 @@ pub fn start(ui: Arc<Ui>, sender: Arc<dyn Sender>) {
 }
 
 struct Runtime {
+    /// The Focus card's timer changed: to keep and tell, once a loop; and
+    /// what its card's frame among the cards last showed.
+    focus_dirty: bool,
+    focus_tile: u32,
     ui: Arc<Ui>,
     sender: Arc<dyn Sender>,
     fonts: paint::Fonts,
@@ -549,6 +570,7 @@ fn card_name(card: &Card) -> &str {
         Card::Cover(card) => &card.name,
         Card::Alarm(card) => &card.name,
         Card::Face(card) => &card.name,
+        Card::Focus(card) => &card.name,
         Card::Unknown => "",
     }
 }
@@ -647,6 +669,7 @@ impl Runtime {
            input: device::Input) -> Runtime {
         let now = Instant::now();
         Runtime {
+            focus_dirty: false, focus_tile: 0,
             ui, sender, fonts, display, input, beeper: device::Beeper::open(), machine: Machine::new(now),
             generation: u64::MAX, saved: None, home: None, transition: Transition::Cut, view: None,
             cards: Default::default(), shrunk: Default::default(), recent: Vec::new(), pressure: crate::health::Level::Calm, zoom: 1.0,
@@ -670,6 +693,9 @@ impl Runtime {
         device::rest(false);
         self.machine.nest_dial = std::path::Path::new(NEST_DIAL).exists();
         self.machine.fledge = fledge_theme(std::fs::read_to_string(THEME).ok().as_deref());
+        self.machine.set_wall(Instant::now(), unix_now());
+        self.machine.focus = focus::Focus::load();
+        self.focus_dirty = true;
         paint::set_theme(if self.machine.fledge { paint::Theme::Fledge } else { paint::Theme::Nest });
         loop {
             // A frame each 8 ms while anything moves (the cards as fast as the
@@ -690,6 +716,7 @@ impl Runtime {
             };
             let events = self.input.wait(Duration::from_millis(wait));
             let now = Instant::now();
+            self.machine.set_wall(now, unix_now());
             let mut effects = Vec::new();
             // Not while the cards move: looking through /proc costs a frame.
             if now.duration_since(self.last_check) >= Duration::from_secs(2) && !self.moving() {
@@ -796,6 +823,11 @@ impl Runtime {
                 self.glance_tries = tries;
                 logf!("ui: glance to try: {}", if tried.is_some() { "showing" } else { "ended" });
                 self.machine.try_glance(tried, now, lit, &mut effects);
+            }
+            let orders = std::mem::take(&mut *self.ui.focus_orders.lock().unwrap());
+            for order in orders {
+                logf!("ui: focus: Home Assistant asks to {}", order.command);
+                self.machine.focus_order(&order, now, &mut effects);
             }
             let (results, result) = self.ui.alarm_result.lock().unwrap().clone();
             if results != self.alarm_results {
@@ -955,6 +987,17 @@ impl Runtime {
             }
             for effect in effects {
                 self.apply(effect);
+            }
+            if std::mem::take(&mut self.focus_dirty) {
+                self.machine.focus.save();
+                let state = self.machine.focus.state(&self.machine.plan(), unix_now());
+                self.sender.focus(&state.to_string());
+            }
+            // The Focus card among the cards shows the minute and its state.
+            if let Some(tile) = self.focus_at().map(|at| at.tile_key()) {
+                if std::mem::replace(&mut self.focus_tile, tile) != tile {
+                    self.revalidate();
+                }
             }
             if let (Some(view), true) = (self.view, !matches!(before, Mode::Chooser(_) | Mode::Home)
                                          && matches!(self.machine.mode, Mode::Chooser(_))) {
@@ -1597,6 +1640,7 @@ impl Runtime {
                 Some(Card::Cover(card)) => card.name.clone(),
                 Some(Card::Alarm(card)) => card.name.clone(),
                 Some(Card::Face(card)) => card.name.clone(),
+                Some(Card::Focus(card)) => screens::card_name_or(card),
                 Some(Card::Unknown) | None => String::new(),
             },
             None => String::new(),
@@ -1619,6 +1663,8 @@ impl Runtime {
             Card::Media(card) => card.progress(unix_now()).map(|done| (done * screens::PROGRESS_WIDTH) as u32),
             // A face's clock moves on with the minute.
             Card::Face(_) => Some((unix_now() / 60.0) as u32),
+            // The Focus card's minute and state.
+            Card::Focus(_) => self.focus_at().map(|at| at.tile_key()),
             _ => None,
         };
         Some(Drawn { card: Some(card.clone()), done: self.machine.ran.is_some_and(|(ran, _)| ran == slot), progress })
@@ -1697,6 +1743,11 @@ impl Runtime {
                             now: unix_now() as i64 }
     }
 
+    /// The Focus card's timer as it draws now, if there's a Focus card.
+    fn focus_at(&self) -> Option<screens::FocusAt<'_>> {
+        self.machine.focus_card().map(|_| focus_at(&self.machine))
+    }
+
     /// Draws card `at` (wrapping round the deck) if it isn't yet.
     fn prepare(&mut self, at: i64) {
         self.prepare_key(self.key(at));
@@ -1727,6 +1778,7 @@ impl Runtime {
             Some(Card::Cover(card)) => Screen::CoverCard { card },
             Some(Card::Alarm(card)) => Screen::AlarmCard { card },
             Some(Card::Face(card)) => Screen::Glance { at: self.face_at(card) },
+            Some(Card::Focus(card)) => Screen::Focus { card, at: focus_at(&self.machine), opened: false, far: false },
             Some(Card::Unknown) => return,
             None => Screen::SettingsCard,
         };
@@ -1903,6 +1955,9 @@ impl Runtime {
                     self.beeper.click_low();
                 }
             }
+            Effect::FocusChanged => self.focus_dirty = true,
+            Effect::FocusEvent(happened) => self.sender.focus_event(happened.name()),
+            Effect::FocusTones(count, rising) => self.beeper.tones(count, rising),
             Effect::Chime => {
                 if self.sender.clicks() {
                     self.beeper.chime();
@@ -2158,6 +2213,15 @@ impl Runtime {
                 Card::Alarm(card) => Screen::AlarmView { card, now: unix_now(), note: alarm_note(machine) },
                 _ => return None,
             },
+            Mode::FocusView { slot } => match card(*slot)? {
+                Card::Focus(card) => Screen::Focus { card, at: focus_at(machine), opened: true, far: false },
+                _ => return None,
+            },
+            // Across the room while anything runs on the Focus card: its minutes.
+            Mode::Glance if machine.focus.active() && machine.focus_card().is_some() => {
+                let (_, card) = machine.focus_card()?;
+                Screen::Focus { card, at: focus_at(machine), opened: false, far: true }
+            }
             Mode::AlarmPad { slot, arm, at, entered } => match card(*slot)? {
                 Card::Alarm(card) => {
                     let now = Instant::now();
@@ -2219,6 +2283,7 @@ impl Runtime {
             Screen::NestSet { nest, .. } => nest.card.name.clone(),
             Screen::AlarmView { card, .. } => card.name.clone(),
             Screen::ActionCard { card, .. } => card.name.clone(),
+            Screen::Focus { card, .. } => screens::card_name_or(card),
             _ => String::new(),
         };
         // What each list is on now, so the menu says before it opens.
@@ -2612,7 +2677,7 @@ fn depth(mode: &Mode, machine: &Machine) -> u8 {
     match mode {
         Mode::LightList { .. } | Mode::Dial { .. } | Mode::Volume { .. } | Mode::Camera { .. }
         | Mode::OptionList { .. } | Mode::CoverSet { .. } | Mode::Settings { .. }
-        | Mode::AlarmView { .. } | Mode::ActionView { .. } | Mode::FaceView { .. } => 1,
+        | Mode::AlarmView { .. } | Mode::ActionView { .. } | Mode::FaceView { .. } | Mode::FocusView { .. } => 1,
         // A lamp's own card opens straight to its dimmer; a room's, from its list.
         Mode::LightDim { slot, .. } => match machine.cards.cards.get(*slot) {
             Some(Card::Lights(card)) if card.lights.len() > 1 => 2,
@@ -2977,6 +3042,10 @@ fn menu_item(action: Action, now: Option<String>) -> (String, String, String) {
         Action::Run => ("mdi:play", tr!("menu.run"), tr!("menu.run_hint")),
         // Named by its face (face_item); this only if it went meanwhile.
         Action::Face(_) => ("mdi:play", tr!("menu.run"), tr!("menu.face_hint")),
+        Action::FocusSkip => ("mdi:skip-next", tr!("menu.focus_skip"), tr!("menu.focus_skip_hint")),
+        Action::FocusStop => ("mdi:stop", tr!("menu.focus_stop"), tr!("menu.focus_stop_hint")),
+        Action::FocusBusy(true) => ("mdi:minus-circle", tr!("menu.focus_busy"), tr!("menu.focus_busy_hint")),
+        Action::FocusBusy(false) => ("mdi:minus-circle", tr!("menu.focus_end_busy"), tr!("menu.focus_end_busy_hint")),
         Action::Choose(list) => {
             let under = match now {
                 Some(now) => tr!("menu.choose_now", now = now),
@@ -2999,6 +3068,15 @@ fn face_item(action: &model::FaceAction) -> (String, String, String) {
     };
     let icon = if action.icon.is_empty() { icon.to_owned() } else { action.icon.clone() };
     (icon, name, under.to_owned())
+}
+
+/// The Focus card's timer as it draws now: Home Assistant's clock, if it
+/// sent the glance's, for when a block ends.
+fn focus_at(machine: &Machine) -> screens::FocusAt<'_> {
+    let glance = machine.cards.glance.as_ref();
+    let offset = glance.map_or_else(|| i64::from(chrono::Local::now().offset().local_minus_utc()), |g| g.offset);
+    screens::FocusAt { focus: &machine.focus, plan: machine.plan(), now: unix_now(), offset,
+                       clock: glance.map(|g| g.clock).unwrap_or_default() }
 }
 
 /// What Home Assistant last said of an alarm command, while it shows.
@@ -3440,6 +3518,50 @@ mod shots {
         let mut dial = load("9-ac-away");
         motion::press(&mut dial, motion::Pressed::Screen);
         save_panel(&dial, "m-press-dial");
+    }
+
+    /// The Focus card's screens, in the built-in fonts:
+    /// `UNFR0ZEN_UI_SHOTS=dir cargo test -p nestlocal focus_shots -- --ignored`
+    /// (UNFR0ZEN_UI_THEME=nest for the Nest's look).
+    #[test]
+    #[ignore]
+    fn focus_shots() {
+        let out = std::env::var("UNFR0ZEN_UI_SHOTS").expect("set UNFR0ZEN_UI_SHOTS");
+        let fonts = paint::Fonts::built_in();
+        paint::set_theme(if std::env::var("UNFR0ZEN_UI_THEME").is_ok_and(|t| t == "nest") { paint::Theme::Nest } else { paint::Theme::Fledge });
+        let card: model::FocusCard = serde_json::from_str(r#"{"id":"fledge_focus","name":"Focus"}"#).unwrap();
+        let plan = card.plan();
+        let t = 1_800_000_000.0;
+        let ready = focus::Focus::default();
+        let mut running = focus::Focus::default();
+        running.start(&plan, t - 378.0);
+        running.done = 1;
+        let mut paused = running.clone();
+        paused.pause(t);
+        let mut done = running.clone();
+        done.done = 2;
+        done.tick(&plan, running.ends.unwrap());
+        done.today = 3;
+        let mut on_break = done.clone();
+        on_break.hold(&plan, t - 48.0);
+        let mut busy = running.clone();
+        busy.start_busy(true, "In a call", t - 1930.0);
+        let shots: [(&str, &focus::Focus, bool, bool); 8] = [("1-ready", &ready, true, false), ("2-focusing", &running, true, false),
+            ("3-paused", &paused, true, false), ("4-done", &done, true, false), ("5-break", &on_break, true, false),
+            ("6-busy", &busy, true, false), ("7-far", &running, false, true), ("8-tile", &running, false, false)];
+        for (name, focus, opened, far) in shots {
+            let at = screens::FocusAt { focus, plan, now: t, offset: 0, clock: Default::default() };
+            let screen = Screen::Focus { card: &card, at, opened, far };
+            save(&screens::draw(&fonts, &screen, None), &format!("{out}/focus-{name}.png"));
+        }
+        let mut machine = Machine::new(Instant::now());
+        machine.focus = running.clone();
+        let items: Vec<(String, String, String)> = [Action::Back, Action::FocusSkip, Action::FocusStop].iter()
+            .map(|a| menu_item(*a, None)).collect();
+        let options: Vec<screens::Opt> = items.iter().map(|(icon, name, under)| screens::Opt { icon, name, under }).collect();
+        let at = screens::FocusAt { focus: &running, plan, now: t, offset: 0, clock: Default::default() };
+        let accent = screens::accent(&Screen::Focus { card: &card, at, opened: true, far: false });
+        save(&screens::options(&fonts, "Focus", &options, 1, accent), &format!("{out}/focus-9-menu.png"));
     }
 
     #[test]

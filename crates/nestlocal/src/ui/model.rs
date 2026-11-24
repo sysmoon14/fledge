@@ -477,6 +477,9 @@ pub enum Card {
     /// A glance face (protocol 13): something to look at, drawn as the
     /// glance is, with actions round its ring.
     Face(FaceCard),
+    /// The Focus card (protocol 16): Pomodoro blocks and busy, its timer
+    /// kept on the Nest (focus.rs).
+    Focus(FocusCard),
     /// A kind from a newer Fledge: left out rather than failing the rest.
     #[serde(other)]
     Unknown,
@@ -508,6 +511,60 @@ pub struct FaceCard {
     pub actions: Vec<FaceAction>,
     #[serde(default)]
     hold: Option<usize>,
+}
+
+/// The Focus card: no entity of Home Assistant's, its timer on the Nest.
+/// Its settings: lengths in minutes, focus blocks to the long break, the
+/// next block straight on (else it waits for a hold), the screen kept on
+/// and woken to it while anything runs, and the tones a block ends with
+/// ("three", "one" or "off").
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct FocusCard {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "focus_length")]
+    pub focus: u32,
+    #[serde(default = "short_break")]
+    pub short_break: u32,
+    #[serde(default = "long_break")]
+    pub long_break: u32,
+    #[serde(default = "focus_every")]
+    pub every: u32,
+    #[serde(default)]
+    pub straight_on: bool,
+    #[serde(default = "yes")]
+    pub keep_on: bool,
+    #[serde(default = "yes")]
+    pub wake_to: bool,
+    #[serde(default)]
+    pub sound: String,
+}
+
+fn focus_length() -> u32 { 25 }
+fn short_break() -> u32 { 5 }
+fn long_break() -> u32 { 15 }
+fn focus_every() -> u32 { 4 }
+
+impl FocusCard {
+    pub fn plan(&self) -> super::focus::Plan {
+        super::focus::Plan {
+            focus: self.focus.clamp(super::focus::LENGTH_MIN, super::focus::LENGTH_MAX),
+            short_break: self.short_break.clamp(1, 60),
+            long_break: self.long_break.clamp(1, 120),
+            every: self.every.clamp(1, 12),
+            straight_on: self.straight_on,
+        }
+    }
+
+    /// How many tones a block ends with.
+    pub fn tones(&self) -> u8 {
+        match self.sound.as_str() {
+            "off" => 0,
+            "one" => 1,
+            _ => 3,
+        }
+    }
 }
 
 /// The most actions a face has round its ring, after Back.

@@ -12,7 +12,8 @@
 
 use std::time::{Duration, Instant};
 
-use super::model::{past, Ring, AlarmCard, AlarmResult, Alert, Card, Cards, ClimateCard, ClimateChoice, Code, Command, Far, Glance, Near, Nest, Wake};
+use super::focus::{Focus, Happened, Order, Phase, Plan};
+use super::model::{past, Ring, AlarmCard, AlarmResult, Alert, Card, Cards, ClimateCard, ClimateChoice, Code, Command, Far, FocusCard, Glance, Near, Nest, Wake};
 use crate::motion::Sensor;
 use crate::logf;
 use crate::tr;
@@ -381,6 +382,11 @@ pub enum Action {
     Run,
     /// A glance face's action, by its place among them: run, or switched.
     Face(usize),
+    /// The Focus card's: on past the block on show, back to ready, and
+    /// busy started (true) or ended.
+    FocusSkip,
+    FocusStop,
+    FocusBusy(bool),
 }
 
 /// The off thermostat's prompt, as the Nest's words, and its choices: on
@@ -464,6 +470,10 @@ pub enum Mode {
     FaceView { slot: usize },
     /// An alarm opened: its state, a countdown while one runs.
     AlarmView { slot: usize },
+    /// The Focus card opened: its timer. A hold starts, pauses or carries
+    /// on, the ring sets the length (or a minute on or off a block), a
+    /// press its options.
+    FocusView { slot: usize },
     /// Its options round the ring (alarm_options): Back first, then its
     /// modes to arm to, Disarm or Cancel, as its state has them.
     AlarmModes { slot: usize, selected: usize },
@@ -491,7 +501,7 @@ impl Mode {
             | Mode::LightHue { slot, .. } | Mode::Camera { slot }
             | Mode::Volume { slot, .. } | Mode::OptionList { slot, .. } | Mode::Members { slot, .. } | Mode::Sources { slot, .. }
             | Mode::CoverSet { slot, .. } | Mode::ActionView { slot } | Mode::FaceView { slot } | Mode::AlarmView { slot } | Mode::AlarmPad { slot, .. }
-            | Mode::AlarmModes { slot, .. }
+            | Mode::AlarmModes { slot, .. } | Mode::FocusView { slot }
             | Mode::AlarmOpen { slot, .. } => Some(Slot::Card(*slot)),
             Mode::Dial { of, .. } | Mode::DialList { of, .. } | Mode::Prompt { of, .. } => Some(of.slot()),
             Mode::Menu { view, .. } => view.card_slot(),
@@ -538,6 +548,12 @@ pub enum Effect {
     NestDial(bool),
     /// The Fledge theme (true), or the Nest's: kept for the next start.
     Theme(bool),
+    /// The Focus card's timer changed: kept, and told to Home Assistant.
+    FocusChanged,
+    /// Something happened to it, for Home Assistant's automations.
+    FocusEvent(Happened),
+    /// A block ran out: this many tones, rising for focus done.
+    FocusTones(u8, bool),
     Send(Command),
 }
 
@@ -647,6 +663,12 @@ pub struct Machine {
     /// What was lately sent each device (EXPECT), to see a change made
     /// elsewhere at once.
     trails: Vec<Trail>,
+    /// The Focus card's timer (focus.rs), the runtime's to load and keep.
+    pub focus: Focus,
+    /// The wall clock (Unix seconds) at an instant: the timer runs by it.
+    wall: (Instant, f64),
+    /// Its seconds as last drawn, for the next to show.
+    focus_drawn: Option<i64>,
 }
 
 impl Machine {
@@ -659,12 +681,135 @@ impl Machine {
             rests: false, near_at: None, kept_dark: false, kept_on: false, wake_moved: false, journey: None, cards_settled: true, floor: None, push: None, alarm_states: Default::default(), alarm_takeover: None,
             alarm_code: None, alarm_arming: None, alarm_wait: None, alarm_note: None, alarm_locked: None,
             alarm_open: Vec::new(), alarm_drawn: None, expected: Vec::new(), reported: Cards::default(), trails: Vec::new(),
+            focus: Focus::default(), wall: (now, 1_800_000_000.0), focus_drawn: None,
         }
     }
 
     /// How long since the last turn or press.
     pub fn idle(&self, now: Instant) -> Duration {
         now.duration_since(self.last_input)
+    }
+
+    /// The wall clock now is `unix` (Unix seconds), as the runtime reads it.
+    pub fn set_wall(&mut self, now: Instant, unix: f64) {
+        self.wall = (now, unix);
+    }
+
+    /// Unix seconds at `at`.
+    pub fn unix(&self, at: Instant) -> f64 {
+        let (then, unix) = self.wall;
+        if at >= then { unix + at.duration_since(then).as_secs_f64() } else { unix - then.duration_since(at).as_secs_f64() }
+    }
+
+    /// The Focus card, and where it is among the cards.
+    pub fn focus_card(&self) -> Option<(usize, &FocusCard)> {
+        self.cards.cards.iter().enumerate().find_map(|(slot, card)| match card {
+            Card::Focus(card) => Some((slot, card)),
+            _ => None,
+        })
+    }
+
+    /// The timer's settings: its card's, or the usual ones without it.
+    pub fn plan(&self) -> Plan {
+        self.focus_card().map(|(_, card)| card.plan()).unwrap_or_default()
+    }
+
+    /// While anything runs on the Focus card and it asks to keep the screen
+    /// on: its place.
+    fn focus_keeps(&self) -> Option<usize> {
+        self.focus_card().filter(|(_, card)| card.keep_on && self.focus.active()).map(|(slot, _)| slot)
+    }
+
+    /// What waking shows: the Focus card while anything runs on it, if it
+    /// asks; else what Home Assistant chose.
+    fn wake_to(&self) -> Wake {
+        match self.focus_card() {
+            Some((slot, card)) if card.wake_to && self.focus.active() => Wake::Card(slot),
+            _ => self.cards.wake(),
+        }
+    }
+
+    /// The timer changed (`happened`, if anything to tell): kept, told,
+    /// drawn. Starting or ending, what waking shows may move with it.
+    fn focus_changed(&mut self, was_active: bool, happened: Option<Happened>, out: &mut Vec<Effect>) {
+        if let Some(happened) = happened {
+            logf!("ui: focus: {}", happened.name());
+            out.push(Effect::FocusEvent(happened));
+        }
+        out.push(Effect::FocusChanged);
+        self.dirty = true;
+        self.focus_drawn = None;
+        if was_active != self.focus.active() && self.focus_card().is_some_and(|(_, c)| c.wake_to) && !self.cards.cards.is_empty() {
+            self.wake_moved = true;
+        }
+    }
+
+    /// Home Assistant's command for the timer (<base>/set/focus).
+    pub fn focus_order(&mut self, order: &Order, now: Instant, out: &mut Vec<Effect>) {
+        let (plan, unix, was) = (self.plan(), self.unix(now), self.focus.active());
+        match order.apply(&mut self.focus, &plan, unix) {
+            Ok((happened, changed)) if changed || happened.is_some() => self.focus_changed(was, happened, out),
+            Ok(_) => {}
+            Err(e) => logf!("ui: focus: {e}"),
+        }
+    }
+
+    /// The Focus card's options, as its timer has them: Back first.
+    fn focus_actions(&self) -> Vec<Action> {
+        let mut actions = vec![Action::Back];
+        match self.focus.phase {
+            Phase::Ready => actions.push(Action::FocusBusy(true)),
+            Phase::Busy => actions.push(Action::FocusBusy(false)),
+            // A focus block waiting: nothing to skip to but its break.
+            Phase::Focus if self.focus.waiting => actions.push(Action::FocusStop),
+            _ => actions.extend([Action::FocusSkip, Action::FocusStop]),
+        }
+        actions
+    }
+
+    /// The clock moved on: a new day, a block run out (its tones, and its
+    /// card shown, woken), and the card's seconds drawn as they go.
+    fn focus_tick(&mut self, now: Instant, lit: bool, out: &mut Vec<Effect>) {
+        let unix = self.unix(now);
+        let offset = self.cards.glance.as_ref().map_or(0, |g| g.offset);
+        if self.focus.new_day((unix as i64 + offset).div_euclid(86_400)) {
+            out.push(Effect::FocusChanged);
+        }
+        let (plan, was) = (self.plan(), self.focus.active());
+        if let Some((happened, late)) = self.focus.tick(&plan, unix) {
+            self.focus_changed(was, Some(happened), out);
+            let tones = self.focus_card().map_or(3, |(_, card)| card.tones());
+            if !late && tones > 0 {
+                out.push(Effect::FocusTones(tones, happened == Happened::FocusDone));
+            }
+            // Its card, to say so: woken for it, unless something that
+            // needs whoever's there shows.
+            let slot = self.focus_card().map(|(slot, _)| slot);
+            let free = !matches!(self.mode, Mode::Idle | Mode::Native | Mode::Alert { .. }) && !self.alarm_urgent();
+            if let (Some(slot), true, false) = (slot, free, late) {
+                if !lit {
+                    out.push(Effect::WakeDisplay);
+                    self.lighting = Some(now + LIGHTING);
+                }
+                self.last_input = now;
+                self.journey = None;
+                self.go(Mode::FocusView { slot }, out);
+            }
+        }
+        // Its seconds, on screen as they go.
+        let shows = match &self.mode {
+            Mode::FocusView { .. } => true,
+            Mode::Glance => self.focus.active() && self.focus_card().is_some(),
+            _ => false,
+        };
+        let moving = self.focus.running() || self.focus.phase == Phase::Busy;
+        if shows && moving {
+            let second = unix.floor() as i64;
+            if self.focus_drawn != Some(second) {
+                self.focus_drawn = Some(second);
+                self.dirty = true;
+            }
+        }
     }
 
     /// Whether the thermostat is our own card, rather than Nest's dial.
@@ -813,6 +958,7 @@ impl Machine {
             }
             Mode::ActionView { slot } => matches!(cards.cards.get(*slot), Some(Card::Action(_))),
             Mode::FaceView { slot } => matches!(cards.cards.get(*slot), Some(Card::Face(_))),
+            Mode::FocusView { slot } => matches!(cards.cards.get(*slot), Some(Card::Focus(_))),
             Mode::Members { slot, .. } => matches!(cards.cards.get(*slot), Some(Card::Lights(c)) if !c.members.is_empty()),
             Mode::LightDim { slot, light, .. } | Mode::LightWarmth { slot, light, .. }
             | Mode::LightHue { slot, light, .. } => match cards.cards.get(*slot) {
@@ -1168,7 +1314,7 @@ impl Machine {
                     Mode::Menu { .. } => MENU_STEP,
                     Mode::LightList { .. } | Mode::OptionList { .. } | Mode::DialList { .. } | Mode::Members { .. }
                     | Mode::Sources { .. } | Mode::Settings { .. } | Mode::ThemePick { .. } | Mode::Prompt { .. }
-                    | Mode::AlarmPad { .. } | Mode::AlarmModes { .. } => ROW_STEP,
+                    | Mode::AlarmPad { .. } | Mode::AlarmModes { .. } | Mode::FocusView { .. } => ROW_STEP,
                     Mode::Dial { .. } | Mode::SettingSet { .. } => CLIMATE_STEP,
                     _ => VALUE_STEP,
                 };
@@ -1216,7 +1362,7 @@ impl Machine {
             || self.alarm_urgent() || (matches!(self.mode, Mode::Chooser(_)) && self.turn != 0) {
             return;
         }
-        let shows = match self.cards.wake() {
+        let shows = match self.wake_to() {
             Wake::Card(slot) => self.mode.card_slot() == Some(Slot::Card(slot))
                 || self.mode == Mode::Chooser(self.place(Slot::Card(slot))),
             Wake::Thermostat => matches!(self.mode, Mode::Dial { of: Dial::Nest, .. }),
@@ -1251,7 +1397,7 @@ impl Machine {
             return;
         }
         self.last_input = now;
-        let target = match self.cards.wake() {
+        let target = match self.wake_to() {
             Wake::Card(slot) => self.place(Slot::Card(slot)),
             Wake::Thermostat | Wake::Chooser => self.place(Slot::Thermostat),
         };
@@ -1272,7 +1418,7 @@ impl Machine {
 
     /// What waking shows, from wherever the screen is.
     fn show_wake(&mut self, out: &mut Vec<Effect>) {
-        match self.cards.wake() {
+        match self.wake_to() {
             Wake::Chooser => {
                 self.hint = true;
                 self.go(Mode::Chooser(self.place(Slot::Thermostat)), out);
@@ -1463,6 +1609,16 @@ impl Machine {
             }
             // A face open: the ring does nothing (it has no value to set).
             Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } | Mode::FaceView { .. } => return,
+            // The Focus card: the length to start, or a minute a step on or
+            // off a block; nothing while busy or waiting.
+            Mode::FocusView { .. } => {
+                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.active());
+                if self.focus.turn(&plan, steps, unix) {
+                    out.push(Effect::Click);
+                    self.focus_changed(was, None, out);
+                }
+                return;
+            }
             _ => {}
         }
         out.push(Effect::Click);
@@ -1578,7 +1734,8 @@ impl Machine {
                 self.mode = Mode::AlarmModes { slot, selected: (selected as i32 + steps).clamp(0, last) as usize };
             }
             Mode::Idle | Mode::Native | Mode::Alert { .. } | Mode::Camera { .. } | Mode::Glance
-            | Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } | Mode::FaceView { .. } => {}
+            | Mode::AlarmView { .. } | Mode::AlarmOpen { .. } | Mode::ActionView { .. } | Mode::FaceView { .. }
+            | Mode::FocusView { .. } => {}
         }
         self.dirty = true;
     }
@@ -1625,6 +1782,7 @@ impl Machine {
                     Some(Card::Alarm(_)) => Mode::AlarmView { slot },
                     // A glance face: full screen, to look at.
                     Some(Card::Face(_)) => Mode::FaceView { slot },
+                    Some(Card::Focus(_)) => Mode::FocusView { slot },
                     Some(Card::Unknown) | None => return,
                 };
                 self.go(mode, out);
@@ -1771,6 +1929,10 @@ impl Machine {
             }
             view @ Mode::ActionView { .. } => {
                 self.mode = Mode::Menu { view: Box::new(view), actions: vec![Action::Back, Action::Run], selected: 0 };
+            }
+            view @ Mode::FocusView { .. } => {
+                let actions = self.focus_actions();
+                self.mode = Mode::Menu { view: Box::new(view), actions, selected: 0 };
             }
             view @ Mode::FaceView { slot } => {
                 let count = match self.card(slot) {
@@ -2216,6 +2378,17 @@ impl Machine {
                 self.face_action(slot, action, out);
                 self.mode = view;
             }
+            (Action::FocusSkip | Action::FocusStop | Action::FocusBusy(_), view @ Mode::FocusView { .. }) => {
+                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.active());
+                let happened = match action {
+                    Action::FocusSkip => self.focus.skip(&plan, unix),
+                    Action::FocusStop => self.focus.stop(),
+                    Action::FocusBusy(true) => self.focus.start_busy(false, "", unix),
+                    _ => self.focus.end_busy(false, unix),
+                };
+                self.focus_changed(was, happened, out);
+                self.mode = view;
+            }
             (Action::Open | Action::Close, view @ Mode::CoverSet { slot, .. }) => {
                 if let Some(Card::Cover(card)) = self.cards.cards.get_mut(slot) {
                     let (id, open) = (card.id.clone(), action == Action::Open);
@@ -2281,6 +2454,13 @@ impl Machine {
                 };
                 let Some(action) = hold else { return };
                 self.face_action(slot, action, out);
+                true
+            }
+            // Held on the Focus card: starts, pauses, carries on, ends busy.
+            Mode::FocusView { .. } => {
+                let (plan, unix, was) = (self.plan(), self.unix(self.last_input), self.focus.active());
+                let happened = self.focus.hold(&plan, unix);
+                self.focus_changed(was, happened, out);
                 true
             }
             Mode::LightList { slot, selected } => self.toggle(slot, Some(selected), out),
@@ -2821,6 +3001,8 @@ impl Machine {
     /// whether nlclient shows its home dial (only asked for when it matters).
     pub fn tick(&mut self, now: Instant, lit: bool, home_dial: &mut dyn FnMut() -> bool, out: &mut Vec<Effect>) {
         self.alarm_tick(now, lit, out);
+        // The timer runs whatever shows (a block ends while Doom plays too).
+        self.focus_tick(now, lit, out);
         let ran_out: Vec<String> = self.expected.iter().filter(|(_, at)| now.duration_since(*at) >= EXPECT)
             .filter_map(|(c, _)| c.payload()["id"].as_str().map(str::to_owned)).collect();
         self.expected.retain(|(_, at)| now.duration_since(*at) < EXPECT);
@@ -2911,6 +3093,13 @@ impl Machine {
                 }
                 return;
             }
+            // The Focus card keeps the screen on while anything runs on it.
+            Mode::Home if lit && self.turn == 0 && self.focus_keeps().is_some() => {
+                let slot = self.focus_keeps().unwrap_or(0);
+                self.last_input = now;
+                self.go(Mode::FocusView { slot }, out);
+                return;
+            }
             Mode::Home if self.kept_on && lit => {
                 self.show_kept(now, lit, out);
                 return;
@@ -2938,9 +3127,15 @@ impl Machine {
         // Kept on with what waking shows for across the room: that stays,
         // but for a camera's full screen, whose pictures don't run all day.
         let kept = self.kept_on && self.cards.far() == Far::Wake;
+        let focus = self.focus_keeps();
         let back = match self.mode {
             // An alarm coming in or going off stays until it's dealt with.
             _ if urgent => None,
+            // While the Focus card keeps the screen on, it stays, and
+            // anything else left alone goes back to it.
+            Mode::FocusView { .. } | Mode::Glance | Mode::Alert { .. } if focus.is_some() => None,
+            _ if focus.is_some() && idle >= timeout => focus.map(|slot| Mode::FocusView { slot }),
+            _ if focus.is_some() => None,
             Mode::Glance if idle >= GLANCE_IDLE && !self.holds_screen() && !self.kept_on => Some(Mode::Home),
             Mode::Glance | Mode::Alert { .. } => None,
             Mode::Camera { slot } if kept && idle >= CAMERA_IDLE => Some(Mode::Chooser(self.place(Slot::Card(slot)))),
@@ -3391,6 +3586,123 @@ mod tests {
         assert_eq!(rig.machine.mode, dimmer, "taken back by Home Assistant: the same");
         rig.wait(CARD_IDLE);
         assert_ne!(rig.machine.mode, dimmer, "then it times out as usual");
+    }
+
+    fn focus_rig(extra: &str) -> Rig {
+        Rig::with(Cards::parse(format!(r#"{{"cards":[
+            {{"kind":"focus","id":"fledge_focus","name":"Focus"{extra}}},
+            {{"kind":"media","id":"media_player.speaker","name":"Speaker","state":"playing","volume":30}}],
+            "card_idle":20}}"#).as_bytes()).unwrap())
+    }
+
+    /// Woken onto the cards, turned past the thermostat and opened.
+    fn open_focus(rig: &mut Rig) {
+        rig.lit = false;
+        rig.press();
+        rig.lit = true;
+        rig.turn(CARD_STEP);
+        rig.press();
+    }
+
+    fn focus_events(effects: &[Effect]) -> Vec<Happened> {
+        effects.iter().filter_map(|e| if let Effect::FocusEvent(h) = e { Some(*h) } else { None }).collect()
+    }
+
+    #[test]
+    fn the_focus_card_starts_pauses_and_turns_its_time_from_its_own_screen() {
+        let mut rig = focus_rig("");
+        open_focus(&mut rig);
+        assert_eq!(rig.machine.mode, Mode::FocusView { slot: 0 }, "opened from the cards; nothing started");
+        assert_eq!(rig.machine.focus.phase, Phase::Ready);
+        rig.turn(ROW_STEP);
+        assert_eq!(rig.machine.focus.focus_minutes(&rig.machine.plan()), 30, "ready: the ring sets the length");
+        assert_eq!(focus_events(&rig.long()), vec![Happened::FocusStarted], "held: started");
+        assert_eq!(rig.machine.focus.length, 30.0 * 60.0);
+        let unix = rig.machine.unix(rig.now);
+        rig.turn(-ROW_STEP * 2);
+        assert!((rig.machine.focus.left_at(unix) - 28.0 * 60.0).abs() < 1.0, "running: a minute a step");
+        assert_eq!(focus_events(&rig.long()), vec![Happened::Paused]);
+        assert_eq!(focus_events(&rig.long()), vec![Happened::Resumed]);
+        rig.press();
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. }
+                         if *actions == vec![Action::Back, Action::FocusSkip, Action::FocusStop]));
+        rig.rows(2);
+        assert_eq!(focus_events(&rig.press()), vec![Happened::Stopped], "its Stop");
+        assert_eq!(rig.machine.mode, Mode::FocusView { slot: 0 });
+        rig.press();
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. }
+                         if *actions == vec![Action::Back, Action::FocusBusy(true)]), "ready: Busy to start by hand");
+    }
+
+    #[test]
+    fn a_focus_block_running_keeps_its_card_on_screen_and_says_when_it_ends() {
+        let mut rig = focus_rig("");
+        open_focus(&mut rig);
+        rig.long();
+        // Left alone: no time-out while it runs.
+        rig.wait(Duration::from_secs(60));
+        assert_eq!(rig.machine.mode, Mode::FocusView { slot: 0 }, "it stays on screen");
+        // Another card left alone comes back to it.
+        rig.press();
+        rig.press();
+        rig.turn(CARD_STEP);
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Volume { slot: 1, value: 30 });
+        rig.wait(Duration::from_secs(21));
+        assert_eq!(rig.machine.mode, Mode::FocusView { slot: 0 }, "left alone, back to the Focus card");
+        // Put away and dark: when it runs out, it wakes to say so.
+        rig.machine.mode = Mode::Home;
+        rig.lit = false;
+        let mut out = vec![];
+        while focus_events(&out).is_empty() && out.len() < 100_000 {
+            rig.now += Duration::from_secs(1);
+            out.extend(rig.tick());
+        }
+        // Woken for it, the display lights.
+        rig.lit = true;
+        assert_eq!(focus_events(&out), vec![Happened::FocusDone]);
+        assert!(out.contains(&Effect::FocusTones(3, true)), "three rising tones");
+        assert!(out.contains(&Effect::WakeDisplay));
+        assert_eq!(rig.machine.mode, Mode::FocusView { slot: 0 });
+        assert!(rig.machine.focus.waiting, "the break waits for a hold");
+        rig.lit = true;
+        assert_eq!(focus_events(&rig.long()), vec![Happened::BreakStarted]);
+    }
+
+    #[test]
+    fn while_a_block_runs_waking_shows_the_focus_card_and_after_what_home_assistant_chose() {
+        let mut rig = focus_rig(r#","sound":"off""#);
+        assert_eq!(rig.machine.wake_to(), Wake::Chooser);
+        let mut out = vec![];
+        rig.machine.focus_order(&Order::parse(b"start").unwrap(), rig.now, &mut out);
+        assert_eq!(focus_events(&out), vec![Happened::FocusStarted]);
+        assert_eq!(rig.machine.wake_to(), Wake::Card(0));
+        let out = rig.wait(Duration::from_secs(25 * 60 + 1));
+        assert!(!out.iter().any(|e| matches!(e, Effect::FocusTones(..))), "sound off: no tones");
+        let mut out = vec![];
+        rig.machine.focus_order(&Order::parse(b"stop").unwrap(), rig.now, &mut out);
+        assert_eq!(rig.machine.wake_to(), Wake::Chooser);
+    }
+
+    #[test]
+    fn busy_from_home_assistant_pauses_the_block_and_its_entities_end_only_their_own() {
+        let mut rig = focus_rig("");
+        let mut out = vec![];
+        rig.machine.focus_order(&Order::parse(b"start").unwrap(), rig.now, &mut out);
+        rig.machine.focus_order(&Order::parse(br#"{"command":"busy_on","auto":true,"status":"In a call"}"#).unwrap(), rig.now, &mut out);
+        assert_eq!(rig.machine.focus.phase, Phase::Busy);
+        // Woken to it (it's what waking shows while busy); the ring does
+        // nothing while busy, a press its options.
+        open_focus(&mut rig);
+        assert!(matches!(&rig.machine.mode, Mode::Menu { actions, .. }
+                         if *actions == vec![Action::Back, Action::FocusBusy(false)]), "busy: End busy");
+        rig.press();
+        assert_eq!(rig.machine.mode, Mode::Chooser(1), "its Back: to the cards");
+        let mut out = vec![];
+        rig.machine.focus_order(&Order::parse(br#"{"command":"busy_off","auto":true}"#).unwrap(), rig.now, &mut out);
+        assert_eq!(focus_events(&out), vec![Happened::BusyEnded]);
+        assert_eq!(rig.machine.focus.phase, Phase::Focus, "the block carries on");
+        assert!(rig.machine.focus.running());
     }
 
     #[test]

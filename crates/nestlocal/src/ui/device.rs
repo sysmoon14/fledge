@@ -182,6 +182,24 @@ impl Beeper {
         let _ = file.write_all(&[encode(EV_SND, SND_TONE, 0), encode(0, 0, 0)].concat());
     }
 
+    /// A Focus block run out: `count` tones (up to three), rising for a
+    /// focus block done (time for a break), falling for a break over.
+    pub fn tones(&mut self, count: u8, rising: bool) {
+        let Some(file) = &mut self.0 else { return };
+        let notes = if rising { [1047, 1319, 1568] } else { [1568, 1319, 1047] };
+        let count = usize::from(count.min(3));
+        let notes = if count == 1 { &notes[1..2] } else { &notes[..count] };
+        for (i, &tone) in notes.iter().enumerate() {
+            if i > 0 {
+                let _ = file.write_all(&[encode(EV_SND, SND_TONE, 0), encode(0, 0, 0)].concat());
+                std::thread::sleep(Duration::from_millis(70));
+            }
+            let _ = file.write_all(&[encode(EV_SND, SND_TONE, tone), encode(0, 0, 0)].concat());
+            std::thread::sleep(Duration::from_millis(if i + 1 == notes.len() { 260 } else { 150 }));
+        }
+        let _ = file.write_all(&[encode(EV_SND, SND_TONE, 0), encode(0, 0, 0)].concat());
+    }
+
     pub fn click(&mut self) {
         self.tick(2000, 3);
     }
